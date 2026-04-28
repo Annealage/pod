@@ -1,0 +1,39 @@
+# Annealage Pod pinned dependency versions.
+#
+# Re-pin both ESP-IDF and MicroPython deliberately on each rev cut.
+# Track upstream master between cuts only on development branches.
+
+[esp-idf]
+version = v5.5.1
+commit  = fcae3288
+source  = https://github.com/espressif/esp-idf.git
+host_path = /home/corona/cyd/lvgl-micropython-ref/lvgl_micropython/lib/esp-idf
+notes   = Provisioned during Phase 0.3 spike (research/spi2-swd-benchmark.md).
+          src/tools/setup-idf.sh prefers this checkout if present.
+
+[micropython]
+version = v1.29.0-preview-69-g8a56be666
+commit  = 8a56be66601e5f21f15a76bfc932c9beb8f7cdee
+source  = https://github.com/micropython/micropython.git
+notes   = Submodule at src/micropython/. Latest preview snapshot
+          ahead of v1.28.0; held here pending a v1.29 release tag.
+          USER_C_MODULES + BOARD_DIR hooks present in py/usermod.cmake
+          and ports/esp32/Makefile (verified in Phase 1 P1.1).
+
+[smoke-flash]
+host          = laptop
+target        = esp32-s3 (mpy-dev label)
+target_serial = 5A46090178 (CH340N)
+date          = 2026-04-29
+result        = pass
+notes         = MicroPython 1.29.0-preview boots on UART0 at 115200 8N1.
+                Octal PSRAM detected, gc.mem_free() reports ~8.3 MiB
+                free immediately after boot. CPU clock 240 MHz.
+                Frozen `annealage_pod` package imports cleanly;
+                annealage_pod.boot.up() prints "annealage_pod skeleton up" on
+                the console. All four C user modules (usbip, dapprobe,
+                uartbridge, slaveio) import and their start() functions
+                emit ESP_LOGI lines on UART0.
+                Custom partition table accepted by esptool, factory
+                slot ~1.6 MiB used of 2 MiB; ota_0/ota_1/vfs allocated
+                per spec.md §4.2.
