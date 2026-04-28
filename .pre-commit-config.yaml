@@ -1,0 +1,20 @@
+# Pre-commit hooks for annealage-pod.
+#
+# Install with: pre-commit install --hook-type commit-msg
+#
+# The verifygitlog check enforces the MicroPython commit-message format:
+#   <scope>: <Capitalised subject ending in period.>
+#
+#   Optional body wrapped at 75 chars.
+#
+#   Signed-off-by: Your Name <you@example.com>
+
+repos:
+  - repo: local
+    hooks:
+      - id: verifygitlog
+        name: verify git log format
+        entry: tools/verifygitlog.py --check-file
+        language: script
+        stages: [commit-msg]
+        pass_filenames: true

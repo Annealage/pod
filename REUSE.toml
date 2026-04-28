@@ -1,0 +1,19 @@
+version = 1
+
+# Per-file licensing map for Annealage Pod (REUSE 3.0).
+# Authoritative, machine-readable companion to the SPDX headers in source
+# files. Resolves the licence of any path, including files that cannot
+# carry an inline SPDX header (images, JSON, lockfiles, LICENSE itself).
+
+# The whole repository is PolyForm Noncommercial 1.0.0.
+# precedence = "aggregate" means this applies to any file that does not
+# declare its own licensing information via header.
+[[annotations]]
+path = "**/*"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Andrew Leech"
+SPDX-License-Identifier = "PolyForm-Noncommercial-1.0.0"
+
+# Note: src/micropython is a git submodule (a separate repository) and
+# retains its own upstream MIT licence. REUSE does not descend into
+# submodules, so it is intentionally not annotated here.
