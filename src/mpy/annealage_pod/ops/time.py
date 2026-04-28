@@ -1,8 +1,15 @@
 # Annealage Pod: time-sync wrapper.
 #
-# Spec.md §6.3: MP-managed NTP sync via ntptime.settime() against a
+# Spec §6.3: MP-managed NTP sync via ntptime.settime() against a
 # configurable server. Time sync is not required for the annealage_pod to
 # function; before sync, callers should use monotonic uptime.
+#
+# WS-H scope intentionally leaves this as pure MicroPython. The
+# `ntptime` module (frozen in MP's esp32 port) calls
+# `settimeofday()` via mphalport, which is sufficient
+# granularity (seconds) for SWO/INA228 sample stitching. No C shim
+# is added here; the C-shim hook below stays absent so callers see
+# a uniform pure-MP path on every target.
 
 try:
     import ntptime as _ntptime
