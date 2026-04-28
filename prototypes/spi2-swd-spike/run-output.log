@@ -1,0 +1,149 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x158c
+load:0x403c8700,len:0xd24
+load:0x403cb700,len:0x2f34
+entry 0x403c8924
+I (24) boot: ESP-IDF fcae3288 2nd stage bootloader
+I (25) boot: compile time Apr 29 2026 00:41:57
+I (25) boot: Multicore bootloader
+I (25) boot: chip revision: v0.2
+I (28) boot: efuse block revision: v1.3
+I (31) boot.esp32s3: Boot SPI Speed : 80MHz
+I (35) boot.esp32s3: SPI Mode       : DIO
+I (39) boot.esp32s3: SPI Flash Size : 2MB
+I (43) boot: Enabling RNG early entropy source...
+I (47) boot: Partition Table:
+I (50) boot: ## Label            Usage          Type ST Offset   Length
+I (56) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (63) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (69) boot:  2 factory          factory app      00 00 00010000 00100000
+I (76) boot: End of partition table
+I (79) esp_image: segment 0: paddr=00010020 vaddr=3c020020 size=0cc80h ( 52352) map
+I (96) esp_image: segment 1: paddr=0001cca8 vaddr=3fc94c00 size=02bech ( 11244) load
+I (98) esp_image: segment 2: paddr=0001f89c vaddr=40374000 size=0077ch (  1916) load
+I (102) esp_image: segment 3: paddr=00020020 vaddr=42000020 size=1cc68h (117864) map
+I (130) esp_image: segment 4: paddr=0003cc90 vaddr=4037477c size=103a0h ( 66464) load
+I (144) esp_image: segment 5: paddr=0004d038 vaddr=50000000 size=00020h (    32) load
+I (156) boot: Loaded app from partition at offset 0x10000
+I (156) boot: Disabling RNG early entropy source...
+I (166) cpu_start: Multicore app
+I (175) cpu_start: Pro cpu start user code
+I (175) cpu_start: cpu freq: 160000000 Hz
+I (176) app_init: Application information:
+I (176) app_init: Project name:     spi2_swd_spike
+I (180) app_init: App version:      1
+I (183) app_init: Compile time:     Apr 29 2026 00:41:45
+I (188) app_init: ELF file SHA256:  b527a29e5...
+I (193) app_init: ESP-IDF:          fcae3288
+I (197) efuse_init: Min chip rev:     v0.0
+I (201) efuse_init: Max chip rev:     v0.99 
+I (205) efuse_init: Chip rev:         v0.2
+I (209) heap_init: Initializing. RAM available for dynamic allocation:
+I (215) heap_init: At 3FC980F8 len 00051618 (325 KiB): RAM
+I (220) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (225) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (230) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM
+I (237) spi_flash: detected chip: generic
+I (239) spi_flash: flash io: dio
+W (242) spi_flash: Detected size(16384k) larger than the size in the binary image header(2048k). Using the size in the binary image header.
+I (255) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (261) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (268) main_task: Started on CPU0
+I (286) main_task: Calling app_main()
+I (286) spi2-swd-spike: spi2-swd-spike starting
+I (287) spi2-swd-spike: CPU = 160 MHz
+I (287) spi2-swd-spike: Pin map: SCLK=GPIO12 MOSI=GPIO11 MISO=GPIO13 DIR=GPIO14
+I (794) spi2-swd-spike: Test A: full-duplex loopback sweep 1..50 MHz step 1 MHz
+I (794) spi2-swd-spike:        short GPIO11 (MOSI) to GPIO13 (MISO) with a jumper
+W (799) spi2-swd-spike:    1 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (805) spi2-swd-spike:    2 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (812) spi2-swd-spike:    3 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (819) spi2-swd-spike:    4 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (826) spi2-swd-spike:    5 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (833) spi2-swd-spike:    6 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (840) spi2-swd-spike:    7 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (847) spi2-swd-spike:    8 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (854) spi2-swd-spike:    9 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (861) spi2-swd-spike:   10 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (868) spi2-swd-spike:   11 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (876) spi2-swd-spike:   12 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (883) spi2-swd-spike:   13 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (890) spi2-swd-spike:   14 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (897) spi2-swd-spike:   15 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (904) spi2-swd-spike:   16 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (911) spi2-swd-spike:   17 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (918) spi2-swd-spike:   18 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (925) spi2-swd-spike:   19 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (932) spi2-swd-spike:   20 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (940) spi2-swd-spike:   21 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (947) spi2-swd-spike:   22 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (954) spi2-swd-spike:   23 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (961) spi2-swd-spike:   24 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (968) spi2-swd-spike:   25 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (975) spi2-swd-spike:   26 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (982) spi2-swd-spike:   27 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (989) spi2-swd-spike:   28 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (997) spi2-swd-spike:   29 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1004) spi2-swd-spike:   30 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1011) spi2-swd-spike:   31 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1018) spi2-swd-spike:   32 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1025) spi2-swd-spike:   33 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1032) spi2-swd-spike:   34 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1040) spi2-swd-spike:   35 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1047) spi2-swd-spike:   36 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1054) spi2-swd-spike:   37 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1061) spi2-swd-spike:   38 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1068) spi2-swd-spike:   39 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1076) spi2-swd-spike:   40 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1083) spi2-swd-spike:   41 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1090) spi2-swd-spike:   42 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1097) spi2-swd-spike:   43 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1104) spi2-swd-spike:   44 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1112) spi2-swd-spike:   45 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1119) spi2-swd-spike:   46 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1126) spi2-swd-spike:   47 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1133) spi2-swd-spike:   48 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1140) spi2-swd-spike:   49 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+W (1148) spi2-swd-spike:   50 MHz: FAIL  (first mismatch byte 0: tx=0xea rx=0x00)
+I (1155) spi2-swd-spike: Test A: highest rate that passed = 0 MHz
+I (1362) spi2-swd-spike: Test B: SWD frame timing at 10 MHz (3-wire half-duplex, 1024 frames)
+I (1363) spi2-swd-spike:   GPIO toggle pair: 107 CPU cycles  (~668 ns at 160 MHz)
+I (1366) spi2-swd-spike:   At 10 MHz SWCLK, this is ~3 SWD bit cycles per single toggle
+I (1429) spi2-swd-spike:   total wall: 54559 us, 8729348 CPU cycles
+I (1429) spi2-swd-spike:   per frame:  53.280 us, 8524 cycles
+I (1429) spi2-swd-spike:   raw bus theoretical: 4.200 us per 42-bit frame at 10 MHz
+I (1437) spi2-swd-spike:   per-frame software overhead: 49.080 us
+I (1442) spi2-swd-spike:   frames/sec achieved: 18768
+I (1447) spi2-swd-spike:   effective SWD word rate (32-bit reads): 18768 words/s
+I (1556) spi2-swd-spike: Test B: SWD frame timing at 20 MHz (3-wire half-duplex, 1024 frames)
+I (1557) spi2-swd-spike:   GPIO toggle pair: 107 CPU cycles  (~668 ns at 160 MHz)
+I (1560) spi2-swd-spike:   At 20 MHz SWCLK, this is ~6 SWD bit cycles per single toggle
+I (1620) spi2-swd-spike:   total wall: 51983 us, 8317134 CPU cycles
+I (1620) spi2-swd-spike:   per frame:  50.764 us, 8122 cycles
+I (1621) spi2-swd-spike:   raw bus theoretical: 2.100 us per 42-bit frame at 20 MHz
+I (1628) spi2-swd-spike:   per-frame software overhead: 48.664 us
+I (1634) spi2-swd-spike:   frames/sec achieved: 19698
+I (1639) spi2-swd-spike:   effective SWD word rate (32-bit reads): 19698 words/s
+I (1747) spi2-swd-spike: Test B: SWD frame timing at 25 MHz (3-wire half-duplex, 1024 frames)
+I (1748) spi2-swd-spike:   GPIO toggle pair: 107 CPU cycles  (~668 ns at 160 MHz)
+I (1751) spi2-swd-spike:   At 25 MHz SWCLK, this is ~8 SWD bit cycles per single toggle
+I (1811) spi2-swd-spike:   total wall: 51475 us, 8235758 CPU cycles
+I (1811) spi2-swd-spike:   per frame:  50.268 us, 8042 cycles
+I (1811) spi2-swd-spike:   raw bus theoretical: 1.680 us per 42-bit frame at 25 MHz
+I (1818) spi2-swd-spike:   per-frame software overhead: 48.588 us
+I (1824) spi2-swd-spike:   frames/sec achieved: 19893
+I (1829) spi2-swd-spike:   effective SWD word rate (32-bit reads): 19893 words/s
+I (1938) spi2-swd-spike: Test B: SWD frame timing at 40 MHz (3-wire half-duplex, 1024 frames)
+I (1939) spi2-swd-spike:   GPIO toggle pair: 107 CPU cycles  (~668 ns at 160 MHz)
+I (1942) spi2-swd-spike:   At 40 MHz SWCLK, this is ~13 SWD bit cycles per single toggle
+I (2001) spi2-swd-spike:   total wall: 50965 us, 8154150 CPU cycles
+I (2001) spi2-swd-spike:   per frame:  49.770 us, 7963 cycles
+I (2002) spi2-swd-spike:   raw bus theoretical: 1.050 us per 42-bit frame at 40 MHz
+I (2009) spi2-swd-spike:   per-frame software overhead: 48.720 us
+I (2015) spi2-swd-spike:   frames/sec achieved: 20092
+I (2020) spi2-swd-spike:   effective SWD word rate (32-bit reads): 20092 words/s
+I (2127) spi2-swd-spike: spi2-swd-spike done

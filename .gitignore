@@ -1,0 +1,23 @@
+# ESP-IDF build outputs
+build/
+sdkconfig
+sdkconfig.old
+
+# MicroPython build outputs
+ports/*/build*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / OS scratch
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local env / secrets
+.env
+.env.local
+*.local

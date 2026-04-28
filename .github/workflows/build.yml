@@ -1,0 +1,56 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  esp32-s3-annealage_pod:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.5.1
+    steps:
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build mpy-cross
+        shell: bash
+        run: |
+          make -C src/micropython/mpy-cross
+
+      - name: Update ESP32 port submodules
+        shell: bash
+        run: |
+          # The espressif/idf container exports IDF_PATH and pre-runs
+          # export.sh in its entrypoint, so idf.py is on PATH already.
+          # Our setup-idf.sh will short-circuit to the container IDF.
+          source src/tools/setup-idf.sh
+          make -C src/micropython/ports/esp32 \
+              BOARD_DIR="$(pwd)/src/boards/ESP32_S3_ANNEALAGE_POD" \
+              USER_C_MODULES="$(pwd)/src/c_modules/micropython.cmake" \
+              submodules
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          source src/tools/setup-idf.sh
+          make -C src/micropython/ports/esp32 \
+              BOARD_DIR="$(pwd)/src/boards/ESP32_S3_ANNEALAGE_POD" \
+              USER_C_MODULES="$(pwd)/src/c_modules/micropython.cmake"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32-s3-annealage_pod
+          path: |
+            src/micropython/ports/esp32/build-ESP32_S3_ANNEALAGE_POD/firmware.bin
+            src/micropython/ports/esp32/build-ESP32_S3_ANNEALAGE_POD/bootloader/bootloader.bin
+            src/micropython/ports/esp32/build-ESP32_S3_ANNEALAGE_POD/partition_table/partition-table.bin
+          if-no-files-found: error

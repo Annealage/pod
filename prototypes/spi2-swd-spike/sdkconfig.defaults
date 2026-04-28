@@ -1,0 +1,24 @@
+# Target ESP32-S3
+CONFIG_IDF_TARGET="esp32s3"
+
+# Console on USB-Serial-JTAG so the CH340 path stays free for flashing if desired.
+# Default IDF behaviour: UART0 console on GPIO43/44. The CH340 on this board
+# is wired to UART0 so logs come out the same path as flashing. Keep default.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# Lower freertos tick to keep busy-wait loops responsive.
+CONFIG_FREERTOS_HZ=1000
+
+# SPI master driver pulled in by component requirements; nothing to set here.
+
+# Stack a touch larger for the test task that builds DMA buffers.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Disable WiFi/BT to keep build minimal and avoid bringing in heap fragmentation.
+CONFIG_ESP_WIFI_ENABLED=n
+
+# Enable PSRAM only if the module has it; the spike doesn't need PSRAM, leave off.
+
+# Compiler optimisation: default debug is fine for a benchmark probe; the SPI clock
+# is hardware-driven so optimisation level doesn't bias the result.
+CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y
