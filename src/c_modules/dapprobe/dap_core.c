@@ -173,13 +173,28 @@ int dap_core_attach(void) {
 
 size_t dap_core_process(const uint8_t *request, size_t request_len,
                         uint8_t *response, size_t response_capacity) {
-    (void)request_len;
     (void)response_capacity;
 
     /* Lazy-init: tests can call dap_core_process without an explicit
      * dap_core_init, so we self-initialise. The check is cheap. */
     if (!s_initialised) {
         (void)dap_core_init();
+    }
+
+    /* Snoop the requested SWJ clock and forward it to the SPI engine.
+     * The vendored DAP.c keeps Set_Clock_Delay's storage private to
+     * itself (DAP_Data.clock_delay is consumed only by the vendored
+     * SW_DP.c bit-bang implementation, which our port replaces); the
+     * SPI2 backend has its own independent clock divider that has to
+     * be programmed separately. */
+    if (request_len >= 5 && request[0] == ID_DAP_SWJ_Clock) {
+        uint32_t clock = (uint32_t)request[1] |
+                         ((uint32_t)request[2] << 8) |
+                         ((uint32_t)request[3] << 16) |
+                         ((uint32_t)request[4] << 24);
+        if (clock > 0) {
+            (void)swd_set_clock_hz(clock);
+        }
     }
 
     /* DAP_ProcessCommand returns:

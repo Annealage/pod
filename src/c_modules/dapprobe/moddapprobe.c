@@ -21,6 +21,7 @@
 #include "py/objstr.h"
 
 #include "dap_core.h"
+#include "io/swd.h"
 
 static mp_obj_t mod_dapprobe_attach(void) {
     int rc = dap_core_attach();
@@ -87,6 +88,16 @@ static mp_obj_t mod_dapprobe_serial(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_dapprobe_serial_obj, mod_dapprobe_serial);
 
+static mp_obj_t mod_dapprobe_set_swd_trace(mp_obj_t count_obj) {
+    mp_int_t count = mp_obj_get_int(count_obj);
+    if (count < 0) {
+        count = 0;
+    }
+    swd_set_trace((uint32_t)count);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_dapprobe_set_swd_trace_obj, mod_dapprobe_set_swd_trace);
+
 static const mp_rom_map_elem_t mod_dapprobe_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),            MP_ROM_QSTR(MP_QSTR_dapprobe) },
     { MP_ROM_QSTR(MP_QSTR_attach),              MP_ROM_PTR(&mod_dapprobe_attach_obj) },
@@ -98,6 +109,7 @@ static const mp_rom_map_elem_t mod_dapprobe_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_transfers_total),     MP_ROM_PTR(&mod_dapprobe_transfers_total_obj) },
     { MP_ROM_QSTR(MP_QSTR_swo_bytes_buffered),  MP_ROM_PTR(&mod_dapprobe_swo_bytes_buffered_obj) },
     { MP_ROM_QSTR(MP_QSTR_serial),              MP_ROM_PTR(&mod_dapprobe_serial_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_swd_trace),       MP_ROM_PTR(&mod_dapprobe_set_swd_trace_obj) },
 };
 static MP_DEFINE_CONST_DICT(mod_dapprobe_globals, mod_dapprobe_globals_table);
 

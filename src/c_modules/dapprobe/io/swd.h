@@ -99,6 +99,31 @@ esp_err_t swd_set_nrst(bool released);
 // followed by 16 idle cycles low (per ARM debug spec).
 esp_err_t swd_line_reset(void);
 
+// SWJ-stream primitive: drive `count` bits on SWDIO, LSB-first, sourced from
+// `data`. SWCLK toggles for each bit. DIR is driven to "host drives line" for
+// the duration. Used by the CMSIS-DAP DAP_SWJ_Sequence handler to emit
+// dormant-to-SWD selection alerts, activation codes, JTAG-to-SWD switch
+// patterns, line resets, etc. Length is in bits; spec caps at 256.
+esp_err_t swd_swj_send_bits(const uint8_t *data, uint32_t bit_count);
+
+// SWD-stream primitive (output): drive `count` bits on SWDIO, LSB-first, from
+// `data`. DIR is driven to "host drives line" for the duration. Length capped
+// at 64 bits per call (matches the CMSIS-DAP DAP_SWD_Sequence sub-sequence
+// limit; longer sequences are decomposed by the caller).
+esp_err_t swd_seq_out_bits(const uint8_t *data, uint32_t bit_count);
+
+// SWD-stream primitive (input): clock `count` bits on SWCLK while sampling
+// SWDIO, LSB-first. DIR is driven to "target drives line" for the duration.
+// Bits are written to `data` LSB-first; trailing bits in the last byte are
+// cleared. Length capped at 64 bits per call.
+esp_err_t swd_seq_in_bits(uint8_t *data, uint32_t bit_count);
+
+// SWD turnaround helper: drive `count` extra SWCLK cycles with the line in
+// the current direction (no data driven by either side). Used between an
+// output sub-sequence and an input sub-sequence to cover the bus turnaround
+// the target expects.
+esp_err_t swd_seq_idle(uint32_t bit_count, bool driving);
+
 // Issue a single SWD transfer.
 //
 // header: the 8-bit SWD packet header (start/APnDP/RnW/addr/parity/stop/park).
@@ -112,6 +137,12 @@ swd_status_t swd_transfer(uint8_t header, const uint32_t *data_in, uint32_t *dat
 // Engine state queries.
 bool swd_is_initialised(void);
 uint32_t swd_transfers_total(void);     // monotonic counter, useful for tests/perf
+
+// Enable per-transfer ESP_LOGW tracing for the next `count` SWD transfers.
+// Each traced transfer logs the header, ACK raw word, ACK code, and (for
+// reads) the captured data word and parity bits. Use this to diagnose
+// wire-level protocol mismatches; default is 0 (no tracing).
+void swd_set_trace(uint32_t count);
 
 #ifdef __cplusplus
 }
