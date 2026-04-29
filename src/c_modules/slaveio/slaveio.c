@@ -46,10 +46,22 @@
 #endif
 
 #if SLAVEIO_HAS_IDF
+// Workaround: IDF v5.5.1's FreeRTOS.h defines traceISR_EXIT_TO_SCHEDULER
+// only after portable.h has been processed, which is fine when
+// portYIELD_FROM_ISR() is expanded later. Despite verifying the include
+// order, GCC still emits implicit-function-declaration on the trace
+// macro inside our ISR callbacks. Pre-defining it here resolves the
+// expansion at slaveio.c parse time. The trace facility is disabled in
+// MicroPython's esp32 sdkconfig (CONFIG_FREERTOS_USE_TRACE_FACILITY=n
+// in this build), so an empty no-op is the correct semantics.
+#ifndef traceISR_EXIT_TO_SCHEDULER
+#define traceISR_EXIT_TO_SCHEDULER()
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 
 #include "driver/gpio.h"
 #include "driver/i2c_slave.h"
