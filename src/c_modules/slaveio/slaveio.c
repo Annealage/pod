@@ -224,12 +224,6 @@ static esp_err_t dispatch_task_start(void) {
     return ESP_OK;
 }
 
-static IRAM_ATTR void dispatch_wake_from_isr(BaseType_t *do_yield) {
-    if (g_state.dispatch_wake) {
-        xSemaphoreGiveFromISR(g_state.dispatch_wake, do_yield);
-    }
-}
-
 static void dispatch_wake(void) {
     if (g_state.dispatch_wake) {
         xSemaphoreGive(g_state.dispatch_wake);
