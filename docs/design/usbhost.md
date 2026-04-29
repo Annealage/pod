@@ -195,3 +195,136 @@ deployment has different needs.
   re-pin the IDF SHA after each minor bump per
   `spec.md` §4.1's versioning policy and re-run the WS-B unit
   tests.
+
+## 11. Phase 3 P3.0 pivot to TinyUSB host
+
+Sections 1-10 above describe the IDF `usb_host` backend that landed
+in Phase 2 WS-B. Phase 3 firmware-level smoke (commit `13fd327` plus
+the 2026-04-29 progress report) confirmed enumeration works end to
+end, but `pyocd reset --target rp2040` and `mpremote` against the
+forwarded Pico CDC both hung after enumeration: bulk URB completions
+were not flowing back to the host. R11 in the risk register.
+
+Phase 3 P3.0 pivots WS-B from the IDF `usb_host` component to the
+TinyUSB host stack via andrewleech/micropython#7 (branch
+`machine-usbhost`, head `dfa0adc44` as of 2026-04-29). The choice is
+deliberate: the project owner has a working, tested PR that adds
+`machine.USBHost()` on TinyUSB host with a shared `mp_usbh.{c,h}`
+infra layer, pinned TinyUSB submodule at 0.20.0, and a tested
+`USBHOST` variant of `ESP32_GENERIC_S3`. Section 1 above ("TinyUSB
+host is not part of IDF v5.5.1's bundled component tree") was a
+narrow framing: TinyUSB host has been upstream since 0.15+; PR #7
+brings the host stack in via the espressif/tinyusb component plus a
+hand-built source list for the host class drivers and the DWC2
+controller driver (see `ports/esp32/esp32_common.cmake` block guarded
+by `if(MICROPY_HW_USB_HOST)`).
+
+### 11.1 Submodule pin and build flags
+
+- `.gitmodules` `src/micropython` URL is now
+  `https://github.com/andrewleech/micropython.git`, branch
+  `machine-usbhost`. Re-checkout the submodule to fetch the new tree.
+- `src/VERSIONS` records the new commit
+  `dfa0adc44662f377ef7ce3561b32004f481909e2` and the rationale.
+- `src/boards/ESP32_S3_ANNEALAGE_POD/mpconfigboard.cmake` sets
+  `MICROPY_HW_USB_HOST 1` and appends `MICROPY_HW_USB_HOST=1` to
+  `MICROPY_DEF_BOARD`, mirroring how the upstream `USBHOST` variant
+  of `ESP32_GENERIC_S3` does it.
+- `src/boards/ESP32_S3_ANNEALAGE_POD/mpconfigboard.h` defines
+  `MICROPY_HW_USB_HOST (1)` so header-side guards in `main.c` and
+  the tusb_config chain see it. USB-CDC and USB-Serial-JTAG remain
+  disabled (`MICROPY_HW_ENABLE_USBDEV=0`, `MICROPY_HW_USB_CDC=0`,
+  `MICROPY_HW_ESP_USB_SERIAL_JTAG=0`); host-mode commitment for the
+  USB-OTG peripheral.
+
+### 11.2 mp_usbh surface vs WS-A's contract
+
+`shared/tinyusb/mp_usbh.{c,h}` is class-driver oriented: it wraps
+TinyUSB's host CDC, MSC, and HID class drivers and exposes them as
+`machine.USBHost`, `USBH_CDC`, `USBH_MSC`, `USBH_HID` Python objects.
+It does not expose a "raw URB submit on arbitrary endpoint" entry.
+
+WS-A's `usbhost.h` contract is the opposite shape: per-busid raw
+control / bulk / interrupt transfer functions, no class awareness,
+because the USB/IP server's job is to forward URBs verbatim from
+the remote host's `vhci-hcd` to the device.
+
+Resolution: usbhost.c uses mp_usbh for init only
+(`mp_usbh_init_tuh()` + `mp_usbh_task()` event pump) and reaches
+through to TinyUSB's host primitives directly:
+
+- `tuh_descriptor_get_device_sync` / `tuh_descriptor_get_configuration_sync`
+  to populate the `usbip_dev_record_t` for DEVLIST.
+- `tuh_edpt_open` to claim a pipe on a non-zero endpoint.
+- `tuh_edpt_xfer` to push a transfer, with completion delivered
+  via the `tuh_xfer_t.complete_cb` hook.
+- `tuh_control_xfer` for EP0.
+
+To stop the TinyUSB CDC class driver from absorbing the Pico's
+CDC interface (which would prevent us from reaching the bulk
+endpoints raw), WS-B turns off the host class drivers in the
+TinyUSB host config: see `tusb_config_host_overrides.h` for the
+`CFG_TUH_CDC=0`, `CFG_TUH_MSC=0`, `CFG_TUH_HID=0` overrides. The
+mp_usbh.c class-driver code is still compiled but its mount
+callbacks never fire because the drivers are disabled.
+
+### 11.3 Concurrency model under the new backend
+
+- `usbhost_start` calls `mp_usbh_init_tuh()` (which boots the
+  TinyUSB host stack, including the DWC2 HCD on ESP32-S3) and
+  spawns a dedicated `tuh_task` pump on APP_CPU. The pump runs
+  `mp_usbh_task()` (which calls `tuh_task()` until it returns 0)
+  in a tight loop.
+- A second worker task on APP_CPU drains the pre-allocated pipe
+  slot table the same way the IDF backend did. The slot still
+  carries the same shape (`busid`, `endpoint_addr`, `setup`,
+  `out_data`, `in_data`, `cancel`), but the URB call dispatches
+  through `tuh_edpt_xfer` / `tuh_control_xfer` instead of the IDF
+  `usb_host_transfer_submit*`.
+- TinyUSB's host events are interrupt-driven; the
+  `--wrap=hcd_event_handler` link option in the upstream PR moves
+  hcd events into a queue that the task pump drains. This is
+  load-bearing: without the wrap the IRQ context can race with
+  the FreeRTOS scheduler.
+
+### 11.4 Hot-plug and device enumeration
+
+TinyUSB's `tuh_mount_cb(uint8_t dev_addr)` fires when a device
+finishes enumeration. usbhost.c hooks it (alongside mp_usbh.c's
+own hook) to populate the device slot:
+
+- `tuh_descriptor_get_device_sync(addr, &dev_desc, sizeof(dev_desc))`
+  for the 18-byte device descriptor.
+- `tuh_descriptor_get_configuration_sync(addr, 0, cfg_buf, sizeof(cfg_buf))`
+  for the active configuration descriptor blob.
+- Walk the config descriptor for interface and endpoint records,
+  exactly the same parsing as the IDF backend (preserved verbatim
+  in `parse_config_desc`).
+- Allocate per-endpoint pipe slots, but defer `tuh_edpt_open` until
+  the first non-zero endpoint URB arrives (lazy claim, matches the
+  IDF backend's `ensure_interfaces_claimed_locked`).
+- Fill busid as "1-N" where N is `dev_addr`, path as
+  `/esp-usb-host/1-N`. Multiplexer-side busid namespace policy
+  unchanged.
+
+`tuh_umount_cb(addr)` clears the slot. Hub devices come back with
+`bDeviceClass == TUSB_CLASS_HUB` and are not exported (rev1: one
+DUT at a time on busid 1-N).
+
+### 11.5 Open items for the pivot
+
+- Class-driver fallback: if disabling CFG_TUH_CDC etc. breaks the
+  TinyUSB enumeration path (some TinyUSB versions assert a class
+  driver claim on every interface), revisit whether to keep the
+  class drivers and instead reroute their bulk-endpoint reads
+  through usbhost.c. Track via Phase 3 bring-up logs.
+- The `--wrap=hcd_event_handler` link option from PR #7 routes
+  hcd events into the TinyUSB task. Verify the wrap symbol
+  resolves cleanly under the IDF build; the IDF's
+  espressif/tinyusb component supplies its own
+  `hcd_event_handler` weak symbol.
+- DWC2 DMA is disabled on ESP32-S3 (`CFG_TUH_DWC2_DMA_ENABLE 0`)
+  because the S3's L1 cache handling for DMA is not in the
+  TinyUSB DWC2 driver. PIO mode bulk transfers are sufficient for
+  FullSpeed CDC + a CMSIS-DAP synthetic; revisit if the SWO
+  pipeline needs HighSpeed bandwidth.

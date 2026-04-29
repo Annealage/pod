@@ -101,6 +101,23 @@ static usbip_server_state_t s_state = {
     .max_transfer  = USBIP_MAX_TRANSFER_DEFAULT,
 };
 
+/* Per-URB observability flag. Toggled at runtime by
+ * `annealage_pod.usbip.set_verbose(True)` -> usbip_server_set_verbose.
+ * Default off; INFO-level URB-trace logs only fire on the hot path
+ * while this is true. */
+static volatile bool s_urb_verbose = false;
+
+void usbip_server_set_verbose(bool enable)
+{
+    s_urb_verbose = enable;
+    ESP_LOGI(TAG, "URB verbose logging %s", enable ? "enabled" : "disabled");
+}
+
+bool usbip_server_is_verbose(void)
+{
+    return s_urb_verbose;
+}
+
 /* ---------- attachment table ---------- */
 
 /* Reserve a slot for a busid currently being imported. Returns true
@@ -362,6 +379,14 @@ static bool dispatch_submit(int fd,
                             bool is_virtual,
                             volatile bool *cancel)
 {
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbip_in: busid=%.32s ep=%" PRIu32 " dir=%s len=%" PRIu32
+                      " seq=%" PRIu32,
+                 busid, hdr->ep,
+                 (hdr->direction == USBIP_DIR_IN) ? "IN" : "OUT",
+                 hdr->transfer_buffer_length, hdr->seqnum);
+    }
+
     /* Validation that does not require a backend. */
     int v = usbip_proto_validate_submit(hdr, s_state.max_transfer);
     if (v == -EINVAL && (hdr->direction != USBIP_DIR_OUT &&
@@ -435,6 +460,11 @@ static bool dispatch_submit(int fd,
     size_t in_len = 0;
     int    status;
 
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbip_dispatch: busid=%.32s ep=%" PRIu32 " target=%s",
+                 busid, hdr->ep, is_virtual ? "virtual" : "host");
+    }
+
     if (is_virtual) {
         virtual_device_t *vdev = usbip_find_virtual_device(busid);
         if (vdev == NULL) {
@@ -492,11 +522,22 @@ static bool dispatch_submit(int fd,
         }
     }
 
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbip_complete: busid=%.32s ep=%" PRIu32
+                      " status=%d actual=%zu",
+                 busid, hdr->ep, status, in_len);
+    }
+
     bool ok = send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
                               status,
                               (status == 0 && hdr->direction == USBIP_DIR_IN) ? in_buf : NULL,
                               (status == 0 && hdr->direction == USBIP_DIR_IN)
                                 ? (uint32_t)in_len : 0);
+
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbip_out: busid=%.32s ep=%" PRIu32 " ok=%d",
+                 busid, hdr->ep, ok ? 1 : 0);
+    }
 
     free(out_buf);
     free(in_buf);
@@ -849,5 +890,8 @@ size_t usbip_server_attached_busids(char (*out)[USBIP_BUSID_SIZE], size_t max)
     (void)max;
     return 0;
 }
+
+void usbip_server_set_verbose(bool enable) { (void)enable; }
+bool usbip_server_is_verbose(void) { return false; }
 
 #endif /* MPY_POD_HOST_TEST_BUILD */

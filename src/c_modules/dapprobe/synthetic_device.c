@@ -49,6 +49,33 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#define DAP_TRACE_TAG  "dapprobe"
+#define DAP_TRACE_INFO(fmt, ...) \
+    do { if (s_urb_verbose) { ESP_LOGI(DAP_TRACE_TAG, fmt, ##__VA_ARGS__); } } while (0)
+#else
+#define DAP_TRACE_INFO(fmt, ...) do { (void)s_urb_verbose; } while (0)
+#endif
+
+/* Per-URB observability flag, toggled at runtime via
+ * synthetic_device_set_verbose(). Default off. */
+static volatile bool s_urb_verbose = false;
+
+void synthetic_device_set_verbose(bool enable)
+{
+    s_urb_verbose = enable;
+#ifdef ESP_PLATFORM
+    ESP_LOGI(DAP_TRACE_TAG, "URB verbose logging %s",
+             enable ? "enabled" : "disabled");
+#endif
+}
+
+bool synthetic_device_is_verbose(void)
+{
+    return s_urb_verbose;
+}
+
 /* ---------------------------------------------------------------------
  * USB-class request constants (subset, host-portable)
  * ------------------------------------------------------------------ */
@@ -370,9 +397,13 @@ static int handle_ep1_out(const uint8_t *out_data, size_t out_len) {
     if (out_len == 0 || out_len > DAP_CMD_BUF_SIZE) {
         return -EPIPE;
     }
+    DAP_TRACE_INFO("dap_cmd_in: cmd=0x%02x len=%zu",
+                   (unsigned)out_data[0], out_len);
     memcpy(s_dap_cmd_buf, out_data, out_len);
     s_dap_resp_len = dap_core_process(s_dap_cmd_buf, out_len,
                                        s_dap_resp_buf, sizeof(s_dap_resp_buf));
+    DAP_TRACE_INFO("dap_resp_out: cmd=0x%02x len=%zu",
+                   (unsigned)s_dap_cmd_buf[0], s_dap_resp_len);
     return 0;
 }
 
@@ -410,6 +441,14 @@ static int handle_ep3_in(uint8_t *in_data, size_t in_capacity, size_t *in_len) {
     }
     ssize_t n = dap_core_swo_read(in_data, cap);
     *in_len = (n < 0) ? 0 : (size_t)n;
+#ifdef ESP_PLATFORM
+    if (s_urb_verbose && *in_len > 0) {
+        dap_core_telemetry_t t = {0};
+        dap_core_telemetry(&t);
+        DAP_TRACE_INFO("dap_swo_out: len=%zu overruns=%u",
+                       *in_len, (unsigned)t.swo_overruns_total);
+    }
+#endif
     return 0;
 }
 

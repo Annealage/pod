@@ -90,6 +90,15 @@ const uint8_t *synthetic_device_get_config_desc(size_t *out_len);
  * strings. Returns NULL if the index is out of range. */
 const uint8_t *synthetic_device_get_string_desc(uint8_t index, size_t *out_len);
 
+/* Toggle per-URB observability logging on the synthetic CMSIS-DAP-v2
+ * responder. When enabled every Bulk-OUT command, every queued
+ * Bulk-IN response, and every non-empty SWO read emits one ESP_LOGI
+ * line under the "dapprobe" tag. Default off. */
+void synthetic_device_set_verbose(bool enable);
+
+/* True if per-URB verbose logging is currently enabled. */
+bool synthetic_device_is_verbose(void);
+
 #ifdef __cplusplus
 }
 #endif
