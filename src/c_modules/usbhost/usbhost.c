@@ -965,9 +965,10 @@ static int submit_pipe(const char busid[USBIP_BUSID_SIZE],
     if (s_urb_verbose) {
         const bool is_in = (ep_addr & 0x80) != 0;
         const size_t len = is_in ? in_capacity : out_len;
-        ESP_LOGI(TAG, "usbhost_submit: dev=%.32s ep=0x%02x dir=%s len=%zu",
+        ESP_LOGI(TAG, "usbhost_submit: dev=%.32s ep=0x%02x dir=%s len=%u",
                  busid, ep_addr,
-                 (ep_addr == 0) ? "CTRL" : (is_in ? "IN" : "OUT"), len);
+                 (ep_addr == 0) ? "CTRL" : (is_in ? "IN" : "OUT"),
+                 (unsigned)len);
     }
 
     p->active = true;
@@ -978,8 +979,8 @@ static int submit_pipe(const char busid[USBIP_BUSID_SIZE],
     xSemaphoreTake(p->done_sem, portMAX_DELAY);
 
     if (s_urb_verbose) {
-        ESP_LOGI(TAG, "usbhost_complete: dev=%.32s ep=0x%02x status=%d actual=%zu",
-                 busid, ep_addr, status, *in_len);
+        ESP_LOGI(TAG, "usbhost_complete: dev=%.32s ep=0x%02x status=%d actual=%u",
+                 busid, ep_addr, status, (unsigned)*in_len);
     }
     return status;
 }

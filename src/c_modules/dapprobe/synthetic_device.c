@@ -49,7 +49,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef ESP_PLATFORM
+/* On-target firmware always logs through the IDF; host unit tests are
+ * gated by MPY_POD_HOST_TEST_BUILD. The earlier ESP_PLATFORM gate
+ * silently disabled tracing because the user-c-module elf-side
+ * compile of this TU does not get ESP_PLATFORM defined (only the
+ * __idf_main side does) and the elf-side copy is the one the linker
+ * keeps. Switch to the same gate usbip_server.c uses. */
+#ifndef MPY_POD_HOST_TEST_BUILD
 #include "esp_log.h"
 #define DAP_TRACE_TAG  "dapprobe"
 #define DAP_TRACE_INFO(fmt, ...) \
@@ -65,7 +71,7 @@ static volatile bool s_urb_verbose = false;
 void synthetic_device_set_verbose(bool enable)
 {
     s_urb_verbose = enable;
-#ifdef ESP_PLATFORM
+#ifndef MPY_POD_HOST_TEST_BUILD
     ESP_LOGI(DAP_TRACE_TAG, "URB verbose logging %s",
              enable ? "enabled" : "disabled");
 #endif
@@ -397,13 +403,29 @@ static int handle_ep1_out(const uint8_t *out_data, size_t out_len) {
     if (out_len == 0 || out_len > DAP_CMD_BUF_SIZE) {
         return -EPIPE;
     }
-    DAP_TRACE_INFO("dap_cmd_in: cmd=0x%02x len=%zu",
-                   (unsigned)out_data[0], out_len);
+    DAP_TRACE_INFO("dap_cmd_in: cmd=0x%02x len=%u b0..7=%02x %02x %02x %02x %02x %02x %02x %02x",
+                   (unsigned)out_data[0], (unsigned)out_len,
+                   (unsigned)(out_len > 0 ? out_data[0] : 0),
+                   (unsigned)(out_len > 1 ? out_data[1] : 0),
+                   (unsigned)(out_len > 2 ? out_data[2] : 0),
+                   (unsigned)(out_len > 3 ? out_data[3] : 0),
+                   (unsigned)(out_len > 4 ? out_data[4] : 0),
+                   (unsigned)(out_len > 5 ? out_data[5] : 0),
+                   (unsigned)(out_len > 6 ? out_data[6] : 0),
+                   (unsigned)(out_len > 7 ? out_data[7] : 0));
     memcpy(s_dap_cmd_buf, out_data, out_len);
     s_dap_resp_len = dap_core_process(s_dap_cmd_buf, out_len,
                                        s_dap_resp_buf, sizeof(s_dap_resp_buf));
-    DAP_TRACE_INFO("dap_resp_out: cmd=0x%02x len=%zu",
-                   (unsigned)s_dap_cmd_buf[0], s_dap_resp_len);
+    DAP_TRACE_INFO("dap_resp_out: cmd=0x%02x len=%u b0..7=%02x %02x %02x %02x %02x %02x %02x %02x",
+                   (unsigned)s_dap_cmd_buf[0], (unsigned)s_dap_resp_len,
+                   (unsigned)(s_dap_resp_len > 0 ? s_dap_resp_buf[0] : 0),
+                   (unsigned)(s_dap_resp_len > 1 ? s_dap_resp_buf[1] : 0),
+                   (unsigned)(s_dap_resp_len > 2 ? s_dap_resp_buf[2] : 0),
+                   (unsigned)(s_dap_resp_len > 3 ? s_dap_resp_buf[3] : 0),
+                   (unsigned)(s_dap_resp_len > 4 ? s_dap_resp_buf[4] : 0),
+                   (unsigned)(s_dap_resp_len > 5 ? s_dap_resp_buf[5] : 0),
+                   (unsigned)(s_dap_resp_len > 6 ? s_dap_resp_buf[6] : 0),
+                   (unsigned)(s_dap_resp_len > 7 ? s_dap_resp_buf[7] : 0));
     return 0;
 }
 
@@ -441,12 +463,12 @@ static int handle_ep3_in(uint8_t *in_data, size_t in_capacity, size_t *in_len) {
     }
     ssize_t n = dap_core_swo_read(in_data, cap);
     *in_len = (n < 0) ? 0 : (size_t)n;
-#ifdef ESP_PLATFORM
+#ifndef MPY_POD_HOST_TEST_BUILD
     if (s_urb_verbose && *in_len > 0) {
         dap_core_telemetry_t t = {0};
         dap_core_telemetry(&t);
-        DAP_TRACE_INFO("dap_swo_out: len=%zu overruns=%u",
-                       *in_len, (unsigned)t.swo_overruns_total);
+        DAP_TRACE_INFO("dap_swo_out: len=%u overruns=%u",
+                       (unsigned)*in_len, (unsigned)t.swo_overruns_total);
     }
 #endif
     return 0;

@@ -524,8 +524,8 @@ static bool dispatch_submit(int fd,
 
     if (s_urb_verbose) {
         ESP_LOGI(TAG, "usbip_complete: busid=%.32s ep=%" PRIu32
-                      " status=%d actual=%zu",
-                 busid, hdr->ep, status, in_len);
+                      " status=%d actual=%u",
+                 busid, hdr->ep, status, (unsigned)in_len);
     }
 
     bool ok = send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
