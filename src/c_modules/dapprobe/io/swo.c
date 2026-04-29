@@ -32,6 +32,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
