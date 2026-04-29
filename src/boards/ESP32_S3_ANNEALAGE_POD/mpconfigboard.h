@@ -20,6 +20,13 @@
 #define MICROPY_HW_USB_CDC                  (0)
 #define MICROPY_HW_ESP_USB_SERIAL_JTAG      (0)
 
+// TinyUSB host stack via andrewleech/micropython#7 (P3.0 pivot).
+// MICROPY_HW_USB_HOST is set from mpconfigboard.cmake via
+// list(APPEND MICROPY_DEF_BOARD MICROPY_HW_USB_HOST=1); duplicating
+// it here would generate a -Wmacro-redefined warning. Keep the
+// CMake-side single source of truth. The USBHOST variant of
+// ESP32_GENERIC_S3 in PR #7 uses the same pattern.
+
 // Local I2C bus to onboard INA228 monitors and carrier-ID EEPROM.
 // Appendix A §A.5: SDA on GPIO8, SCL on GPIO9.
 #define MICROPY_HW_I2C0_SDA                 (8)
