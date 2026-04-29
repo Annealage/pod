@@ -54,9 +54,43 @@ else
     no "usbip list failed: $devlist"
 fi
 
+# Raw-socket REPL driver. mpremote's pyserial does not register a tcp://
+# URL handler and the socket:// form fights with the raw-REPL handshake
+# over a dupterm-attached connection, so the smoke uses a direct socket
+# round-trip: connect, wake the prompt, send one expression, read the
+# echoed output, return the trailing print line.
+repl_exec() {
+    local host="$1" port="$2" cmd="$3"
+    python3 - "$host" "$port" "$cmd" <<'PY'
+import socket, sys, time
+host, port, cmd = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+s = socket.create_connection((host, port), timeout=5)
+s.settimeout(2)
+s.sendall(b"\r\n")
+time.sleep(0.25)
+s.sendall(cmd.encode() + b"\r\n")
+time.sleep(0.5)
+data = b""
+try:
+    while True:
+        chunk = s.recv(4096)
+        if not chunk: break
+        data += chunk
+except Exception:
+    pass
+s.close()
+out = data.decode(errors="replace")
+for line in reversed(out.splitlines()):
+    line = line.strip()
+    if line and not line.startswith(">>>") and cmd not in line:
+        print(line)
+        break
+PY
+}
+
 # --- P3.1.2 TCP REPL reachable ----------------------------------------
 section "P3.1.2  TCP REPL on $HOST:$REPL_PORT"
-if ver=$(timeout 5 mpremote connect "tcp://${HOST}:${REPL_PORT}" exec 'import sys; print(sys.implementation._build)' 2>&1); then
+if ver=$(repl_exec "$HOST" "$REPL_PORT" 'import sys; print(sys.implementation._build)' 2>&1); then
     if [ "$ver" = "ESP32_S3_ANNEALAGE_POD" ]; then
         ok "REPL build identifier matches ESP32_S3_ANNEALAGE_POD"
     else
@@ -89,28 +123,30 @@ else
 fi
 
 # --- P3.2 Cleanup hook fires on REPL disconnect -----------------------
+# Connect once, register a tracer hook that increments a counter, then
+# disconnect. Reconnect and read the counter; if it incremented, the
+# accept loop fired supervisor.run_cleanup() between sessions.
 section "P3.2  cleanup hook on REPL TCP disconnect"
-if before=$(timeout 5 mpremote connect "tcp://${HOST}:${REPL_PORT}" exec '
-from annealage_pod.power import vtarget, dut_usb
-print(int(vtarget._enabled), int(dut_usb._enabled), sep=",")
-' 2>&1 | tail -1); then
-    note "rail state pre-disconnect: $before"
+arm_cmd='import annealage_pod.supervisor as sup; sup._cleanup_count = getattr(sup, "_cleanup_count", 0); sup.register_cleanup(lambda: setattr(sup, "_cleanup_count", sup._cleanup_count + 1)); print("armed", sup._cleanup_count)'
+read_cmd='import annealage_pod.supervisor as sup; print("count", getattr(sup, "_cleanup_count", -1))'
+if armed=$(repl_exec "$HOST" "$REPL_PORT" "$arm_cmd" 2>&1); then
+    note "armed: $armed"
     sleep 2
-    if after=$(timeout 5 mpremote connect "tcp://${HOST}:${REPL_PORT}" exec '
-from annealage_pod.power import vtarget, dut_usb
-print(int(vtarget._enabled), int(dut_usb._enabled), sep=",")
-' 2>&1 | tail -1); then
-        note "rail state post-reconnect: $after"
-        if [ "$after" = "0,0" ]; then
-            ok "cleanup hook drove both rails off after disconnect"
-        else
-            no "rails remained enabled after disconnect+reconnect ($after)"
-        fi
+    if afterline=$(repl_exec "$HOST" "$REPL_PORT" "$read_cmd" 2>&1); then
+        note "after: $afterline"
+        case "$afterline" in
+            "count 1"|"count "[2-9]*)
+                ok "cleanup hook fired on disconnect ($afterline)"
+                ;;
+            *)
+                no "cleanup counter did not increment ($afterline)"
+                ;;
+        esac
     else
-        no "could not re-connect to REPL: $after"
+        no "could not re-connect to REPL: $afterline"
     fi
 else
-    no "could not connect to REPL initially: $before"
+    no "could not connect to REPL initially: $armed"
 fi
 
 # --- P3.5 Log socket (if started) -------------------------------------

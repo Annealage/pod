@@ -147,6 +147,14 @@ def attach_dapprobe():
     if attach is None:
         return False
     attach()
+    # SPI engine is broken on ESP32-S3 (R14); bit-bang is the working
+    # backend until that is resolved. set_swd_mode(1) selects bit-bang.
+    set_mode = getattr(dapprobe, "set_swd_mode", None)
+    if set_mode is not None:
+        try:
+            set_mode(1)
+        except Exception as exc:  # noqa: BLE001
+            print("annealage_pod.boot: dapprobe.set_swd_mode(1) raised {!r}".format(exc))
     return True
 
 
@@ -199,6 +207,78 @@ def repl_accept_one(listener):
     return cli
 
 
+def _repl_accept_loop(listener):
+    # Run forever in a background thread: accept a client, dup the REPL
+    # onto it, wait for the client to disconnect (REPL's read path
+    # detaches the dupterm slot on EOF), fire supervisor.run_cleanup(),
+    # accept the next client.
+    try:
+        import time as _time
+    except ImportError:
+        import utime as _time
+    while True:
+        try:
+            cli, addr = listener.accept()
+        except OSError as exc:
+            print("annealage_pod.boot: REPL accept loop exiting: {!r}".format(exc))
+            return
+        print("annealage_pod.boot: REPL client connected from {}".format(addr))
+        try:
+            os.dupterm(cli)
+        except (TypeError, AttributeError):
+            print("annealage_pod.boot: os.dupterm() unavailable; dropping client")
+            try:
+                cli.close()
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        except Exception as exc:  # noqa: BLE001
+            print("annealage_pod.boot: dupterm failed: {!r}".format(exc))
+            try:
+                cli.close()
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        while True:
+            _time.sleep_ms(500)
+            try:
+                cur = os.dupterm(None, 0)
+            except Exception:  # noqa: BLE001
+                cur = None
+                break
+            if cur is None or cur is not cli:
+                break
+            try:
+                os.dupterm(cur)
+            except Exception:  # noqa: BLE001
+                break
+        try:
+            cli.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            supervisor.run_cleanup()
+        except Exception as exc:  # noqa: BLE001
+            print("annealage_pod.boot: cleanup hook raised {!r}".format(exc))
+        print("annealage_pod.boot: REPL client disconnected; cleanup ran")
+
+
+def start_repl_thread(listener):
+    """Spawn the REPL accept loop in a background thread. Returns thread id or None."""
+    if listener is None:
+        return None
+    try:
+        import _thread
+    except ImportError:
+        print("annealage_pod.boot: _thread unavailable; REPL accept loop not spawned")
+        return None
+    try:
+        return _thread.start_new_thread(_repl_accept_loop, (listener,))
+    except Exception as exc:  # noqa: BLE001
+        print("annealage_pod.boot: _thread.start_new_thread raised {!r}".format(exc))
+        return None
+
+
 # --- Top-level orchestration ---------------------------------------------
 
 
@@ -216,6 +296,7 @@ def up(creds_path=_CREDS_PATH, repl_port=8266, mark_ota_valid=True):
         "dapprobe": False,
         "uartbridge": False,
         "repl_listener": False,
+        "repl_loop": False,
         "version": _version.__version__,
         "cleanup_hooks": len(supervisor.list_hooks()),
     }
@@ -244,6 +325,7 @@ def up(creds_path=_CREDS_PATH, repl_port=8266, mark_ota_valid=True):
     status["uartbridge"] = start_uartbridge()
     listener = start_repl_socket(repl_port)
     status["repl_listener"] = listener is not None
+    status["repl_loop"] = start_repl_thread(listener) is not None
     # Mark the running OTA image valid only after critical services
     # have started successfully (spec.md §4.2 rollback).
     if mark_ota_valid and status["wifi"]:

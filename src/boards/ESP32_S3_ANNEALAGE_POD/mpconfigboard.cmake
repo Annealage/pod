@@ -16,31 +16,26 @@ set(SDKCONFIG_DEFAULTS
     ${MICROPY_BOARD_DIR}/sdkconfig.board
 )
 
-# Phase 3 P3.0 pivot to TinyUSB host via andrewleech/micropython#7 is
-# IN PROGRESS. The submodule pin and src/c_modules/usbhost/usbhost.c
-# rewrite both still need work before MICROPY_HW_USB_HOST=1 here can
-# build clean. Three blockers identified:
-#   (1) CFG_TUSB_OS_INC_PATH had a trailing space in tinyusb_port/
-#       tusb_config.h (fixed in our submodule pin: machine-usbhost-mpypod
-#       commit c6d91f044).
-#   (2) shared/tinyusb/mp_usbh.h uses machine_usbh_*_obj_t typedefs in
-#       function prototypes BEFORE the typedefs themselves are declared,
-#       which fails to compile against the IDF toolchain (fixed in our
-#       submodule pin: machine-usbhost-mpypod commit acb3c4645).
-#   (3) When MICROPY_HW_USB_HOST=1, the user-C-module sources
-#       (src/c_modules/usbhost/usbhost.c) get compiled twice: once for
-#       __idf_main and once for the micropython.elf executable. The
-#       second compile fails because traceISR_EXIT_TO_SCHEDULER is not
-#       visible at the parse time of the static-inline osal_semaphore_post
-#       in espressif__tinyusb's osal_freertos.h. Cause not yet pinpointed;
-#       likely an IDF-side include-path interaction with the user_c_modules
-#       gather pass. Tracked for follow-up.
-# Until (3) is resolved, leave MICROPY_HW_USB_HOST disabled so the rest
-# of the firmware builds.
-#
-# To re-enable when (3) is fixed, uncomment the two lines below:
-# set(MICROPY_HW_USB_HOST 1)
-# list(APPEND MICROPY_DEF_BOARD MICROPY_HW_USB_HOST=1)
+# Phase 3 P3.0 pivot to TinyUSB host via andrewleech/micropython#7.
+# Submodule pin machine-usbhost-mpypod carries the two unblocking
+# fixes:
+#   (1) CFG_TUSB_OS_INC_PATH trailing space in tinyusb_port/
+#       tusb_config.h (commit c6d91f044).
+#   (2) mp_usbh.h forward-decl ordering of machine_usbh_*_obj_t
+#       typedefs (commit acb3c4645).
+# The previously suspected blocker (3), where usbhost.c was reported
+# to fail its second (micropython.elf) compile because
+# traceISR_EXIT_TO_SCHEDULER was not visible at osal_semaphore_post
+# parse time, did not reproduce against this submodule pin in P3.9.
+# Both compiles of usbhost.c (one into __idf_main, one into
+# micropython.elf) now build clean and the firmware boots, enumerates
+# the Pico DUT and pyocd reset --target rp2040 completes via the
+# attached synthetic CMSIS-DAP. If the macro-scope bug recurs (e.g.
+# after an IDF or TinyUSB submodule bump), the slaveio.c precedent at
+# src/c_modules/slaveio/slaveio.c lines 48-59 documents the pre-define
+# workaround.
+set(MICROPY_HW_USB_HOST 1)
+list(APPEND MICROPY_DEF_BOARD MICROPY_HW_USB_HOST=1)
 
 # Freeze the annealage_pod Python package into the firmware image.
 set(MICROPY_FROZEN_MANIFEST ${MICROPY_BOARD_DIR}/manifest.py)

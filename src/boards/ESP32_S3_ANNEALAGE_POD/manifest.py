@@ -37,3 +37,6 @@ package(
     "annealage_pod",
     base_path="$(BOARD_DIR)/../../mpy",
 )
+
+# Top-level frozen main.py runs annealage_pod.boot.up() on every power-up.
+freeze("$(BOARD_DIR)/../../mpy", "main.py")
