@@ -210,6 +210,8 @@ def up(creds_path=_CREDS_PATH, repl_port=8266, mark_ota_valid=True):
     status = {
         "wifi": False,
         "mdns": None,
+        "vtarget": False,
+        "dut_usb": False,
         "usbip": False,
         "dapprobe": False,
         "uartbridge": False,
@@ -222,6 +224,21 @@ def up(creds_path=_CREDS_PATH, repl_port=8266, mark_ota_valid=True):
     if sta is not None and getattr(sta, "isconnected", lambda: False)():
         status["wifi"] = True
         status["mdns"] = mdns_announce()
+    # Energise the DUT power rails before bringing up usbip / dapprobe so the
+    # DUT is alive when pyocd attaches. Phase 3 dev-kit topology drives DUT
+    # USB VBUS unconditionally; rev1 PCB will gate this via the supervisor
+    # lifecycle.
+    try:
+        from . import power as _power
+
+        _power.dut_usb.on()
+        _power.vtarget.on()
+        status["dut_usb"] = True
+        status["vtarget"] = True
+    except Exception as exc:  # noqa: BLE001
+        print("annealage_pod.boot: power rail bring-up failed: {!r}".format(exc))
+        status["dut_usb"] = False
+        status["vtarget"] = False
     status["usbip"] = start_usbip()
     status["dapprobe"] = attach_dapprobe()
     status["uartbridge"] = start_uartbridge()

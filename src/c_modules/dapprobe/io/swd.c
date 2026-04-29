@@ -212,52 +212,45 @@ static IRAM_ATTR uint8_t swd_parity32(uint32_t v)
     return (uint8_t)(v & 1);
 }
 
-// SWD frame phases are split into two separate SPI transactions because the
-// 74LVC1T45 translator needs its DIR pin flipped synchronously with the bus
-// direction change. A single SPI transaction with `usr_mosi=1, usr_miso=1`
-// would internally tri-state MOSI for the MISO phase, but the translator's
-// DIR pin is on a separate GPIO and cannot be driven from inside the SPI
-// peripheral - it must follow.
+// SWD frame phases.
+//
+// ESP32-S3 SPI2 in half-duplex mode does NOT support combining MOSI and MISO
+// phases in a single transaction (SOC_SPI_HD_BOTH_INOUT_SUPPORTED is 0); see
+// research/spi2-swd-benchmark.md and IDF spi_master.c. The workaround used
+// by windowsair-tools (and reproduced here) is to drive the 8-bit header
+// plus pre-ACK Trn cycle through the SPI **command** phase, which is
+// MOSI-direction by default, and let the MISO phase sample ACK + post-Trn.
+// The peripheral handles the line tristate at the command->miso boundary.
 //
 // Per-frame structure:
-//   1. DIR=out, send 8-bit header (TX-only transaction)
-//   2. DIR=in,  receive Trn(1) + ACK(3) + Trn-or-data (RX-only transaction)
-//   3. DIR=out (or stays in for read-data), send/receive payload
-//
-// The DIR strobe between transactions is one dedic_gpio cycle (~4 ns at
-// 240 MHz CPU), which falls inside one SWD bit cycle even at 40 MHz SCLK.
-// This keeps the translator and SPI peripheral synchronised without the
-// idle-clock waste that gpio_set_level() would have caused.
+//   1. command (header 8 + Trn 1 = 9 bits MOSI) + miso (3 ACK + TrnAfterACK bits).
+//   2. For reads: 33 bits MISO (32 data + 1 parity); the data phase starts
+//      on the cycle following the ACK, so we don't need a separate Trn.
+//   3. For writes: 33 bits MOSI (32 data + 1 parity).
 
-// Send 8-bit header (TX-only, MOSI driven, DIR must be=out before call).
-static IRAM_ATTR void swd_phase_send_header(uint8_t header)
+// Send header and capture ACK in one SPI transaction using the command phase
+// for the MOSI side. trn_after_ack = 1 for write, 0 for read (per ARM SWD).
+// Returns the 3-bit ACK code; bit ordering follows the SPI's wr/rd_bit_order
+// = LSB-first config from init.
+static IRAM_ATTR uint8_t swd_phase_header_ack(uint8_t header_byte, int trn_after_ack)
 {
     spi_dev_t *hw = s_state.hw;
-    hw->user.usr_command = 0;
-    hw->user.usr_addr = 0;
-    hw->user.usr_dummy = 0;
-    hw->user.usr_mosi = 1;
-    hw->user.usr_miso = 0;
-    spi_ll_set_mosi_bitlen(hw, 8);
-    hw->data_buf[0] = (uint32_t)header;
-    swd_ll_apply_and_start(hw);
-}
-
-// Receive Trn(1) + ACK(3) + (extra Trn for read=1, no Trn for write=0).
-// Returns the 3-bit ACK code.
-static IRAM_ATTR uint8_t swd_phase_recv_ack(int trn_after_ack)
-{
-    spi_dev_t *hw = s_state.hw;
-    hw->user.usr_command = 0;
+    // 8-bit header + 1-bit pre-ACK Trn driven via command phase.
+    hw->user.usr_command = 1;
     hw->user.usr_addr = 0;
     hw->user.usr_dummy = 0;
     hw->user.usr_mosi = 0;
     hw->user.usr_miso = 1;
-    spi_ll_set_miso_bitlen(hw, 1 + 3 + trn_after_ack);
+    // user2.usr_command_bitlen field is (N - 1).
+    hw->user2.usr_command_bitlen = 8 + 1 - 1;
+    hw->user2.usr_command_value = (uint16_t)header_byte;
+    spi_ll_set_miso_bitlen(hw, 3 + trn_after_ack);
     swd_ll_apply_and_start(hw);
+    hw->user.usr_command = 0;
     uint32_t lo = hw->data_buf[0];
-    // Bit 0 is Trn (junk), bits 1..3 are ACK.
-    return (uint8_t)((lo >> 1) & 0x07);
+    // With command phase carrying the Trn, ACK occupies bits 0..2 of the
+    // sampled MISO word.
+    return (uint8_t)(lo & 0x07);
 }
 
 // ----------------------------------------------------------------------------
@@ -464,30 +457,192 @@ esp_err_t swd_line_reset(void)
     return ESP_OK;
 }
 
+// Pack up to 64 bits LSB-first from a byte stream into the (lo, hi) pair
+// the SPI hardware FIFO uses. `bit_count` <= 64.
+static IRAM_ATTR void swd_pack_bits(const uint8_t *src, uint32_t bit_count, uint32_t *out_lo, uint32_t *out_hi)
+{
+    uint64_t acc = 0;
+    for (uint32_t i = 0; i < bit_count; ++i) {
+        uint32_t b = (src[i >> 3] >> (i & 7)) & 1U;
+        acc |= ((uint64_t)b) << i;
+    }
+    *out_lo = (uint32_t)(acc & 0xFFFFFFFFu);
+    *out_hi = (uint32_t)((acc >> 32) & 0xFFFFFFFFu);
+}
+
+// Unpack up to 64 bits LSB-first from (lo, hi) into a byte stream.
+static IRAM_ATTR void swd_unpack_bits(uint32_t lo, uint32_t hi, uint32_t bit_count, uint8_t *dst)
+{
+    uint64_t acc = ((uint64_t)hi << 32) | (uint64_t)lo;
+    uint32_t bytes = (bit_count + 7U) >> 3;
+    for (uint32_t i = 0; i < bytes; ++i) {
+        dst[i] = 0;
+    }
+    for (uint32_t i = 0; i < bit_count; ++i) {
+        uint32_t b = (uint32_t)((acc >> i) & 1U);
+        dst[i >> 3] |= (uint8_t)(b << (i & 7));
+    }
+}
+
+// SPI2 hardware FIFO is 16 x 32-bit words = 512 bits. Allows the full
+// dormant-to-SWD selection alert (128 bits) to be emitted in a single
+// transaction with no clock gap; chunking corrupts the alert match
+// state in the target.
+#define SWD_SPI_FIFO_BITS 512
+
+esp_err_t swd_swj_send_bits(const uint8_t *data, uint32_t bit_count)
+{
+    if (!s_state.initialised) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (data == NULL || bit_count == 0) {
+        return ESP_OK;
+    }
+    swd_dir_drive_out();
+    spi_dev_t *hw = s_state.hw;
+    uint32_t bit_off = 0;
+    while (bit_off < bit_count) {
+        uint32_t chunk = bit_count - bit_off;
+        if (chunk > SWD_SPI_FIFO_BITS) {
+            chunk = SWD_SPI_FIFO_BITS;
+        }
+        hw->user.usr_command = 0;
+        hw->user.usr_addr = 0;
+        hw->user.usr_dummy = 0;
+        hw->user.usr_mosi = 1;
+        hw->user.usr_miso = 0;
+        spi_ll_set_mosi_bitlen(hw, chunk);
+        // Pack LSB-first from `data` into the SPI FIFO words.
+        uint32_t words = (chunk + 31U) >> 5;
+        for (uint32_t w = 0; w < words; ++w) {
+            uint32_t v = 0;
+            for (uint32_t b = 0; b < 32; ++b) {
+                uint32_t bit_idx = bit_off + (w << 5) + b;
+                if (bit_idx >= bit_off + chunk) {
+                    break;
+                }
+                uint32_t bv = (data[bit_idx >> 3] >> (bit_idx & 7)) & 1U;
+                v |= bv << b;
+            }
+            hw->data_buf[w] = v;
+        }
+        swd_ll_apply_and_start(hw);
+        bit_off += chunk;
+    }
+    return ESP_OK;
+}
+
+esp_err_t swd_seq_out_bits(const uint8_t *data, uint32_t bit_count)
+{
+    if (!s_state.initialised) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (bit_count == 0) {
+        return ESP_OK;
+    }
+    if (bit_count > 64) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    swd_dir_drive_out();
+    uint32_t lo = 0, hi = 0;
+    if (data != NULL) {
+        swd_pack_bits(data, bit_count, &lo, &hi);
+    }
+    swd_send_bits(lo, hi, (int)bit_count);
+    return ESP_OK;
+}
+
+esp_err_t swd_seq_in_bits(uint8_t *data, uint32_t bit_count)
+{
+    if (!s_state.initialised) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (bit_count == 0) {
+        return ESP_OK;
+    }
+    if (bit_count > 64) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    swd_dir_drive_in();
+    uint32_t lo = 0, hi = 0;
+    swd_recv_bits(&lo, &hi, (int)bit_count);
+    if (data != NULL) {
+        swd_unpack_bits(lo, hi, bit_count, data);
+    }
+    return ESP_OK;
+}
+
+esp_err_t swd_seq_idle(uint32_t bit_count, bool driving)
+{
+    if (!s_state.initialised) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (bit_count == 0) {
+        return ESP_OK;
+    }
+    if (driving) {
+        swd_dir_drive_out();
+        while (bit_count > 0) {
+            uint32_t chunk = bit_count > 64 ? 64 : bit_count;
+            swd_send_bits(0, 0, (int)chunk);
+            bit_count -= chunk;
+        }
+    } else {
+        swd_dir_drive_in();
+        uint32_t lo, hi;
+        while (bit_count > 0) {
+            uint32_t chunk = bit_count > 64 ? 64 : bit_count;
+            swd_recv_bits(&lo, &hi, (int)chunk);
+            bit_count -= chunk;
+        }
+    }
+    return ESP_OK;
+}
+
+// Per-transfer trace counter. The first N transfers after a reset are
+// logged at WARN level (which routes through ESP_LOGW). Set via the
+// dapprobe.set_swd_trace(N) MP entry point.
+static uint32_t s_trace_remaining = 0;
+
+void swd_set_trace(uint32_t count)
+{
+    s_trace_remaining = count;
+}
+
 swd_status_t swd_transfer(uint8_t header, const uint32_t *data_in, uint32_t *data_out)
 {
     if (!s_state.initialised) {
         return SWD_STATUS_PROTOCOL;
     }
     bool is_read = (header >> 2) & 1;     // RnW
+    bool trace = s_trace_remaining > 0;
+    if (trace) {
+        s_trace_remaining--;
+    }
+    spi_dev_t *hw = s_state.hw;
 
-    // Phase 1: DIR=out, send 8-bit header.
+    // Phase 1: combined header (MOSI 8) + ACK (MISO 4 for read, 5 for write)
+    // in a single SPI transaction so the peripheral auto-tristates MOSI
+    // for the MISO sub-window. Translator DIR set to "out" for the MOSI
+    // sub-window; we leave it driven for the MISO sub-window because on
+    // the direct-wired dev kit DIR is unconnected, and on a translator
+    // build the strobe lives on a separate path.
     swd_dir_drive_out();
-    swd_phase_send_header(header);
-
-    // Phase 2: DIR=in, receive Trn(1) + ACK(3) + (Trn(1) if read).
-    // The line is naturally in turnaround at this boundary; flipping DIR
-    // synchronously hands it over to the target.
-    swd_dir_drive_in();
-    uint8_t ack = swd_phase_recv_ack(is_read ? 1 : 0);
+    uint8_t ack = swd_phase_header_ack(header, is_read ? 0 : 1);
+    uint32_t ack_raw = hw->data_buf[0];
 
     if (ack != SWD_STATUS_OK) {
-        // Per ARM IHI 0031: on WAIT or FAULT the target releases the line
-        // after ACK. Issue Trn cycle and return.
-        // Drive idle clocks to complete the abort sequence.
-        swd_dir_drive_out();
+        // Per ARM IHI 0031: on WAIT or FAULT the target drove ACK then
+        // released the line after the post-ACK Trn cycle (which we just
+        // sampled as part of phase 1 with trn_after_ack=1 for write,
+        // 0 for read). The state of the line at this point is undefined;
+        // give the target enough idle clocks to recover.
         swd_send_bits(0, 0, 8);
         s_state.transfers_total++;
+        if (trace) {
+            ESP_LOGW(TAG, "xfer hdr=0x%02x ack_raw=0x%02x ack=%u (FAIL)",
+                     header, (unsigned)(ack_raw & 0xff), (unsigned)ack);
+        }
         if (ack == SWD_STATUS_WAIT || ack == SWD_STATUS_FAULT) {
             return (swd_status_t)ack;
         }
@@ -495,26 +650,39 @@ swd_status_t swd_transfer(uint8_t header, const uint32_t *data_in, uint32_t *dat
     }
 
     if (is_read) {
-        // Still DIR=in; target drives data + parity.
-        uint32_t lo, hi;
+        // Target keeps driving: data (32) + parity (1) + Trn (1, target
+        // releases the line). We sample 33 bits then issue 1 driving idle
+        // cycle to give the target a clean Trn boundary.
+        uint32_t lo = 0, hi = 0;
         swd_recv_bits(&lo, &hi, 33);
         uint32_t v = lo;
         uint8_t parity_rx = (uint8_t)(hi & 1);
+        uint8_t parity_calc = swd_parity32(v);
         if (data_out) {
             *data_out = v;
         }
-        // Turn the line around: DIR=out, then 8 idle clocks.
-        swd_dir_drive_out();
+        // Drive 8 idle bits to give the target Trn cycle plus extra idle.
         swd_send_bits(0, 0, 8);
         s_state.transfers_total++;
-        if (parity_rx != swd_parity32(v)) {
+        bool parity_ok = (parity_rx == parity_calc);
+        if (trace) {
+            ESP_LOGW(TAG, "xfer hdr=0x%02x ack_raw=0x%02x ack=OK data=0x%08x par_rx=%u par_calc=%u %s",
+                     header, (unsigned)(ack_raw & 0xff), (unsigned)v,
+                     (unsigned)parity_rx, (unsigned)parity_calc,
+                     parity_ok ? "ok" : "PARITY-FAIL");
+        }
+        if (!parity_ok) {
             return SWD_STATUS_PARITY_ERR;
         }
         return SWD_STATUS_OK;
     }
 
-    // Write: DIR=out, send 32 data + 1 parity.
-    swd_dir_drive_out();
+    if (trace) {
+        ESP_LOGW(TAG, "xfer hdr=0x%02x ack_raw=0x%02x ack=OK (write data=0x%08x)",
+                 header, (unsigned)(ack_raw & 0xff),
+                 (unsigned)(data_in ? *data_in : 0));
+    }
+    // Write: send 32 data + 1 parity, then 8 idle clocks.
     uint32_t v = data_in ? *data_in : 0;
     uint8_t par = swd_parity32(v);
     swd_send_bits(v, (uint32_t)par, 33);

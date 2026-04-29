@@ -1,0 +1,246 @@
+P3.7 SWD wire-layer findings, agent session 2026-04-30
+========================================================
+
+Exit criterion: pyocd reset -u 0123456789ab --target rp2040 halts
+and resets the connected Pico DUT through the synthetic CMSIS-DAP-v2
+over USB/IP, end to end.
+
+Outcome: NOT REACHED. The DPIDR read still returns DAP_TRANSFER_ERROR.
+The error mode shifted across the three iterations from "all zeros"
+(line stuck low or no clocks) to "all ones" (line stuck high), which
+strongly implicates SPI-peripheral half-duplex direction switching
+on ESP32-S3, but the symptom did not converge to a clean fix.
+
+Iterations
+----------
+
+I burned three rebuild+flash+test cycles. The high-level changes per
+cycle and their on-wire effect:
+
+Iteration 1 (commit candidate "P3.7 fix #1"):
+  Code:
+   - Added power.dut_usb.on() and power.vtarget.on() to boot.up() ahead
+     of start_usbip().
+   - Replaced stub SWJ_Sequence(count, data) (was always calling
+     swd_line_reset(), discarding the host-supplied bit pattern) with
+     a real implementation that pushes the requested bits through a
+     new io/swd.h primitive swd_swj_send_bits().
+   - Replaced stub SWD_Sequence(info, swdo, swdi) (was discarding
+     output, zeroing input) with a real implementation that emits or
+     captures bits per CMSIS-DAP sub-sequence info byte, using new
+     primitives swd_seq_out_bits() / swd_seq_in_bits().
+  On-wire effect: pyocd's dormant-to-SWD selection alert (136 bits),
+  activation code (12 bits), line resets (51 bits each), and the
+  TARGETSEL multi-drop write (DAP_SWD_Sequence cmd 0x1d for RP2040
+  core 0) are now actually emitted on SWDIO. Previously they were
+  collapsed to a 50-bit line reset only, which never wakes the
+  dormant SWD-DP on the RP2040.
+  Result: DPIDR read still 0x08; engine trace shows ack_raw=0x00.
+
+Iteration 2 (commit candidate "P3.7 fix #2"):
+  Code:
+   - Added per-transfer ESP_LOGW instrumentation in swd_transfer
+     (gated on a counter set via new MP entry dapprobe.set_swd_trace).
+     Logs hdr / ack_raw / ack / data / parity bits.
+   - Hooked DAP_SWJ_Clock command in dap_core_process to forward the
+     host-requested clock to swd_set_clock_hz. The vendored DAP.c only
+     stores the requested rate in DAP_Data.clock_delay, which is
+     consumed by the bit-bang SW_DP.c that we replaced; our SPI2
+     engine had no path to learn the requested rate, so it stayed at
+     the swd_default_config init value (10 MHz) regardless of what
+     pyocd asked for.
+   - Increased swd_swj_send_bits to do single-shot transactions up to
+     512 bits (the SPI FIFO size on ESP32-S3) so the dormant-wake
+     selection alert is contiguous on the wire (the alert match
+     state in the target probably resets on inter-transaction gaps).
+  On-wire effect: SCLK now drops to 1 MHz when pyocd asks via
+  DAP_SWJ_Clock. Engine trace confirms.
+  Result: DPIDR read still 0x08; engine trace ack_raw flipped from
+  0x00 to 0x1f. All five MISO sample bits are 1 instead of 0. This
+  is a different failure mode: the line is now sampled high-stuck
+  instead of low-stuck.
+
+Iteration 3 (commit candidate "P3.7 fix #3"):
+  Code:
+   - Restructured swd_phase_send_header / swd_phase_recv_ack into a
+     single combined swd_phase_header_ack() that drives 8 header bits
+     through the SPI **command** phase and samples (3 + TrnAfterACK)
+     ACK bits through the MISO phase, all in one SPI transaction.
+     This is the windowsair-tools pattern for ESP32-S3, which is
+     the only published reference that drives SWD via SPI on the S3.
+     Rationale: SOC_SPI_HD_BOTH_INOUT_SUPPORTED is 0 on ESP32-S3, so
+     a single half-duplex transaction with both usr_mosi=1 and
+     usr_miso=1 is unsupported. Driving the header via the command
+     phase sidesteps that restriction and gets the peripheral's
+     native command->miso direction switch at the phase boundary.
+  On-wire effect: header byte is now driven via SPI command phase;
+  one transaction handles header + ACK with hardware-managed line
+  flip.
+  Result: DPIDR read still 0x08; engine trace ack_raw=0x07. All
+  three ACK bits are 1.
+
+Causes ruled in / ruled out
+---------------------------
+
+RULED IN: SWJ_Sequence / SWD_Sequence stubs were broken.
+  pyocd's RP2040 multi-drop bring-up issues 6 SWJ_Sequences and 1
+  SWD_Sequence before the first DAP_TransferBlock. The previous
+  port/swd_glue.c stubs collapsed every SWJ to a fixed line-reset
+  and zeroed every SWD_Sequence. This unconditionally fails the
+  bring-up regardless of any other bug. Now fixed.
+
+RULED IN: swd engine clock never honored DAP_SWJ_Clock.
+  Vendored DAP.c stores the requested rate in DAP_Data.clock_delay,
+  consumed only by the bit-bang SW_DP.c that we replaced. Our SPI
+  engine was permanently at its init clock (10 MHz) which is faster
+  than what pyocd actually asked for (1 MHz) and beyond what the
+  RP2040 SWD interface is guaranteed at without buffering. Now
+  hooked at dap_core_process so swd_set_clock_hz is called when
+  ID_DAP_SWJ_Clock arrives.
+
+RULED IN: ESP32-S3 SPI half-duplex cannot use both MOSI and MISO
+in the same transaction. Confirmed via SOC_SPI_HD_BOTH_INOUT_SUPPORTED
+being 0 in IDF (also called out in research/spi2-swd-benchmark.md).
+  My iteration-2 attempt to issue a single transaction with
+  usr_mosi=1, usr_miso=1, sio=1 was a dead end. Iteration-3
+  command-phase trick is the correct ESP32-S3 path.
+
+LIKELY-RULED-OUT: power-rail-not-on at SWD-init time.
+  Adding power.dut_usb.on() + vtarget.on() to boot.up() did not
+  change the symptom. Either the Pico is being powered from another
+  rail (USB-OTG VBUS via the S3, USB direct from laptop, or 3v3
+  off the carrier), or the rail-on signal is harmless given the
+  dev-kit lacks the TPS2595 power-FET and the GPIO is just
+  floating. Either way, this is now correct in code for rev1 PCB.
+
+NOT RULED EITHER WAY: ESP32-S3 SPI MOSI release between transactions.
+  When the engine issues a pure-MISO transaction (`usr_mosi=0,
+  usr_miso=1`) following a pure-MOSI transaction, the trace shows
+  the line being sampled as 1s (the value of the last MOSI bit).
+  This suggests the IO_MUX FUN_OE for GPIO11 is not being released
+  by the SPI peripheral between transactions, only DURING the
+  active MISO sub-window of an active transaction.
+
+  The iteration-3 command-phase approach should let the peripheral
+  release the line at the command->miso boundary internally. The
+  ack_raw=0x07 suggests it does NOT release in this case either,
+  although the symptom could also be "line is genuinely high"
+  (target idle high or floating with weak pull-up).
+
+  Wire-level test (mpremote REPL, with engine detached and GPIO11
+  reconfigured as plain GPIO):
+    drive HIGH, read = 1     (expected)
+    drive LOW,  read = 0     (expected, line is connected)
+    release, no pull, read = 1 in some cases, 0 in others
+    release, PULL_UP, read = 1
+    release, PULL_DOWN, read = 0
+  The line is genuinely floating when no driver is asserting it,
+  with no external pull. So the 0x07 / 0x1f sample pattern is
+  consistent with the SPI peripheral driving 1 (last MOSI bit value)
+  rather than the Pico responding.
+
+  This points to the SPI hardware needing additional configuration
+  to release the pad between transactions, or to a different
+  technique entirely (eg toggling user.sio per-transaction, the
+  windowsair pattern that we did NOT replicate).
+
+NOT RULED EITHER WAY: Pico SWDIO actually wired to GPIO11.
+  The wire test above shows GPIO11 is genuinely floating when
+  released, which is consistent with EITHER (a) Pico SWDIO
+  connected and idle high-Z, OR (b) wire is unconnected. Cannot
+  distinguish without a scope or by physically lifting the wire.
+
+  Pi Debugprobe is also enumerated on the host (Bus 003 Dev 027).
+  If the Debugprobe is also wired to the same Pico SWDIO line,
+  bus contention is possible. Out of scope for this agent to
+  rewire.
+
+What landed
+-----------
+
+Code on this worktree branch (committed in three commits, see
+git log):
+
+src/c_modules/dapprobe/io/swd.h:
+  - new public API: swd_swj_send_bits, swd_seq_out_bits,
+    swd_seq_in_bits, swd_seq_idle, swd_set_trace.
+
+src/c_modules/dapprobe/io/swd.c:
+  - swd_phase_send_header / swd_phase_recv_ack collapsed into
+    swd_phase_header_ack which uses the SPI command phase for the
+    MOSI side (windowsair-tools pattern, ESP32-S3 specific).
+  - swd_swj_send_bits does single-shot SPI transactions up to
+    512 bits (the SPI FIFO) so the 128-bit dormant-wake selection
+    alert hits the wire contiguously.
+  - swd_set_trace + per-transfer ESP_LOGW instrumentation.
+
+src/c_modules/dapprobe/port/swd_glue.c:
+  - SWJ_Sequence forwards bytes to swd_swj_send_bits instead of
+    collapsing to swd_line_reset.
+  - SWD_Sequence dispatches sub-sequences to swd_seq_out_bits or
+    swd_seq_in_bits based on the info byte's DIN flag.
+
+src/c_modules/dapprobe/dap_core.c:
+  - dap_core_process snoops DAP_SWJ_Clock and forwards the rate
+    to swd_set_clock_hz.
+
+src/c_modules/dapprobe/moddapprobe.c:
+  - new dapprobe.set_swd_trace(N) MP entry point.
+
+src/mpy/annealage_pod/boot.py:
+  - boot.up() turns on power.dut_usb and power.vtarget rails
+    before starting usbip + dapprobe.
+
+What's left (next session)
+--------------------------
+
+The lever I did NOT pull is wire-level instrumentation (logic
+analyser on GPIO10/11). With the SPI peripheral driving the line
+during what should be a tristate window, a 'scope or LA capture
+will instantly disambiguate "SPI HW not releasing MOSI" from
+"line is fine, target not responding".
+
+Recommended next steps:
+
+1. Capture GPIO10 / GPIO11 with a logic analyser during one
+   pyocd reset run. Specifically, check whether GPIO11 goes
+   high-Z (line floats to whatever the target drives) during
+   the ACK window after the 8-bit header, or stays at the last
+   driven value. With the iteration-3 command-phase build
+   currently flashed, set_swd_trace(20) gives a single ESP_LOGW
+   line per transfer; sync the LA to that.
+
+2. If the SPI peripheral is NOT releasing MOSI between
+   transactions, the canonical ESP32-S3 fix is to toggle
+   user.sio = 1 just before START_AND_WAIT and back to 0 after,
+   per the windowsair-tools per-transaction pattern. This was
+   not replicated in iteration-3 because I expected the init-time
+   sio=1 to be persistent. It may not be on ESP32-S3.
+
+3. If GPIO11 IS being released cleanly, then the line state during
+   ACK is genuinely 1 because either:
+     a. The Pico target isn't actually wired through (cable / dev
+        kit perfboard issue);
+     b. The Pi Debugprobe is contending on the same line;
+     c. The dormant-wake / TARGETSEL sequences in iterations 1-3
+        still don't match exactly what the RP2040 expects.
+   Action: physically isolate the SWD wire and verify with a meter,
+   then re-test.
+
+4. The current swd_seq_in_bits / swd_seq_out_bits used by
+   SWD_Sequence are pure-MISO and pure-MOSI transactions, which on
+   iteration-3 we now believe do NOT auto-tristate the pad between
+   them. That's the same SPI peripheral bug as the SWD_Transfer
+   path. Same fix (per-transaction sio toggle, OR command-phase
+   for output bits) needs to be applied if 2 above is right.
+
+Files
+-----
+
+- test/integration/phase3/p37-baseline.log: pre-fix capture, identical
+  to p30-trace-final.log (DAP_TransferBlock returns 06 00 00 08).
+- test/integration/phase3/p37-fix.log: post-fix-#1 capture (SWJ/SWD
+  sequences sent correctly, but DPIDR still 0x08).
+- test/integration/phase3/p37-engine-trace.log: post-fix-#3 capture
+  with engine instrumentation, showing hdr=0xa5 ack_raw=0x07 ack=7.
+EOF
