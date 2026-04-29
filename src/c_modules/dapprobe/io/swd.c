@@ -55,6 +55,7 @@ typedef struct {
     uint32_t dir_mask_out;
     uint32_t realised_clock_hz;
     uint32_t transfers_total;
+    swd_mode_t mode;
 } swd_state_t;
 
 static swd_state_t s_state;
@@ -75,20 +76,29 @@ static void swd_bind_sclk(int gpio)
 // Bind SWDIO (data) on the SPI2 native IOMUX MOSI pin (GPIO11) for max
 // performance. Output uses spid_out via IOMUX, input via spid_in (the SIO
 // half-duplex routing handles both directions on the same pin).
+//
+// windowsair-tools spi_switch.c sets oen_sel=0 / oen_inv_sel=0 explicitly so
+// the pad output enable is sourced from the peripheral (auto-tristate for
+// the MISO sub-window). Disable the IOMUX pull-up so a floating line during
+// the read sub-window reads as the target's actual response and not the
+// IOMUX weak pull-up bias.
 static esp_err_t swd_bind_swdio_iomux(int gpio)
 {
     const spi_signal_conn_t *sig = &spi_periph_signal[1];
     if (gpio == SPI2_IOMUX_PIN_NUM_MOSI) {
-        // IOMUX direct: select FUNC for SPI2 on this pad and enable input so
-        // the peripheral can read back the line in 3-wire half-duplex.
         PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[gpio], sig->func);
         PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[gpio]);
+        PIN_PULLUP_DIS(GPIO_PIN_MUX_REG[gpio]);
+        PIN_PULLDWN_DIS(GPIO_PIN_MUX_REG[gpio]);
+        GPIO.func_out_sel_cfg[gpio].oen_sel = 0;
+        GPIO.func_out_sel_cfg[gpio].oen_inv_sel = 0;
         return ESP_OK;
     }
-    // GPIO matrix fallback for non-IOMUX pins.
     gpio_set_direction(gpio, GPIO_MODE_INPUT_OUTPUT);
     esp_rom_gpio_connect_out_signal(gpio, sig->spid_out, false, false);
     esp_rom_gpio_connect_in_signal(gpio, sig->spid_in, false);
+    GPIO.func_out_sel_cfg[gpio].oen_sel = 0;
+    GPIO.func_out_sel_cfg[gpio].oen_inv_sel = 0;
     return ESP_OK;
 }
 
@@ -160,16 +170,19 @@ static IRAM_ATTR inline void swd_ll_apply_and_start(spi_dev_t *hw)
 
 // Send `bits` bits of `data` over MOSI with MISO disabled. Used for header
 // out, write data out, line-reset sequences, idle clock generation.
+//
+// Per the windowsair pattern (spi_op.c), sio must be cleared while MOSI
+// drives the line; otherwise the half-duplex peripheral keeps the pad in a
+// mixed state that retains the last MOSI bit during the next MISO window.
 static IRAM_ATTR void swd_send_bits(uint32_t data_lo, uint32_t data_hi, int bits)
 {
     spi_dev_t *hw = s_state.hw;
-    // Configure: enable MOSI, disable MISO. Stay in 3-wire / sio mode so MOSI
-    // is on the d pin (SWDIO).
     hw->user.usr_command = 0;
     hw->user.usr_addr = 0;
     hw->user.usr_dummy = 0;
     hw->user.usr_mosi = 1;
     hw->user.usr_miso = 0;
+    hw->user.sio = 0;
     spi_ll_set_mosi_bitlen(hw, bits);
     hw->data_buf[0] = data_lo;
     if (bits > 32) {
@@ -180,6 +193,12 @@ static IRAM_ATTR void swd_send_bits(uint32_t data_lo, uint32_t data_hi, int bits
 
 // Receive `bits` bits via the SIO routing on the MOSI pin (3-wire half-duplex).
 // Returns the value in two 32-bit halves; high half is undefined for bits <= 32.
+//
+// windowsair C3/S3 pattern: sio must be set to 1 only for the duration of the
+// MISO transaction, then cleared back to 0 immediately afterwards. Leaving
+// sio=1 across MOSI transactions or holding it stale across transaction
+// boundaries leaves the SPI peripheral asserting the last MOSI bit value
+// onto the pad, so MISO samples our own driven line instead of the target.
 static IRAM_ATTR void swd_recv_bits(uint32_t *out_lo, uint32_t *out_hi, int bits)
 {
     spi_dev_t *hw = s_state.hw;
@@ -188,8 +207,10 @@ static IRAM_ATTR void swd_recv_bits(uint32_t *out_lo, uint32_t *out_hi, int bits
     hw->user.usr_dummy = 0;
     hw->user.usr_mosi = 0;
     hw->user.usr_miso = 1;
+    hw->user.sio = 1;
     spi_ll_set_miso_bitlen(hw, bits);
     swd_ll_apply_and_start(hw);
+    hw->user.sio = 0;
     *out_lo = hw->data_buf[0];
     if (bits > 32) {
         *out_hi = hw->data_buf[1];
@@ -245,12 +266,171 @@ static IRAM_ATTR uint8_t swd_phase_header_ack(uint8_t header_byte, int trn_after
     hw->user2.usr_command_bitlen = 8 + 1 - 1;
     hw->user2.usr_command_value = (uint16_t)header_byte;
     spi_ll_set_miso_bitlen(hw, 3 + trn_after_ack);
+    // windowsair C3 pattern: sio=1 only for the duration of the transaction
+    // so the peripheral tristates MOSI for the MISO sub-window. Without this
+    // the pad keeps driving 1 (last command bit) and ACK reads as 0b111.
+    hw->user.sio = 1;
     swd_ll_apply_and_start(hw);
+    hw->user.sio = 0;
     hw->user.usr_command = 0;
     uint32_t lo = hw->data_buf[0];
     // With command phase carrying the Trn, ACK occupies bits 0..2 of the
     // sampled MISO word.
     return (uint8_t)(lo & 0x07);
+}
+
+// ----------------------------------------------------------------------------
+// GPIO bit-bang fallback.
+// ----------------------------------------------------------------------------
+//
+// Diagnostic backend that bypasses SPI2 entirely. Drives SWCLK/SWDIO with
+// gpio_set_level / gpio_get_level. Slow (kHz-class), only used to bisect
+// "SPI engine bug" vs "wire/target hardware". Selected via swd_set_mode().
+
+static void swd_gpio_setup_pads(void)
+{
+    int swclk = s_state.cfg.pin_swclk;
+    int swdio = s_state.cfg.pin_swdio;
+    gpio_reset_pin(swclk);
+    gpio_reset_pin(swdio);
+    gpio_set_direction(swclk, GPIO_MODE_OUTPUT);
+    gpio_set_direction(swdio, GPIO_MODE_INPUT_OUTPUT);
+    gpio_set_pull_mode(swdio, GPIO_FLOATING);
+    gpio_set_level(swclk, 0);
+    gpio_set_level(swdio, 1);
+}
+
+static IRAM_ATTR void swd_gpio_delay(void)
+{
+    // ~5 us half-cycle -> ~100 kHz SCLK.
+    for (volatile int i = 0; i < 200; ++i) { __asm__ __volatile__(""); }
+}
+
+static IRAM_ATTR void swd_gpio_clock_out(int level)
+{
+    gpio_set_level(s_state.cfg.pin_swdio, level & 1);
+    gpio_set_level(s_state.cfg.pin_swclk, 0);
+    swd_gpio_delay();
+    gpio_set_level(s_state.cfg.pin_swclk, 1);
+    swd_gpio_delay();
+}
+
+static IRAM_ATTR int swd_gpio_clock_in(void)
+{
+    gpio_set_level(s_state.cfg.pin_swclk, 0);
+    swd_gpio_delay();
+    int v = gpio_get_level(s_state.cfg.pin_swdio);
+    gpio_set_level(s_state.cfg.pin_swclk, 1);
+    swd_gpio_delay();
+    return v;
+}
+
+static void swd_gpio_dir_out(void)
+{
+    gpio_set_direction(s_state.cfg.pin_swdio, GPIO_MODE_OUTPUT);
+    if (s_state.cfg.pin_dir >= 0) {
+        gpio_set_level(s_state.cfg.pin_dir, s_state.cfg.dir_active_high ? 1 : 0);
+    }
+}
+
+static void swd_gpio_dir_in(void)
+{
+    gpio_set_direction(s_state.cfg.pin_swdio, GPIO_MODE_INPUT);
+    if (s_state.cfg.pin_dir >= 0) {
+        gpio_set_level(s_state.cfg.pin_dir, s_state.cfg.dir_active_high ? 0 : 1);
+    }
+}
+
+static void swd_gpio_send_bits(uint32_t lo, uint32_t hi, int bits)
+{
+    swd_gpio_dir_out();
+    for (int i = 0; i < bits; ++i) {
+        int v = (i < 32) ? ((lo >> i) & 1) : ((hi >> (i - 32)) & 1);
+        swd_gpio_clock_out(v);
+    }
+}
+
+static void swd_gpio_recv_bits(uint32_t *out_lo, uint32_t *out_hi, int bits)
+{
+    swd_gpio_dir_in();
+    uint32_t lo = 0, hi = 0;
+    for (int i = 0; i < bits; ++i) {
+        int v = swd_gpio_clock_in();
+        if (i < 32) { lo |= ((uint32_t)v) << i; }
+        else        { hi |= ((uint32_t)v) << (i - 32); }
+    }
+    *out_lo = lo;
+    *out_hi = hi;
+}
+
+static void swd_gpio_send_byte_lsb(uint8_t b)
+{
+    swd_gpio_dir_out();
+    for (int i = 0; i < 8; ++i) {
+        swd_gpio_clock_out((b >> i) & 1);
+    }
+}
+
+static swd_status_t swd_gpio_transfer(uint8_t header, const uint32_t *data_in, uint32_t *data_out)
+{
+    bool is_read = (header >> 2) & 1;
+    swd_gpio_send_byte_lsb(header);
+    // Trn before ACK: 1 clock cycle, line floating.
+    swd_gpio_dir_in();
+    (void)swd_gpio_clock_in();
+    int a0 = swd_gpio_clock_in();
+    int a1 = swd_gpio_clock_in();
+    int a2 = swd_gpio_clock_in();
+    uint8_t ack = (uint8_t)((a0 & 1) | ((a1 & 1) << 1) | ((a2 & 1) << 2));
+    if (ack != SWD_STATUS_OK) {
+        // For WAIT/FAULT a single Trn covers the post-ACK turnaround for reads.
+        // For protocol error, line state undefined; drive 8 idle cycles.
+        if (!is_read) {
+            // Trn after ACK on writes: read 1 cycle to absorb.
+            (void)swd_gpio_clock_in();
+        }
+        swd_gpio_dir_out();
+        for (int i = 0; i < 8; ++i) {
+            swd_gpio_clock_out(0);
+        }
+        s_state.transfers_total++;
+        if (ack == SWD_STATUS_WAIT || ack == SWD_STATUS_FAULT) {
+            return (swd_status_t)ack;
+        }
+        return SWD_STATUS_PROTOCOL;
+    }
+    if (is_read) {
+        uint32_t v = 0;
+        for (int i = 0; i < 32; ++i) {
+            v |= ((uint32_t)swd_gpio_clock_in()) << i;
+        }
+        int parity_rx = swd_gpio_clock_in();
+        // Trn after data on read: 1 cycle.
+        (void)swd_gpio_clock_in();
+        swd_gpio_dir_out();
+        for (int i = 0; i < 8; ++i) {
+            swd_gpio_clock_out(0);
+        }
+        if (data_out) { *data_out = v; }
+        s_state.transfers_total++;
+        if (((uint8_t)swd_parity32(v) & 1) != (parity_rx & 1)) {
+            return SWD_STATUS_PARITY_ERR;
+        }
+        return SWD_STATUS_OK;
+    }
+    // Write: Trn after ACK, then drive 32 data + 1 parity, then idle.
+    swd_gpio_dir_out();
+    swd_gpio_clock_out(0);
+    uint32_t v = data_in ? *data_in : 0;
+    for (int i = 0; i < 32; ++i) {
+        swd_gpio_clock_out((v >> i) & 1);
+    }
+    swd_gpio_clock_out(swd_parity32(v) & 1);
+    for (int i = 0; i < 8; ++i) {
+        swd_gpio_clock_out(0);
+    }
+    s_state.transfers_total++;
+    return SWD_STATUS_OK;
 }
 
 // ----------------------------------------------------------------------------
@@ -339,10 +519,11 @@ esp_err_t swd_init(const swd_config_t *config)
     // Step 3: configure base SPI2 settings for SWD framing.
     // - LSB-first byte order (SWD is LSB on the wire)
     // - mode 0 (CPOL=0 CPHA=0); SWD samples on rising edge
-    // - half-duplex 3-wire (sio=1)
+    // - half-duplex 3-wire; sio is toggled per-transaction (windowsair C3
+    //   pattern) so init leaves it cleared.
     spi_ll_set_mosi_bitlen(s_state.hw, 8 - 1);
     spi_ll_set_miso_bitlen(s_state.hw, 8 - 1);
-    s_state.hw->user.sio = 1;
+    s_state.hw->user.sio = 0;
     s_state.hw->user.doutdin = 0;
     // LSB out and in; SWD is LSB on the wire. ESP32-S3 SPI uses 2-bit fields
     // for bit-order with the LSB-first encoding being value 1.
@@ -448,6 +629,16 @@ esp_err_t swd_line_reset(void)
     if (!s_state.initialised) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (s_state.mode == SWD_MODE_GPIO) {
+        swd_gpio_dir_out();
+        for (int i = 0; i < 56; ++i) {
+            swd_gpio_clock_out(1);
+        }
+        for (int i = 0; i < 16; ++i) {
+            swd_gpio_clock_out(0);
+        }
+        return ESP_OK;
+    }
     swd_dir_drive_out();
     // 56 SWCLKs with SWDIO held high (spec says >= 50; round up to a byte multiple).
     // Two 28-bit chunks fit in data_buf[0,1] but we already split at the helper.
@@ -498,6 +689,14 @@ esp_err_t swd_swj_send_bits(const uint8_t *data, uint32_t bit_count)
     if (data == NULL || bit_count == 0) {
         return ESP_OK;
     }
+    if (s_state.mode == SWD_MODE_GPIO) {
+        swd_gpio_dir_out();
+        for (uint32_t i = 0; i < bit_count; ++i) {
+            int bv = (data[i >> 3] >> (i & 7)) & 1;
+            swd_gpio_clock_out(bv);
+        }
+        return ESP_OK;
+    }
     swd_dir_drive_out();
     spi_dev_t *hw = s_state.hw;
     uint32_t bit_off = 0;
@@ -543,6 +742,14 @@ esp_err_t swd_seq_out_bits(const uint8_t *data, uint32_t bit_count)
     if (bit_count > 64) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (s_state.mode == SWD_MODE_GPIO) {
+        swd_gpio_dir_out();
+        for (uint32_t i = 0; i < bit_count; ++i) {
+            int bv = data ? ((data[i >> 3] >> (i & 7)) & 1) : 0;
+            swd_gpio_clock_out(bv);
+        }
+        return ESP_OK;
+    }
     swd_dir_drive_out();
     uint32_t lo = 0, hi = 0;
     if (data != NULL) {
@@ -563,6 +770,20 @@ esp_err_t swd_seq_in_bits(uint8_t *data, uint32_t bit_count)
     if (bit_count > 64) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (s_state.mode == SWD_MODE_GPIO) {
+        swd_gpio_dir_in();
+        if (data != NULL) {
+            uint32_t bytes = (bit_count + 7U) >> 3;
+            for (uint32_t i = 0; i < bytes; ++i) { data[i] = 0; }
+        }
+        for (uint32_t i = 0; i < bit_count; ++i) {
+            int v = swd_gpio_clock_in();
+            if (data != NULL && v) {
+                data[i >> 3] |= (uint8_t)(1U << (i & 7));
+            }
+        }
+        return ESP_OK;
+    }
     swd_dir_drive_in();
     uint32_t lo = 0, hi = 0;
     swd_recv_bits(&lo, &hi, (int)bit_count);
@@ -578,6 +799,20 @@ esp_err_t swd_seq_idle(uint32_t bit_count, bool driving)
         return ESP_ERR_INVALID_STATE;
     }
     if (bit_count == 0) {
+        return ESP_OK;
+    }
+    if (s_state.mode == SWD_MODE_GPIO) {
+        if (driving) {
+            swd_gpio_dir_out();
+            for (uint32_t i = 0; i < bit_count; ++i) {
+                swd_gpio_clock_out(0);
+            }
+        } else {
+            swd_gpio_dir_in();
+            for (uint32_t i = 0; i < bit_count; ++i) {
+                (void)swd_gpio_clock_in();
+            }
+        }
         return ESP_OK;
     }
     if (driving) {
@@ -618,6 +853,15 @@ swd_status_t swd_transfer(uint8_t header, const uint32_t *data_in, uint32_t *dat
     bool trace = s_trace_remaining > 0;
     if (trace) {
         s_trace_remaining--;
+    }
+    if (s_state.mode == SWD_MODE_GPIO) {
+        swd_status_t st = swd_gpio_transfer(header, data_in, data_out);
+        if (trace) {
+            ESP_LOGW(TAG, "gpio xfer hdr=0x%02x st=%u %s",
+                     header, (unsigned)st,
+                     is_read ? "read" : "write");
+        }
+        return st;
     }
     spi_dev_t *hw = s_state.hw;
 
@@ -699,4 +943,41 @@ bool swd_is_initialised(void)
 uint32_t swd_transfers_total(void)
 {
     return s_state.transfers_total;
+}
+
+esp_err_t swd_set_mode(swd_mode_t mode)
+{
+    if (!s_state.initialised) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (mode == s_state.mode) {
+        return ESP_OK;
+    }
+    if (mode == SWD_MODE_GPIO) {
+        // Reroute SCLK and SWDIO away from SPI2 onto plain GPIO drivers.
+        // The SPI peripheral is left configured but idle; GPIO control
+        // overrides the IOMUX route.
+        gpio_reset_pin(s_state.cfg.pin_swclk);
+        gpio_reset_pin(s_state.cfg.pin_swdio);
+        gpio_set_direction(s_state.cfg.pin_swclk, GPIO_MODE_OUTPUT);
+        gpio_set_direction(s_state.cfg.pin_swdio, GPIO_MODE_INPUT_OUTPUT);
+        gpio_set_pull_mode(s_state.cfg.pin_swdio, GPIO_FLOATING);
+        gpio_set_level(s_state.cfg.pin_swclk, 0);
+        gpio_set_level(s_state.cfg.pin_swdio, 1);
+        s_state.mode = SWD_MODE_GPIO;
+        ESP_LOGW(TAG, "switched to GPIO bit-bang mode (~100 kHz)");
+    } else {
+        // Reattach SPI2 IOMUX. Best effort; full switch back is not exercised
+        // outside diagnostics so we keep this minimal.
+        swd_bind_sclk(s_state.cfg.pin_swclk);
+        (void)swd_bind_swdio_iomux(s_state.cfg.pin_swdio);
+        s_state.mode = SWD_MODE_SPI;
+        ESP_LOGW(TAG, "switched to SPI mode");
+    }
+    return ESP_OK;
+}
+
+swd_mode_t swd_get_mode(void)
+{
+    return s_state.mode;
 }
