@@ -1,0 +1,368 @@
+I (95850) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=843
+I (95850) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (95850) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=4
+I (95850) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (95860) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=844
+I (95860) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (95870) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=58
+I (95870) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96050) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=845
+I (96050) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96050) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=4
+I (96060) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96070) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=846
+I (96070) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96070) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=20
+I (96080) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96080) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=847
+I (96090) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96100) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=58
+I (96100) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96110) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=848
+I (96110) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96120) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=18
+I (96120) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96130) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=849
+I (96130) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96140) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=26
+I (96140) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96360) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=850
+I (96360) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96360) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=4
+I (96360) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96370) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=851
+I (96370) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96380) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=20
+I (96390) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96390) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=852
+I (96400) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96400) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=26
+I (96410) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96410) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=853
+I (96420) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (96420) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=20
+I (96430) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (96440) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=64 seq=854
+I (96440) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96440) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=0
+I (96450) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96460) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=856
+I (96460) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96470) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 fe 00 00 00 00 00 00
+I (96470) dapprobe: dap_resp_out: cmd=0x00 len=3 b0..7=00 01 04 00 00 00 00 00
+I (96480) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96490) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96490) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=857
+I (96490) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96500) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=3
+I (96510) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96510) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=858
+I (96520) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96520) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 04 00 00 00 00 00 00
+I (96530) dapprobe: dap_resp_out: cmd=0x00 len=8 b0..7=00 06 32 2e 31 2e 32 00
+I (96540) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96540) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96550) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=859
+I (96550) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96560) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=8
+I (96560) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96570) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=860
+I (96570) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96580) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 09 00 00 00 00 00 00
+I (96580) dapprobe: dap_resp_out: cmd=0x00 len=8 b0..7=00 06 32 2e 31 2e 32 00
+I (96590) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96600) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96600) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=861
+I (96610) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96610) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=8
+I (96620) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96630) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=862
+I (96630) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96630) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 ff 00 00 00 00 00 00
+I (96640) dapprobe: dap_resp_out: cmd=0x00 len=4 b0..7=00 02 00 02 00 00 00 00
+I (96650) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96650) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96660) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=863
+I (96660) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96670) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=4
+I (96680) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96680) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=864
+I (96690) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96690) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 f0 00 00 00 00 00 00
+I (96700) dapprobe: dap_resp_out: cmd=0x00 len=4 b0..7=00 02 15 00 00 00 00 00
+I (96700) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96710) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96710) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=865
+I (96720) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96730) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=4
+I (96730) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96740) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=866
+I (96740) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96750) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 fd 00 00 00 00 00 00
+I (96750) dapprobe: dap_resp_out: cmd=0x00 len=6 b0..7=00 04 00 00 80 00 00 00
+I (96760) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96770) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96770) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=867
+I (96780) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96780) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=6
+I (96790) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96790) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=868
+I (96800) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96800) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 07 00 00 00 00 00 00
+I (96810) dapprobe: dap_resp_out: cmd=0x00 len=2 b0..7=00 00 00 00 00 00 00 00
+I (96820) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96820) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96830) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=869
+I (96830) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96840) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (96840) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96850) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=870
+I (96850) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96860) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 08 00 00 00 00 00 00
+I (96870) dapprobe: dap_resp_out: cmd=0x00 len=2 b0..7=00 00 00 00 00 00 00 00
+I (96870) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96880) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96880) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=871
+I (96890) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96890) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (96900) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96900) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=872
+I (96910) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96920) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 05 00 00 00 00 00 00
+I (96920) dapprobe: dap_resp_out: cmd=0x00 len=2 b0..7=00 00 00 00 00 00 00 00
+I (96930) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96940) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (96940) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=873
+I (96950) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (96950) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (96960) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (96960) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=874
+I (96970) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (96970) dapprobe: dap_cmd_in: cmd=0x00 len=2 b0..7=00 06 00 00 00 00 00 00
+I (96980) dapprobe: dap_resp_out: cmd=0x00 len=2 b0..7=00 00 00 00 00 00 00 00
+I (96990) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (96990) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97000) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=875
+I (97000) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97010) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97010) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97020) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=876
+I (97020) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (97030) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=4
+I (97030) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (97040) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=877
+I (97040) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (97050) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=20
+I (97060) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (97060) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=878
+I (97070) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (97070) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=26
+I (97080) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (97090) usbip: usbip_in: busid=2-1 ep=0 dir=IN len=254 seq=879
+I (97090) usbip: usbip_dispatch: busid=2-1 ep=0 target=virtual
+I (97090) usbip: usbip_complete: busid=2-1 ep=0 status=0 actual=20
+I (97100) usbip: usbip_out: busid=2-1 ep=0 ok=1
+I (97110) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=64 seq=880
+I (97110) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97110) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=0
+I (97120) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97130) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=882
+I (97130) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97140) dapprobe: dap_cmd_in: cmd=0x18 len=2 b0..7=18 00 00 00 00 00 00 00
+I (97140) dapprobe: dap_resp_out: cmd=0x18 len=2 b0..7=18 00 00 00 00 00 00 00
+I (97150) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97160) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97160) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=883
+I (97170) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97170) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97180) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97180) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=884
+I (97190) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97190) dapprobe: dap_cmd_in: cmd=0x17 len=2 b0..7=17 00 00 00 00 00 00 00
+I (97200) dapprobe: dap_resp_out: cmd=0x17 len=2 b0..7=17 00 00 00 00 00 00 00
+I (97210) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97210) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97220) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=885
+I (97220) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97230) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97230) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97240) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=5 seq=886
+I (97240) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97250) dapprobe: dap_cmd_in: cmd=0x11 len=5 b0..7=11 40 42 0f 00 00 00 00
+I (97260) dapprobe: dap_resp_out: cmd=0x11 len=2 b0..7=11 00 00 00 00 00 00 00
+I (97260) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97270) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97270) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=887
+I (97280) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97280) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97290) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97300) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=888
+I (97300) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97300) dapprobe: dap_cmd_in: cmd=0x02 len=2 b0..7=02 01 00 00 00 00 00 00
+I (97310) dapprobe: dap_resp_out: cmd=0x02 len=2 b0..7=02 01 00 00 00 00 00 00
+I (97320) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97320) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97330) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=889
+I (97330) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97340) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97350) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97350) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=5 seq=890
+I (97360) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97360) dapprobe: dap_cmd_in: cmd=0x11 len=5 b0..7=11 40 42 0f 00 00 00 00
+I (97370) dapprobe: dap_resp_out: cmd=0x11 len=2 b0..7=11 00 00 00 00 00 00 00
+I (97370) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97380) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97380) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=891
+I (97390) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97400) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97400) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97410) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=6 seq=892
+I (97410) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97420) dapprobe: dap_cmd_in: cmd=0x04 len=6 b0..7=04 02 50 00 00 00 00 00
+I (97420) dapprobe: dap_resp_out: cmd=0x04 len=2 b0..7=04 00 00 00 00 00 00 00
+I (97430) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97440) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97440) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=893
+I (97450) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97450) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97460) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97460) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=2 seq=894
+I (97470) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97470) dapprobe: dap_cmd_in: cmd=0x13 len=2 b0..7=13 00 00 00 00 00 00 00
+I (97480) dapprobe: dap_resp_out: cmd=0x13 len=2 b0..7=13 00 00 00 00 00 00 00
+I (97490) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97490) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97500) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=895
+I (97500) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97510) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97510) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97520) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=3 seq=896
+I (97520) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97530) dapprobe: dap_cmd_in: cmd=0x01 len=3 b0..7=01 00 01 00 00 00 00 00
+I (97540) dapprobe: dap_resp_out: cmd=0x01 len=2 b0..7=01 00 00 00 00 00 00 00
+I (97540) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97550) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97550) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=897
+I (97560) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97560) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97570) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97580) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=3 seq=898
+I (97580) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97590) dapprobe: dap_cmd_in: cmd=0x01 len=3 b0..7=01 01 00 00 00 00 00 00
+I (97590) dapprobe: dap_resp_out: cmd=0x01 len=2 b0..7=01 00 00 00 00 00 00 00
+I (97600) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97610) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97610) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=899
+I (97620) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97620) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97630) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97630) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=19 seq=900
+I (97640) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97640) dapprobe: dap_cmd_in: cmd=0x12 len=19 b0..7=12 88 ff 92 f3 09 62 95
+I (97650) dapprobe: dap_resp_out: cmd=0x12 len=2 b0..7=12 00 00 00 00 00 00 00
+I (97660) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97660) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97670) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=901
+I (97670) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97680) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97680) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97690) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=4 seq=902
+I (97690) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97700) dapprobe: dap_cmd_in: cmd=0x12 len=4 b0..7=12 0c a0 01 00 00 00 00
+I (97710) dapprobe: dap_resp_out: cmd=0x12 len=2 b0..7=12 00 00 00 00 00 00 00
+I (97710) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97720) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97720) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=903
+I (97730) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97730) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97740) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97740) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=9 seq=904
+I (97750) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97760) dapprobe: dap_cmd_in: cmd=0x12 len=9 b0..7=12 33 ff ff ff ff ff ff
+I (97760) dapprobe: dap_resp_out: cmd=0x12 len=2 b0..7=12 00 00 00 00 00 00 00
+I (97770) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97780) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97780) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=905
+I (97780) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97790) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97800) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97800) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=3 seq=906
+I (97810) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97810) dapprobe: dap_cmd_in: cmd=0x12 len=3 b0..7=12 02 00 00 00 00 00 00
+I (97820) dapprobe: dap_resp_out: cmd=0x12 len=2 b0..7=12 00 00 00 00 00 00 00
+I (97830) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97830) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97840) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=907
+I (97840) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97850) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97850) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97860) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=9 seq=908
+I (97860) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97870) dapprobe: dap_cmd_in: cmd=0x12 len=9 b0..7=12 33 ff ff ff ff ff ff
+I (97870) dapprobe: dap_resp_out: cmd=0x12 len=2 b0..7=12 00 00 00 00 00 00 00
+I (97880) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97890) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97890) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=909
+I (97900) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97900) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97910) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97910) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=3 seq=910
+I (97920) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97920) dapprobe: dap_cmd_in: cmd=0x12 len=3 b0..7=12 02 00 00 00 00 00 00
+I (97930) dapprobe: dap_resp_out: cmd=0x12 len=2 b0..7=12 00 00 00 00 00 00 00
+I (97940) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (97940) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (97950) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=911
+I (97950) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (97960) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (97970) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (97970) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=13 seq=912
+I (97980) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (97980) dapprobe: dap_cmd_in: cmd=0x1d len=13 b0..7=1d 04 08 99 85 21 27 29
+I (97990) dapprobe: dap_resp_out: cmd=0x1d len=3 b0..7=1d 00 00 00 00 00 00 00
+I (97990) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (98000) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (98000) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=913
+I (98010) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (98020) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=3
+I (98020) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (98030) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=5 seq=914
+I (98030) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (98040) dapprobe: dap_cmd_in: cmd=0x06 len=5 b0..7=06 00 01 00 02 00 00 00
+I (98040) dapprobe: dap_resp_out: cmd=0x06 len=4 b0..7=06 00 00 08 00 00 00 00
+I (98050) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (98060) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (98060) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=915
+I (98070) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (98070) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=4
+I (98080) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (98080) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=3 seq=916
+I (98090) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (98090) dapprobe: dap_cmd_in: cmd=0x01 len=3 b0..7=01 00 00 00 00 00 00 00
+I (98100) dapprobe: dap_resp_out: cmd=0x01 len=2 b0..7=01 00 00 00 00 00 00 00
+I (98110) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (98110) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (98120) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=917
+I (98120) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (98130) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (98130) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (98140) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=3 seq=918
+I (98140) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (98150) dapprobe: dap_cmd_in: cmd=0x01 len=3 b0..7=01 01 00 00 00 00 00 00
+I (98160) dapprobe: dap_resp_out: cmd=0x01 len=2 b0..7=01 00 00 00 00 00 00 00
+I (98160) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (98170) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (98170) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=919
+I (98180) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (98180) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (98190) usbip: usbip_out: busid=2-1 ep=2 ok=1
+I (98200) usbip: usbip_in: busid=2-1 ep=1 dir=OUT len=1 seq=920
+I (98200) usbip: usbip_dispatch: busid=2-1 ep=1 target=virtual
+I (98210) dapprobe: dap_cmd_in: cmd=0x03 len=1 b0..7=03 00 00 00 00 00 00 00
+I (98210) dapprobe: dap_resp_out: cmd=0x03 len=2 b0..7=03 00 00 00 00 00 00 00
+I (98220) usbip: usbip_complete: busid=2-1 ep=1 status=0 actual=0
+I (98230) usbip: usbip_out: busid=2-1 ep=1 ok=1
+I (98230) usbip: usbip_in: busid=2-1 ep=2 dir=IN len=512 seq=921
+I (98240) usbip: usbip_dispatch: busid=2-1 ep=2 target=virtual
+I (98240) usbip: usbip_complete: busid=2-1 ep=2 status=0 actual=2
+I (98250) usbip: usbip_out: busid=2-1 ep=2 ok=1

@@ -111,46 +111,48 @@ void dap_port_set_led_callbacks(dap_port_led_cb_t connected, dap_port_led_cb_t r
  * ------------------------------------------------------------------ */
 
 /* SWJ_Sequence: emit `count` bits LSB-first from `data` on the SWDIO
- * line with SWCLK toggling. Used by hosts to issue a JTAG-to-SWD switch
- * sequence and 50+ ones to reset the line.
+ * line with SWCLK toggling. Used by hosts to issue line resets, the
+ * JTAG-to-SWD switch sequence, the dormant-to-SWD selection alert
+ * (128 bits) and the SW-DP activation code (8 bits).
  *
- * The engine does not directly expose "stream N raw bits"; the closest
- * is swd_line_reset() (50 ones + 16 zeros). For the line-reset case,
- * which is by far the dominant use, we recognise the canonical pattern
- * and call swd_line_reset(). For other patterns we walk the bits through
- * a software loop driving the engine's SPI peripheral via low-level
- * pulses; rare path so latency is acceptable.
- *
- * Implementation note: WS-D's swd.h does not expose a "send raw bits"
- * primitive. To stay strictly within its API we map all SWJ sequences
- * to swd_line_reset(); this covers the only sequences pyOCD/probe-rs
- * actually issue (line-reset and JTAG-to-SWD), at the cost of being
- * imprecise about the exact bits emitted. Future improvement: extend
- * swd.h with a swd_swj_bits(count, data) primitive once WS-D is open
- * for additions. */
+ * `count == 0` means 256 bits per the CMSIS-DAP spec.
+ */
 void SWJ_Sequence(uint32_t count, const uint8_t *data) {
-    (void)count;
-    (void)data;
-    if (!swd_is_initialised()) {
+    if (!swd_is_initialised() || data == NULL) {
         return;
     }
-    (void)swd_line_reset();
+    if (count == 0U) {
+        count = 256U;
+    }
+    (void)swd_swj_send_bits(data, count);
 }
 
-/* SWD_Sequence: emit or capture `count` bits on the SWDIO line. CMSIS-DAP
- * uses this for the SWD-to-JTAG/dormant switch sequence and for
- * targets that need bit-level frame steering. We do not implement it in
- * Phase 2 because the only consumer is JTAG bring-up (DAP_JTAG=0 here)
- * and a small set of vendor-specific recovery sequences; pyOCD and
- * probe-rs both skip it for ARM targets that come up cleanly via line
- * reset. The function exists so DAP.c links. */
+/* SWD_Sequence: emit or capture a bit sequence on SWDIO. The vendored
+ * DAP_SWD_Sequence handler iterates over the host-supplied list of
+ * sub-sequences and calls this function once per sub-sequence with the
+ * sequence info byte (count in bits 0..5, direction in bit 7). RP2040
+ * multi-drop bring-up uses this to write the TARGETSEL register without
+ * needing an ACK back from the DP.
+ *
+ *   info bit 7 = 1 -> capture from SWDIO into `swdi`
+ *   info bit 7 = 0 -> drive `swdo` onto SWDIO
+ *   info bits 0..5 = bit count; 0 means 64.
+ */
 void SWD_Sequence(uint32_t info, const uint8_t *swdo, uint8_t *swdi) {
-    (void)info;
-    (void)swdo;
-    if (swdi != NULL) {
-        uint32_t count = info & SWD_SEQUENCE_CLK;
-        if (count == 0U) { count = 64U; }
-        memset(swdi, 0, (size_t)((count + 7U) >> 3));
+    if (!swd_is_initialised()) {
+        if (swdi != NULL) {
+            uint32_t count = info & SWD_SEQUENCE_CLK;
+            if (count == 0U) { count = 64U; }
+            memset(swdi, 0, (size_t)((count + 7U) >> 3));
+        }
+        return;
+    }
+    uint32_t count = info & SWD_SEQUENCE_CLK;
+    if (count == 0U) { count = 64U; }
+    if ((info & SWD_SEQUENCE_DIN) != 0U) {
+        (void)swd_seq_in_bits(swdi, count);
+    } else {
+        (void)swd_seq_out_bits(swdo, count);
     }
 }
 
