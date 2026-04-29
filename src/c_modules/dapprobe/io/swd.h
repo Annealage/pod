@@ -144,6 +144,19 @@ uint32_t swd_transfers_total(void);     // monotonic counter, useful for tests/p
 // wire-level protocol mismatches; default is 0 (no tracing).
 void swd_set_trace(uint32_t count);
 
+// Backend mode selector. SPI is the production path (high speed, ESP32-S3
+// SPI2 + dedic_gpio). GPIO is a slow software bit-bang fallback intended
+// purely for diagnostics: when the SPI engine fails on the wire, the GPIO
+// path bypasses the peripheral so the operator can bisect "SPI engine bug"
+// vs "wire/target hardware". Switching mode reconfigures the pads.
+typedef enum {
+    SWD_MODE_SPI = 0,
+    SWD_MODE_GPIO = 1,
+} swd_mode_t;
+
+esp_err_t swd_set_mode(swd_mode_t mode);
+swd_mode_t swd_get_mode(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,0 +1,63 @@
+0000873 I Target type is rp2040 [board]
+0001055 I DP IDR = 0x0bc12477 (v2 MINDP rev0) [dap]
+0001173 I AHB-AP#0 IDR = 0x04770031 (AHB-AP var3 rev0) [discovery]
+0001233 I AHB-AP#0 Class 0x1 ROM table #0 @ 0xe00ff000 (designer=43b:Arm part=4c0) [rom_table]
+0001281 I [0]<e000e000:SCS v6-M class=14 designer=43b:Arm part=008> [rom_table]
+0001306 I [1]<e0001000:DWT v6-M class=14 designer=43b:Arm part=00a> [rom_table]
+0001337 I [2]<e0002000:BPU v6-M class=14 designer=43b:Arm part=00b> [rom_table]
+0001381 I CPU core #0: Cortex-M0+ r0p1, v6.0-M architecture [cortex_m]
+0001381 I   Extensions: [MPU] [cortex_m]
+0001416 I 2 hardware watchpoints [dwt]
+0001435 I 4 hardware breakpoints, 0 literal comparators [fpb]
+0001468 I Performing SW reset... [reset_cmd]
+0001735 I Done. [reset_cmd]
+W (36170) swd: gpio xfer hdr=0xa5 st=1 read
+W (36180) swd: gpio xfer hdr=0xb1 st=1 write
+W (36180) swd: gpio xfer hdr=0x8d st=1 read
+W (36190) swd: gpio xfer hdr=0xb1 st=1 write
+W (36190) swd: gpio xfer hdr=0x8d st=1 read
+W (36200) swd: gpio xfer hdr=0xb1 st=1 write
+W (36200) swd: gpio xfer hdr=0xa5 st=1 read
+W (36210) swd: gpio xfer hdr=0x81 st=1 write
+W (36210) swd: gpio xfer hdr=0xb1 st=1 write
+W (36210) swd: gpio xfer hdr=0xa9 st=1 write
+W (36220) swd: gpio xfer hdr=0x8d st=1 read
+W (36230) swd: gpio xfer hdr=0xb1 st=1 write
+W (36240) swd: gpio xfer hdr=0x9f st=1 read
+W (36240) swd: gpio xfer hdr=0xbd st=1 read
+W (36240) swd: gpio xfer hdr=0xb1 st=1 write
+W (36250) swd: gpio xfer hdr=0x9f st=1 read
+W (36250) swd: gpio xfer hdr=0xbd st=1 read
+W (36250) swd: gpio xfer hdr=0xb1 st=1 write
+W (36260) swd: gpio xfer hdr=0x9f st=1 read
+W (36260) swd: gpio xfer hdr=0xbd st=1 read
+W (36640) usbhost: USB device gone
+I (36640) usbhost: device disconnected: 1-1
+I (37030) usbhost: USB device attached: address=2
+I (37030) usbhost: exported busid=1-2 vid=2e8a pid=0005 num_intf=2 num_ep=3
+
+--- Engine trace (full) ---
+W (36170) swd: gpio xfer hdr=0xa5 st=1 read
+W (36180) swd: gpio xfer hdr=0xb1 st=1 write
+W (36180) swd: gpio xfer hdr=0x8d st=1 read
+W (36190) swd: gpio xfer hdr=0xb1 st=1 write
+W (36190) swd: gpio xfer hdr=0x8d st=1 read
+W (36200) swd: gpio xfer hdr=0xb1 st=1 write
+W (36200) swd: gpio xfer hdr=0xa5 st=1 read
+W (36210) swd: gpio xfer hdr=0x81 st=1 write
+W (36210) swd: gpio xfer hdr=0xb1 st=1 write
+W (36210) swd: gpio xfer hdr=0xa9 st=1 write
+W (36220) swd: gpio xfer hdr=0x8d st=1 read
+W (36230) swd: gpio xfer hdr=0xb1 st=1 write
+W (36240) swd: gpio xfer hdr=0x9f st=1 read
+W (36240) swd: gpio xfer hdr=0xbd st=1 read
+W (36240) swd: gpio xfer hdr=0xb1 st=1 write
+W (36250) swd: gpio xfer hdr=0x9f st=1 read
+W (36250) swd: gpio xfer hdr=0xbd st=1 read
+W (36250) swd: gpio xfer hdr=0xb1 st=1 write
+W (36260) swd: gpio xfer hdr=0x9f st=1 read
+W (36260) swd: gpio xfer hdr=0xbd st=1 read
+W (36640) usbhost: USB device gone
+I (36640) usbhost: device disconnected: 1-1
+I (37030) usbhost: USB device attached: address=2
+I (37030) usbhost: exported busid=1-2 vid=2e8a pid=0005 num_intf=2 num_ep=3
