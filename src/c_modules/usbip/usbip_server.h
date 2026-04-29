@@ -57,6 +57,15 @@ int32_t usbip_server_max_transfer(void);
  * `usbip.attached_devices()`. */
 size_t usbip_server_attached_busids(char (*out)[USBIP_BUSID_SIZE], size_t max);
 
+/* Toggle per-URB observability logging on the usbip server. When
+ * enabled every CMD_SUBMIT receive, dispatch decision, backend
+ * completion, and RET_SUBMIT send emits one ESP_LOGI line under
+ * the "usbip" tag. Default off so production builds stay quiet. */
+void usbip_server_set_verbose(bool enable);
+
+/* True if per-URB verbose logging is currently enabled. */
+bool usbip_server_is_verbose(void);
+
 #ifdef __cplusplus
 }
 #endif

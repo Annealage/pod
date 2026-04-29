@@ -105,3 +105,6 @@ bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],
     (void)direction;
     return false;
 }
+
+void usbhost_set_verbose(bool enable) { (void)enable; }
+bool usbhost_is_verbose(void) { return false; }

@@ -1,3 +1,4 @@
 [submodule "src/micropython"]
 	path = src/micropython
-	url = https://github.com/micropython/micropython.git
+	url = https://github.com/andrewleech/micropython.git
+	branch = machine-usbhost

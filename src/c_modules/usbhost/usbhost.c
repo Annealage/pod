@@ -159,6 +159,21 @@ typedef struct {
 
 static usbhost_state_t s_state;
 
+/* Per-URB observability flag, toggled at runtime via
+ * usbhost_set_verbose(). Default off. */
+static volatile bool s_urb_verbose = false;
+
+void usbhost_set_verbose(bool enable)
+{
+    s_urb_verbose = enable;
+    ESP_LOGI(TAG, "URB verbose logging %s", enable ? "enabled" : "disabled");
+}
+
+bool usbhost_is_verbose(void)
+{
+    return s_urb_verbose;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Helpers                                                                  */
 /* ------------------------------------------------------------------------ */
@@ -947,12 +962,26 @@ static int submit_pipe(const char busid[USBIP_BUSID_SIZE],
     p->status_out  = &status;
     p->cancel      = cancel;
 
+    if (s_urb_verbose) {
+        const bool is_in = (ep_addr & 0x80) != 0;
+        const size_t len = is_in ? in_capacity : out_len;
+        ESP_LOGI(TAG, "usbhost_submit: dev=%.32s ep=0x%02x dir=%s len=%u",
+                 busid, ep_addr,
+                 (ep_addr == 0) ? "CTRL" : (is_in ? "IN" : "OUT"),
+                 (unsigned)len);
+    }
+
     p->active = true;
     if (s_state.worker_hdl != NULL) {
         xTaskNotifyGive(s_state.worker_hdl);
     }
     /* The done_sem is pre-allocated and never freed under us. */
     xSemaphoreTake(p->done_sem, portMAX_DELAY);
+
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbhost_complete: dev=%.32s ep=0x%02x status=%d actual=%u",
+                 busid, ep_addr, status, (unsigned)*in_len);
+    }
     return status;
 }
 

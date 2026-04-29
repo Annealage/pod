@@ -77,6 +77,14 @@ int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
 bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],
                                    uint8_t ep_num, uint8_t direction);
 
+/* Toggle per-URB observability logging on the usbhost backend. When
+ * enabled every transfer submit and completion emits one ESP_LOGI
+ * line under the "usbhost" tag. Default off. */
+void usbhost_set_verbose(bool enable);
+
+/* True if per-URB verbose logging is currently enabled. */
+bool usbhost_is_verbose(void);
+
 #ifdef __cplusplus
 }
 #endif

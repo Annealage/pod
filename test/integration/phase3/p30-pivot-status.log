@@ -1,0 +1,145 @@
+P3.0 / P3.0.1 status, agent session 2026-04-29
+==============================================
+
+Session goal: ship `pyocd reset --target rp2040 -u 0123456789ab`
+working through the synthetic CMSIS-DAP-v2 over USB/IP, end to end.
+
+Outcome: not reached this session. Stream B landed clean; Stream A
+landed scaffolding + diagnostics but is gated on a third
+build-system blocker that I could not resolve in the time budget.
+The pyocd reset exit criterion remains pending; the URB observability
+path is in place ready for the next iteration to pinpoint where the
+chain breaks.
+
+Stream B (URB observability across usbip / usbhost / dapprobe)
+--------------------------------------------------------------
+
+Landed in commit 0950b16 on the worktree branch.
+
+- src/c_modules/usbip/usbip_server.c emits per-URB lines on the
+  CMD_SUBMIT receive ("usbip_in"), the dispatch decision
+  ("usbip_dispatch", target=virtual|host), the backend completion
+  ("usbip_complete", with status and actual length), and the
+  RET_SUBMIT send ("usbip_out").
+- src/c_modules/usbhost/usbhost.c emits "usbhost_submit" on the
+  IDF usb_host pipe submit and "usbhost_complete" on the post-wait
+  return.
+- src/c_modules/dapprobe/synthetic_device.c emits "dap_cmd_in"
+  with the first byte of the DAP command, "dap_resp_out" with
+  the response length, and "dap_swo_out" only when the SWO read
+  returns > 0 bytes (to keep idle quiet).
+
+Toggle is exposed as a single MP entry point on the usbip module:
+
+    >>> usbip.set_verbose(True)   # enable on all three layers
+    >>> usbip.set_verbose(False)  # default; production-quiet
+    >>> usbip.is_verbose()
+    False
+
+Each layer also has its own usbXXX_set_verbose / _is_verbose C
+entries for finer-grained control. Host-test stubs are no-op for
+the verbose toggles. Default off.
+
+Unit tests: usbip protocol 21/21, usbhost stub 14/14, dapprobe
+protocol 18/18. All green after the changes.
+
+Stream A (TinyUSB host pivot) - scaffolding landed in commit a4346ab
+--------------------------------------------------------------------
+
+The submodule pin moved to a local branch `machine-usbhost-mpypod`
+on top of andrewleech/micropython#7's head dfa0adc44, plus two
+unblocking patches:
+
+  c6d91f044  esp32/tinyusb_port: fix trailing space in
+             CFG_TUSB_OS_INC_PATH
+             ("#define CFG_TUSB_OS_INC_PATH freertos /" had a
+             trailing space, producing
+             #include "freertos /FreeRTOS.h" which fails)
+
+  acb3c4645  shared/tinyusb: forward-declare host class typedefs
+             in mp_usbh.h
+             (mp_usbh_fetch_device_strings's signature uses
+             machine_usbh_device_obj_t before that name is typedef'd;
+             same for mp_usbh_msc_wait_complete and
+             machine_usbh_msc_obj_t. C11 typedef redefinition rules
+             allow the later struct {...} typedef to redeclare the
+             same name once the forward decl is added.)
+
+Both bugs are real upstream issues in PR #7 as it stands at
+2026-04-29. They should be pushed back upstream as PR comments;
+for now they live on the local fork branch.
+
+The src/VERSIONS file records the new commit and rationale.
+docs/design/usbhost.md §11 documents the pivot, the deltas from
+PR #7, the planned shape of usbhost.c (poll-based hot-plug,
+per-pipe slot table, `tuh_edpt_xfer` + `tuh_control_xfer` as the
+URB submit primitives, `mp_usbh_init_tuh()` for stack init), and
+the open items.
+
+src/boards/ESP32_S3_ANNEALAGE_POD/mpconfigboard.{cmake,h} carry the
+USBHOST flag plumbing but leave MICROPY_HW_USB_HOST OFF for now,
+gated on a third blocker:
+
+  When MICROPY_HW_USB_HOST=1 in this layout, the user-C-module
+  source src/c_modules/usbhost/usbhost.c gets compiled twice:
+  once for __idf_main (succeeds) and once for the micropython.elf
+  executable (fails). The elf-target compile fails with:
+
+    error: implicit declaration of function 'traceISR_EXIT_TO_SCHEDULER'
+    portmacro.h:474: in expansion of macro 'portYIELD_FROM_ISR_NO_ARG'
+    espressif__tinyusb/src/osal/osal_freertos.h:131: in
+       expansion of macro 'portYIELD_FROM_ISR'
+
+  The cause is some IDF-side include-path interaction with the
+  user_c_modules source-gather pass. Same source, same defines,
+  but two different target contexts; the elf one parses
+  osal_freertos.h's static-inline functions before
+  traceISR_EXIT_TO_SCHEDULER is visible. Cause not yet pinpointed;
+  needs a separate session to dig into the IDF user-c-module wiring.
+
+Until that is resolved the IDF usb_host backend stays in place,
+which is the same backend the 2026-04-29 progress report ran
+through. The URB observability lands clean against it.
+
+To re-enable the host pivot when (3) is fixed, uncomment the two
+lines in src/boards/ESP32_S3_ANNEALAGE_POD/mpconfigboard.cmake (set
+MICROPY_HW_USB_HOST 1, list(APPEND MICROPY_DEF_BOARD ...)) and
+swap src/c_modules/usbhost/usbhost.c for the TinyUSB-host shim
+sketched in docs/design/usbhost.md §11. The shim was drafted in
+this session but not committed because it cannot build until (3)
+is resolved; the draft is preserved in the conversation log.
+
+Build status (post-revert)
+--------------------------
+
+    bash src/tools/build.sh
+    ...
+    Project build complete.
+    micropython.bin binary size 0x1c2700 bytes.
+    Smallest app partition is 0x200000 bytes. 0x3d900 bytes (12%) free.
+
+So the firmware still builds and is 12% under the 2 MiB factory slot.
+On-device flash and pyocd-reset validation were NOT performed this
+session because the pivot itself is not yet enabled at the build
+level; running the smoke would just re-confirm the 2026-04-29
+progress report's findings (R11 still hangs because we are still on
+the IDF usb_host backend).
+
+Recommended next session
+------------------------
+
+1. Diagnose blocker (3) by capturing both
+   `__idf_main.dir/usbhost.c.o` and `micropython.elf.dir/usbhost.c.o`
+   compile commands from the build log and bisecting the
+   include-path delta. The two contexts MUST differ in some
+   preprocessor state; finding which one is the missing piece.
+2. Once (3) is unblocked, set MICROPY_HW_USB_HOST 1 in
+   mpconfigboard.cmake, write the TinyUSB-host shim into
+   usbhost.c (sketch in docs/design/usbhost.md §11), and re-run
+   `bash src/tools/build.sh` then `bash src/tools/flash.sh`.
+3. With the firmware flashed and annealage_pod.boot.up() running:
+   `usbip.set_verbose(True)`; then drive
+   `pyocd reset -u 0123456789ab --target rp2040` from the host PC
+   and read off the URB trace lines from UART0 to see exactly
+   which layer is dropping the chain.
+EOF
