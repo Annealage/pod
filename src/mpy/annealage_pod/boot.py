@@ -147,6 +147,14 @@ def attach_dapprobe():
     if attach is None:
         return False
     attach()
+    # SPI engine is broken on ESP32-S3 (R14); bit-bang is the working
+    # backend until that is resolved. set_swd_mode(1) selects bit-bang.
+    set_mode = getattr(dapprobe, "set_swd_mode", None)
+    if set_mode is not None:
+        try:
+            set_mode(1)
+        except Exception as exc:  # noqa: BLE001
+            print("annealage_pod.boot: dapprobe.set_swd_mode(1) raised {!r}".format(exc))
     return True
 
 
