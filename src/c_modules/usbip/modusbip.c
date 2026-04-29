@@ -5,6 +5,13 @@
  *   usbip.stop()                  -> None  (idempotent)
  *   usbip.attached_devices()      -> list[str]   currently-imported busids
  *
+ * Phase 3 P3.0.1 additions:
+ *   usbip.set_verbose(enable=True) -> None
+ *      Toggles per-URB ESP_LOGI tracing across all three layers
+ *      (usbip server, usbhost backend, dapprobe synthetic responder).
+ *      Default off so production logs stay quiet.
+ *   usbip.is_verbose()            -> bool
+ *
  * Larger administration (registering synthetic devices) is the
  * dapprobe module's concern in WS-C; that path goes through the C
  * `usbip_server_register_virtual_device()` entry, not Python.
@@ -16,6 +23,9 @@
 #include "usbip_protocol.h"
 #include "usbip_server.h"
 #include "virtual_device.h"
+
+#include "../usbhost/usbhost.h"
+#include "../dapprobe/synthetic_device.h"
 
 static mp_obj_t mod_usbip_start(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args)
 {
@@ -69,12 +79,33 @@ static mp_obj_t mod_usbip_attached_devices(void)
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbip_attached_devices_obj, mod_usbip_attached_devices);
 
+static mp_obj_t mod_usbip_set_verbose(size_t n_args, const mp_obj_t *args)
+{
+    bool enable = (n_args == 0) ? true : mp_obj_is_true(args[0]);
+    /* Toggle the trace flag at all three layers: usbip server, the
+     * usbhost backend (real DUT URB path), and the dapprobe synthetic
+     * responder (CMSIS-DAP-v2 path). */
+    usbip_server_set_verbose(enable);
+    usbhost_set_verbose(enable);
+    synthetic_device_set_verbose(enable);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_usbip_set_verbose_obj, 0, 1, mod_usbip_set_verbose);
+
+static mp_obj_t mod_usbip_is_verbose(void)
+{
+    return mp_obj_new_bool(usbip_server_is_verbose());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbip_is_verbose_obj, mod_usbip_is_verbose);
+
 static const mp_rom_map_elem_t mod_usbip_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),          MP_ROM_QSTR(MP_QSTR_usbip) },
     { MP_ROM_QSTR(MP_QSTR_start),             MP_ROM_PTR(&mod_usbip_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_stop),              MP_ROM_PTR(&mod_usbip_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_is_running),        MP_ROM_PTR(&mod_usbip_is_running_obj) },
     { MP_ROM_QSTR(MP_QSTR_attached_devices),  MP_ROM_PTR(&mod_usbip_attached_devices_obj) },
+    { MP_ROM_QSTR(MP_QSTR_set_verbose),       MP_ROM_PTR(&mod_usbip_set_verbose_obj) },
+    { MP_ROM_QSTR(MP_QSTR_is_verbose),        MP_ROM_PTR(&mod_usbip_is_verbose_obj) },
 };
 static MP_DEFINE_CONST_DICT(mod_usbip_globals, mod_usbip_globals_table);
 
