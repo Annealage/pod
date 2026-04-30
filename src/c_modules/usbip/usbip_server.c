@@ -1,27 +1,32 @@
 /* Annealage Pod: USB/IP multiplexer server.
  *
- * Adapted from referencea/esp-usbip-bridge/main/usbip_server.c. The
- * accept-loop / per-connection-worker / per-URB watchdog shape is
- * preserved; deviations:
+ * Concurrency model (R15 refactor):
  *
- *   - Two backends instead of one: real-USB (WS-B usbhost stub) and
- *     virtual (WS-C dapprobe via virtual_device_t ops).
- *   - Multiple-host serialisation: a small attachment table tracks
- *     which busid each connection holds and rejects re-import.
- *   - Protocol byte-shuffling lives in usbip_proto.{c,h} so the
- *     unit tests can link it directly without FreeRTOS.
- *   - Configurable listener port: defaults to USBIP_TCP_PORT but
- *     usbip.start(port=...) can override (used by the host-side
- *     test harness which connects over loopback).
- *   - APP_CPU pinning of both the accept-loop task and the
- *     per-connection workers, per architecture.md §3.
+ *   The earlier shape ran handle_urb_stream as a strict read-one,
+ *   submit-one, complete-one, send-one loop. With one URB in flight
+ *   per connection, CDC ACM open deadlocks: the kernel cdc-acm
+ *   driver submits an interrupt-IN that pends until line state is
+ *   set, then a class-control OUT that sets line state. The OUT
+ *   queues behind the pending IN and never dispatches.
  *
- * Vendoring note: the original esp-usbip-bridge has no SPDX header
- * and no LICENSE file. See docs/design/usbip-server.md for the
- * licensing analysis. The code paths reused from the reference are
- * the protocol-level mechanics (read_exact, write_all, send_op_*,
- * the dispatch shape inside handle_submit, the accept-loop). The
- * synthesis is rewritten to fit the multiplexer requirements.
+ *   handle_urb_stream is now a pure read loop. For real-device
+ *   URBs it builds an inflight record, links it into the per-
+ *   connection seqnum table, and posts it to a worker queue. A
+ *   small pool of submit workers per connection pulls records,
+ *   calls usbhost_*_transfer (which is now async at the IDF layer
+ *   so multiple URBs can be in flight concurrently), then sends
+ *   RET_SUBMIT under a per-connection tx_mutex.
+ *
+ *   Synthetic devices (CMSIS-DAP) take a fast path: latency is
+ *   microseconds, contention is impossible, and the simpler inline
+ *   dispatch keeps the regression baseline well-trodden.
+ *
+ *   CMD_UNLINK is real: the seqnum table is consulted, the cancel
+ *   flag is flipped, the worker observes it via usbhost's halt+
+ *   flush+clear path and the URB completes with -ECONNRESET. The
+ *   worker sends RET_SUBMIT first; the read loop sends RET_UNLINK
+ *   immediately on receipt to keep the kernel's unlink ledger
+ *   balanced.
  */
 
 #include "usbip_server.h"
@@ -34,19 +39,13 @@
 #include <string.h>
 #include <sys/types.h>
 
-/* On-target build pulls in IDF + FreeRTOS + lwIP. The unit tests
- * compile usbip_proto.c and virtual_device.c only, so this TU is
- * never compiled on the host. The MPY_POD_HOST_TEST_BUILD guard is
- * defined by the unit test CMakeLists when a host build wants
- * usbip_server.c excluded; this lets a future test add server-level
- * tests under a posix-sockets stub if needed without disturbing the
- * default Phase 2 build. */
 #ifndef MPY_POD_HOST_TEST_BUILD
 
 #include <inttypes.h>
 #include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
@@ -59,32 +58,33 @@
 
 static const char *TAG = "usbip";
 
-/* Tunables. Match referencea defaults; can later be lifted into
- * sdkconfig if needed. */
 #define USBIP_SERVER_TASK_STACK    8192
 #define USBIP_SERVER_TASK_PRIORITY 5
 #define USBIP_CLIENT_TASK_STACK    8192
 #define USBIP_CLIENT_TASK_PRIORITY 5
-#define USBIP_WATCHDOG_STACK       3072
+#define USBIP_WORKER_TASK_STACK    8192
+#define USBIP_WORKER_TASK_PRIORITY 5
 
-/* APP_CPU per architecture.md §3. */
 #define USBIP_TASK_CORE 1
 
-/* Default per-URB transfer cap: 16 KiB. CMSIS-DAP packets are <= 64
- * bytes; the cap is sized for DUT bulk transfers. The kernel
- * fragments larger transfers automatically. */
 #define USBIP_MAX_TRANSFER_DEFAULT (16 * 1024)
 
-/* Maximum number of simultaneous client connections. Phase 2: two
- * (one DUT attach + one probe attach is the design intent). The
- * limit affects the fixed-size attachment table. */
 #define USBIP_MAX_CLIENTS 4
+
+/* Per-connection submit-worker pool size. cdc-acm under load keeps up
+ * to 16 bulk-IN reads pending plus an interrupt-IN; pool must be at
+ * least this large. OUT URBs bypass the pool (run inline from the
+ * read loop) so they never block on a long-pending IN. */
+#define USBIP_SUBMIT_POOL_SIZE 24
+
+/* Per-connection inflight URB cap; cdc-acm queues 16 reads + a few
+ * writes + interrupt + control. 32 covers worst case. */
+#define USBIP_INFLIGHT_MAX 32
 
 typedef struct {
     bool                in_use;
     char                busid[USBIP_BUSID_SIZE];
     int                 fd;
-    SemaphoreHandle_t   release_signal; /* given when the worker exits */
 } client_slot_t;
 
 typedef struct {
@@ -101,10 +101,6 @@ static usbip_server_state_t s_state = {
     .max_transfer  = USBIP_MAX_TRANSFER_DEFAULT,
 };
 
-/* Per-URB observability flag. Toggled at runtime by
- * `annealage_pod.usbip.set_verbose(True)` -> usbip_server_set_verbose.
- * Default off; INFO-level URB-trace logs only fire on the hot path
- * while this is true. */
 static volatile bool s_urb_verbose = false;
 
 void usbip_server_set_verbose(bool enable)
@@ -120,9 +116,6 @@ bool usbip_server_is_verbose(void)
 
 /* ---------- attachment table ---------- */
 
-/* Reserve a slot for a busid currently being imported. Returns true
- * if the slot is now ours; false if another connection already holds
- * the same busid. */
 static bool attachment_acquire(int fd, const char busid[USBIP_BUSID_SIZE],
                                size_t *slot_idx)
 {
@@ -255,49 +248,10 @@ static bool send_device_with_interfaces(int fd, const usbip_dev_record_t *device
     return true;
 }
 
-static bool send_ret_submit(int fd,
-                            uint32_t seqnum, uint32_t devid,
-                            uint32_t direction, uint32_t ep,
-                            int32_t status,
-                            const uint8_t *payload, uint32_t payload_len)
-{
-    usbip_header_t reply;
-    usbip_proto_pack_ret_submit(&reply, seqnum, devid, direction, ep,
-                                status, payload_len);
-
-    if (payload_len > 0 && payload != NULL) {
-        /* Coalesce header + payload into a single send so the kernel
-         * can read both without a second TCP segment delay. */
-        uint8_t *buf = malloc(sizeof(reply) + payload_len);
-        if (buf == NULL) {
-            return false;
-        }
-        memcpy(buf, &reply, sizeof(reply));
-        memcpy(buf + sizeof(reply), payload, payload_len);
-        bool ok = write_all(fd, buf, sizeof(reply) + payload_len);
-        free(buf);
-        return ok;
-    }
-    return write_all(fd, &reply, sizeof(reply));
-}
-
-static bool send_ret_unlink(int fd,
-                            uint32_t seqnum, uint32_t devid,
-                            uint32_t direction, uint32_t ep,
-                            int32_t status)
-{
-    usbip_header_t reply;
-    usbip_proto_pack_ret_unlink(&reply, seqnum, devid, direction, ep, status);
-    return write_all(fd, &reply, sizeof(reply));
-}
-
 /* ---------- DEVLIST / IMPORT ---------- */
 
 static size_t collect_all_devices(usbip_dev_record_t *out, size_t max)
 {
-    /* Real-USB devices first (busid "1-N"), virtuals second
-     * (busid "2-N"). Ordering is informational; the host iterates
-     * regardless. */
     size_t copied = usbhost_get_devices(out, max);
     if (copied < max) {
         copied += usbip_get_virtual_devices(out + copied, max - copied);
@@ -308,10 +262,6 @@ static size_t collect_all_devices(usbip_dev_record_t *out, size_t max)
 static bool find_device_by_busid(const char busid[USBIP_BUSID_SIZE],
                                  usbip_dev_record_t *out)
 {
-    /* Try virtuals first: the synthetic CMSIS-DAP busid space (2-N)
-     * never collides with the real-USB busid space (1-N), but doing
-     * the cheap in-process lookup first saves a TinyUSB API call on
-     * the common case of a probe attach. */
     virtual_device_t *vdev = usbip_find_virtual_device(busid);
     if (vdev != NULL) {
         *out = vdev->desc;
@@ -326,7 +276,8 @@ static bool handle_devlist_request(int fd)
     const size_t count = collect_all_devices(devices,
         sizeof(devices) / sizeof(devices[0]));
 
-    ESP_LOGI(TAG, "DEVLIST: reporting %zu device(s)", count);
+    /* IDF newlib-nano printf does not implement %zu; cast to unsigned. */
+    ESP_LOGI(TAG, "DEVLIST: reporting %u device(s)", (unsigned)count);
 
     if (!send_op_common(fd, USBIP_OP_REP_DEVLIST, 0)) {
         return false;
@@ -343,41 +294,357 @@ static bool handle_devlist_request(int fd)
     return true;
 }
 
-/* ---------- URB stream ---------- */
+/* ---------- per-connection async URB plumbing ---------- */
 
-typedef struct {
-    int           fd;
-    volatile bool cancel;
-} urb_stream_ctx_t;
+typedef struct inflight_urb {
+    usbip_decoded_header_t hdr;
+    char                   busid[USBIP_BUSID_SIZE];
+    uint32_t               expected_devid;
+    bool                   is_virtual;
+    uint8_t               *out_buf;
+    size_t                 out_len;
+    uint8_t               *in_buf;
+    size_t                 in_capacity;
+    volatile bool          cancel;
+    volatile bool          retired; /* true once RET_SUBMIT has been sent */
+    /* Cancel-then-wait coordination per USB/IP spec ordering. The
+     * UNLINK handler sets cancel and waits on cancel_done_sem so the
+     * worker's RET_SUBMIT (with status -ECONNRESET) reaches the kernel
+     * before our RET_UNLINK; otherwise vhci_rx logs "cannot find a urb
+     * of seqnum N" and usb_kill_urb hangs because nothing gives the
+     * URB back. cancel_waiters arbitrates who frees the inflight. */
+    SemaphoreHandle_t      cancel_done_sem;
+    int                    cancel_waiters;
+    struct conn_state     *conn;
+    struct inflight_urb   *next;
+} inflight_urb_t;
 
-static void socket_watchdog_task(void *arg)
+typedef struct conn_state {
+    int                fd;
+    bool               shutdown;        /* stop workers cleanly on disconnect */
+    SemaphoreHandle_t  tx_mutex;        /* serialise writes to the TCP socket */
+    SemaphoreHandle_t  inflight_mutex;  /* protects the inflight list */
+    QueueHandle_t      submit_queue;    /* inflight_urb_t* drained by workers */
+    inflight_urb_t    *inflight_head;
+    int                inflight_count;
+    SemaphoreHandle_t  inflight_drain;  /* given when count drops to 0 */
+    volatile int       workers_alive;   /* count of pool tasks still running */
+    SemaphoreHandle_t  workers_done;    /* given when workers_alive drops to 0 */
+} conn_state_t;
+
+static void inflight_link(conn_state_t *conn, inflight_urb_t *u)
 {
-    urb_stream_ctx_t *ctx = (urb_stream_ctx_t *)arg;
-    uint8_t probe;
-    while (!ctx->cancel) {
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(ctx->fd, &readfds);
-        struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };
-        int ret = select(ctx->fd + 1, &readfds, NULL, NULL, &tv);
-        if (ret > 0) {
-            ret = recv(ctx->fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
-            if (ret <= 0) {
-                ctx->cancel = true;
-                break;
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    u->next = conn->inflight_head;
+    conn->inflight_head = u;
+    conn->inflight_count++;
+    xSemaphoreGive(conn->inflight_mutex);
+}
+
+static void inflight_unlink(conn_state_t *conn, inflight_urb_t *u)
+{
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    inflight_urb_t **p = &conn->inflight_head;
+    while (*p != NULL) {
+        if (*p == u) {
+            *p = u->next;
+            conn->inflight_count--;
+            if (conn->inflight_count == 0 && conn->inflight_drain != NULL) {
+                xSemaphoreGive(conn->inflight_drain);
             }
             break;
         }
+        p = &(*p)->next;
+    }
+    xSemaphoreGive(conn->inflight_mutex);
+}
+
+/* Free the inflight buffers and the struct. Caller must hold no
+ * mutex protecting the URB and must own the right to free (either
+ * the worker observed no cancel waiter, or the UNLINK waiter has
+ * decremented the last reference). */
+static void inflight_free(inflight_urb_t *u)
+{
+    if (u == NULL) {
+        return;
+    }
+    if (u->cancel_done_sem != NULL) {
+        vSemaphoreDelete(u->cancel_done_sem);
+    }
+    free(u->out_buf);
+    free(u->in_buf);
+    free(u);
+}
+
+/* Find the inflight URB matching seqnum and arrange a synchronous
+ * cancel: set cancel=true under the mutex, take a reference (so the
+ * worker hands off freeing to us), and return the cancel_done_sem so
+ * the caller can wait until the worker has finished sending
+ * RET_SUBMIT. Returns NULL if no matching URB is in flight (already
+ * retired or never seen). The returned struct stays alive until the
+ * caller invokes inflight_release_after_cancel. */
+static inflight_urb_t *inflight_begin_cancel(conn_state_t *conn,
+                                             uint32_t seqnum)
+{
+    inflight_urb_t *hit = NULL;
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    for (inflight_urb_t *u = conn->inflight_head; u != NULL; u = u->next) {
+        if (u->hdr.seqnum == seqnum && !u->retired) {
+            u->cancel = true;
+            u->cancel_waiters++;
+            hit = u;
+            break;
+        }
+    }
+    xSemaphoreGive(conn->inflight_mutex);
+    return hit;
+}
+
+/* Drop the cancel reference taken by inflight_begin_cancel. If the
+ * worker has already retired the URB and we are the last reference,
+ * we own the free. */
+static void inflight_release_after_cancel(conn_state_t *conn,
+                                          inflight_urb_t *u)
+{
+    if (u == NULL) {
+        return;
+    }
+    bool free_now = false;
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    int n = --u->cancel_waiters;
+    if (n == 0 && u->retired) {
+        free_now = true;
+    }
+    xSemaphoreGive(conn->inflight_mutex);
+    if (free_now) {
+        inflight_free(u);
+    }
+}
+
+/* Send RET_SUBMIT under tx_mutex so workers do not interleave bytes
+ * on the wire. Returns false if the socket dropped. */
+static bool tx_ret_submit(conn_state_t *conn,
+                          uint32_t seqnum, uint32_t devid,
+                          uint32_t direction, uint32_t ep,
+                          int32_t status,
+                          const uint8_t *payload, uint32_t payload_len)
+{
+    usbip_header_t reply;
+    usbip_proto_pack_ret_submit(&reply, seqnum, devid, direction, ep,
+                                status, payload_len);
+
+    xSemaphoreTake(conn->tx_mutex, portMAX_DELAY);
+    bool ok;
+    if (payload_len > 0 && payload != NULL) {
+        uint8_t *buf = malloc(sizeof(reply) + payload_len);
+        if (buf == NULL) {
+            xSemaphoreGive(conn->tx_mutex);
+            return false;
+        }
+        memcpy(buf, &reply, sizeof(reply));
+        memcpy(buf + sizeof(reply), payload, payload_len);
+        ok = write_all(conn->fd, buf, sizeof(reply) + payload_len);
+        free(buf);
+    } else {
+        ok = write_all(conn->fd, &reply, sizeof(reply));
+    }
+    xSemaphoreGive(conn->tx_mutex);
+    return ok;
+}
+
+static bool tx_ret_unlink(conn_state_t *conn,
+                          uint32_t seqnum, uint32_t devid,
+                          uint32_t direction, uint32_t ep,
+                          int32_t status)
+{
+    usbip_header_t reply;
+    usbip_proto_pack_ret_unlink(&reply, seqnum, devid, direction, ep, status);
+    xSemaphoreTake(conn->tx_mutex, portMAX_DELAY);
+    bool ok = write_all(conn->fd, &reply, sizeof(reply));
+    xSemaphoreGive(conn->tx_mutex);
+    return ok;
+}
+
+/* Run a single inflight URB end-to-end: backend dispatch + RET_SUBMIT.
+ * Caller is either the read loop (synthetic fast path) or a worker
+ * (real-host). The function frees the inflight buffers on return. */
+static void run_inflight(inflight_urb_t *u)
+{
+    conn_state_t *conn = u->conn;
+    const usbip_decoded_header_t *hdr = &u->hdr;
+
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbip_dispatch: busid=%.32s ep=%" PRIu32 " target=%s",
+                 u->busid, hdr->ep, u->is_virtual ? "virtual" : "host");
+    }
+
+    int    status = 0;
+    size_t in_len = 0;
+
+    if (u->is_virtual) {
+        virtual_device_t *vdev = usbip_find_virtual_device(u->busid);
+        if (vdev == NULL) {
+            status = -ENODEV;
+        } else if (hdr->ep == 0) {
+            usbip_setup_packet_t setup;
+            memcpy(&setup, hdr->setup, sizeof(setup));
+            status = vdev->ops->control_transfer(vdev, &setup,
+                                                 u->out_buf, u->out_len,
+                                                 u->in_buf, u->in_capacity,
+                                                 &in_len);
+        } else {
+            uint8_t ep_addr = (uint8_t)(hdr->ep |
+                              (hdr->direction == USBIP_DIR_IN ? 0x80u : 0x00u));
+            status = vdev->ops->data_transfer(vdev, ep_addr,
+                                              u->out_buf, u->out_len,
+                                              u->in_buf, u->in_capacity,
+                                              &in_len);
+        }
+    } else if (hdr->ep == 0) {
+        usbip_setup_packet_t setup;
+        memcpy(&setup, hdr->setup, sizeof(setup));
+        status = usbhost_control_transfer(u->busid, &setup,
+                                          u->out_buf, u->out_len,
+                                          u->in_buf, u->in_capacity,
+                                          &in_len, &u->cancel);
+    } else {
+        uint8_t ep_addr = (uint8_t)(hdr->ep |
+                          (hdr->direction == USBIP_DIR_IN ? 0x80u : 0x00u));
+        if (usbhost_is_interrupt_endpoint(u->busid, (uint8_t)hdr->ep,
+                                          (uint8_t)hdr->direction)) {
+            status = usbhost_interrupt_transfer(u->busid, ep_addr,
+                                                u->out_buf, u->out_len,
+                                                u->in_buf, u->in_capacity,
+                                                &in_len, &u->cancel);
+        } else {
+            status = usbhost_bulk_transfer(u->busid, ep_addr,
+                                           u->out_buf, u->out_len,
+                                           u->in_buf, u->in_capacity,
+                                           &in_len, &u->cancel);
+        }
+    }
+
+    /* If the URB was cancelled (UNLINK arrived, or teardown signalled),
+     * the kernel expects RET_SUBMIT with status -ECONNRESET. usbhost
+     * may have returned -ECONNRESET, 0 (race: completed just before
+     * cancel landed), or another error. Override to -ECONNRESET so
+     * vhci_rx marks the URB as cancelled. */
+    bool was_cancelled = u->cancel;
+    if (was_cancelled) {
+        status = -ECONNRESET;
+        in_len = 0;
+    }
+
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbip_complete: busid=%.32s ep=%" PRIu32
+                      " status=%d actual=%u%s",
+                 u->busid, hdr->ep, status, (unsigned)in_len,
+                 was_cancelled ? " (cancelled)" : "");
+    }
+
+    bool ok = tx_ret_submit(conn,
+                            hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
+                            status,
+                            (status == 0 && hdr->direction == USBIP_DIR_IN) ? u->in_buf : NULL,
+                            (status == 0 && hdr->direction == USBIP_DIR_IN)
+                              ? (uint32_t)in_len : 0);
+
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbip_out: busid=%.32s ep=%" PRIu32 " ok=%d",
+                 u->busid, hdr->ep, ok ? 1 : 0);
+    }
+
+    /* Retire: remove from inflight list, mark retired, and either
+     * free now (no UNLINK waiter) or hand off to the waiter (which
+     * is blocked on cancel_done_sem). The cancel_waiters field is
+     * read under the mutex to avoid a TOCTOU with inflight_begin_cancel. */
+    bool free_now = false;
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    inflight_urb_t **p = &conn->inflight_head;
+    while (*p != NULL) {
+        if (*p == u) {
+            *p = u->next;
+            conn->inflight_count--;
+            if (conn->inflight_count == 0 && conn->inflight_drain != NULL) {
+                xSemaphoreGive(conn->inflight_drain);
+            }
+            break;
+        }
+        p = &(*p)->next;
+    }
+    u->retired = true;
+    if (u->cancel_waiters == 0) {
+        free_now = true;
+    } else if (u->cancel_done_sem != NULL) {
+        xSemaphoreGive(u->cancel_done_sem);
+    }
+    xSemaphoreGive(conn->inflight_mutex);
+
+    if (free_now) {
+        inflight_free(u);
+    }
+
+    if (!ok) {
+        /* Best effort: nudge accept-loop side. The read loop will
+         * notice on its next recv. */
+        shutdown(conn->fd, SHUT_RDWR);
+    }
+}
+
+/* Worker: pull inflight URBs from the per-connection queue, run them,
+ * exit when shutdown is signalled (queue closed by submit of NULL).
+ * The pool only services IN URBs (which may pend long); OUT URBs run
+ * inline in intake_submit so they never block behind a pending IN. */
+static void submit_worker_task(void *arg)
+{
+    conn_state_t *conn = (conn_state_t *)arg;
+    while (true) {
+        inflight_urb_t *u = NULL;
+        if (xQueueReceive(conn->submit_queue, &u, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (u == NULL) {
+            /* Sentinel: drain time. */
+            break;
+        }
+        run_inflight(u);
+    }
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    int remaining = --conn->workers_alive;
+    xSemaphoreGive(conn->inflight_mutex);
+    if (remaining == 0 && conn->workers_done != NULL) {
+        xSemaphoreGive(conn->workers_done);
     }
     vTaskDelete(NULL);
 }
 
-static bool dispatch_submit(int fd,
-                            const usbip_decoded_header_t *hdr,
-                            const char busid[USBIP_BUSID_SIZE],
-                            uint32_t expected_devid,
-                            bool is_virtual,
-                            volatile bool *cancel)
+/* Read one URB worth of OUT-stage data into a fresh malloc buffer. */
+static bool read_out_payload(int fd, size_t len, uint8_t **out_buf)
+{
+    *out_buf = NULL;
+    if (len == 0) {
+        return true;
+    }
+    uint8_t *buf = malloc(len);
+    if (buf == NULL) {
+        (void)discard_exact(fd, len);
+        return false;
+    }
+    if (!read_exact(fd, buf, len)) {
+        free(buf);
+        return false;
+    }
+    *out_buf = buf;
+    return true;
+}
+
+/* Validate, build, and either run inline (synthetic) or queue for
+ * worker dispatch (real). The connection's read-loop calls this. */
+static bool intake_submit(conn_state_t *conn,
+                          const usbip_decoded_header_t *hdr,
+                          const char busid[USBIP_BUSID_SIZE],
+                          uint32_t expected_devid,
+                          bool is_virtual)
 {
     if (s_urb_verbose) {
         ESP_LOGI(TAG, "usbip_in: busid=%.32s ep=%" PRIu32 " dir=%s len=%" PRIu32
@@ -387,210 +654,186 @@ static bool dispatch_submit(int fd,
                  hdr->transfer_buffer_length, hdr->seqnum);
     }
 
-    /* Validation that does not require a backend. */
     int v = usbip_proto_validate_submit(hdr, s_state.max_transfer);
     if (v == -EINVAL && (hdr->direction != USBIP_DIR_OUT &&
                           hdr->direction != USBIP_DIR_IN)) {
-        /* Bad direction: the URB stream is unrecoverable because we
-         * cannot reliably consume the OUT data stage. Drop the
-         * connection. */
         ESP_LOGW(TAG, "  -> bad direction %" PRIu32 ", dropping conn", hdr->direction);
         return false;
     }
     if (v == -EMSGSIZE) {
         if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
-            if (!discard_exact(fd, (size_t)hdr->transfer_buffer_length)) {
+            if (!discard_exact(conn->fd, (size_t)hdr->transfer_buffer_length)) {
                 return false;
             }
         }
-        return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                               -EMSGSIZE, NULL, 0);
+        return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                             hdr->ep, -EMSGSIZE, NULL, 0);
     }
     if (v == -EINVAL) {
-        return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                               -EINVAL, NULL, 0);
+        return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                             hdr->ep, -EINVAL, NULL, 0);
     }
     if (v == -EOPNOTSUPP) {
-        return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                               -EOPNOTSUPP, NULL, 0);
+        return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                             hdr->ep, -EOPNOTSUPP, NULL, 0);
     }
 
     if (hdr->devid != expected_devid) {
         ESP_LOGW(TAG, "  -> ENODEV (devid 0x%08" PRIx32 " != expected 0x%08" PRIx32 ")",
                  hdr->devid, expected_devid);
         if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
-            if (!discard_exact(fd, (size_t)hdr->transfer_buffer_length)) {
+            if (!discard_exact(conn->fd, (size_t)hdr->transfer_buffer_length)) {
                 return false;
             }
         }
-        return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                               -ENODEV, NULL, 0);
+        return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                             hdr->ep, -ENODEV, NULL, 0);
     }
 
-    /* Read inbound OUT data into a dedicated buffer. */
-    uint8_t *out_buf = NULL;
-    size_t   out_len = 0;
-    if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
-        out_len = (size_t)hdr->transfer_buffer_length;
-        out_buf = malloc(out_len);
-        if (out_buf == NULL) {
-            (void)discard_exact(fd, out_len);
-            return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                                   -ENOMEM, NULL, 0);
+    /* Setup direction sanity for control. */
+    if (hdr->ep == 0) {
+        const bool setup_in = (hdr->setup[0] & USBIP_REQUEST_DIR_IN) != 0;
+        if ((hdr->direction == USBIP_DIR_IN) != setup_in) {
+            if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
+                if (!discard_exact(conn->fd, (size_t)hdr->transfer_buffer_length)) {
+                    return false;
+                }
+            }
+            return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                                 hdr->ep, -EINVAL, NULL, 0);
         }
-        if (!read_exact(fd, out_buf, out_len)) {
-            free(out_buf);
+    }
+
+    inflight_urb_t *u = calloc(1, sizeof(*u));
+    if (u == NULL) {
+        if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
+            (void)discard_exact(conn->fd, (size_t)hdr->transfer_buffer_length);
+        }
+        return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                             hdr->ep, -ENOMEM, NULL, 0);
+    }
+    u->hdr = *hdr;
+    memcpy(u->busid, busid, USBIP_BUSID_SIZE);
+    u->expected_devid = expected_devid;
+    u->is_virtual = is_virtual;
+    u->conn = conn;
+    u->cancel_done_sem = xSemaphoreCreateBinary();
+    if (u->cancel_done_sem == NULL) {
+        free(u);
+        if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
+            (void)discard_exact(conn->fd, (size_t)hdr->transfer_buffer_length);
+        }
+        return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                             hdr->ep, -ENOMEM, NULL, 0);
+    }
+
+    if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
+        u->out_len = (size_t)hdr->transfer_buffer_length;
+        if (!read_out_payload(conn->fd, u->out_len, &u->out_buf)) {
+            free(u);
             return false;
         }
     }
-
-    /* Allocate IN buffer. */
-    uint8_t *in_buf = NULL;
-    size_t   in_capacity = 0;
     if (hdr->direction == USBIP_DIR_IN && hdr->transfer_buffer_length > 0) {
-        in_capacity = (size_t)hdr->transfer_buffer_length;
-        in_buf = malloc(in_capacity);
-        if (in_buf == NULL) {
-            free(out_buf);
-            return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                                   -ENOMEM, NULL, 0);
+        u->in_capacity = (size_t)hdr->transfer_buffer_length;
+        u->in_buf = malloc(u->in_capacity);
+        if (u->in_buf == NULL) {
+            free(u->out_buf);
+            free(u);
+            return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                                 hdr->ep, -ENOMEM, NULL, 0);
         }
     }
 
-    size_t in_len = 0;
-    int    status;
-
-    if (s_urb_verbose) {
-        ESP_LOGI(TAG, "usbip_dispatch: busid=%.32s ep=%" PRIu32 " target=%s",
-                 busid, hdr->ep, is_virtual ? "virtual" : "host");
+    /* Block waiting for an inflight slot if the kernel is way out
+     * over its skis. The read loop staying single-threaded gives us
+     * back-pressure for free here. */
+    while (true) {
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        bool full = (conn->inflight_count >= USBIP_INFLIGHT_MAX);
+        xSemaphoreGive(conn->inflight_mutex);
+        if (!full) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
+
+    inflight_link(conn, u);
 
     if (is_virtual) {
-        virtual_device_t *vdev = usbip_find_virtual_device(busid);
-        if (vdev == NULL) {
-            free(out_buf);
-            free(in_buf);
-            return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                                   -ENODEV, NULL, 0);
-        }
-        if (hdr->ep == 0) {
-            usbip_setup_packet_t setup;
-            memcpy(&setup, hdr->setup, sizeof(setup));
-            /* SETUP-direction sanity. */
-            const bool setup_in = (setup.bmRequestType & USBIP_REQUEST_DIR_IN) != 0;
-            if ((hdr->direction == USBIP_DIR_IN) != setup_in) {
-                free(out_buf);
-                free(in_buf);
-                return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                                       -EINVAL, NULL, 0);
-            }
-            status = vdev->ops->control_transfer(vdev, &setup,
-                                                 out_buf, out_len,
-                                                 in_buf, in_capacity, &in_len);
-        } else {
-            uint8_t ep_addr = (uint8_t)(hdr->ep |
-                              (hdr->direction == USBIP_DIR_IN ? 0x80u : 0x00u));
-            status = vdev->ops->data_transfer(vdev, ep_addr,
-                                              out_buf, out_len,
-                                              in_buf, in_capacity, &in_len);
-        }
-    } else if (hdr->ep == 0) {
-        usbip_setup_packet_t setup;
-        memcpy(&setup, hdr->setup, sizeof(setup));
-        const bool setup_in = (setup.bmRequestType & USBIP_REQUEST_DIR_IN) != 0;
-        if ((hdr->direction == USBIP_DIR_IN) != setup_in) {
-            free(out_buf);
-            free(in_buf);
-            return send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                                   -EINVAL, NULL, 0);
-        }
-        status = usbhost_control_transfer(busid, &setup,
-                                          out_buf, out_len,
-                                          in_buf, in_capacity, &in_len, cancel);
-    } else {
-        uint8_t ep_addr = (uint8_t)(hdr->ep |
-                          (hdr->direction == USBIP_DIR_IN ? 0x80u : 0x00u));
-        if (usbhost_is_interrupt_endpoint(busid, (uint8_t)hdr->ep,
-                                          (uint8_t)hdr->direction)) {
-            status = usbhost_interrupt_transfer(busid, ep_addr,
-                                                out_buf, out_len,
-                                                in_buf, in_capacity, &in_len, cancel);
-        } else {
-            status = usbhost_bulk_transfer(busid, ep_addr,
-                                           out_buf, out_len,
-                                           in_buf, in_capacity, &in_len, cancel);
-        }
+        /* Synthetic devices: microsecond latency, no contention.
+         * Inline dispatch keeps the regression baseline simple. */
+        run_inflight(u);
+        return true;
     }
 
-    if (s_urb_verbose) {
-        ESP_LOGI(TAG, "usbip_complete: busid=%.32s ep=%" PRIu32
-                      " status=%d actual=%u",
-                 busid, hdr->ep, status, (unsigned)in_len);
+    /* EP0 control transfers complete in milliseconds and never pend.
+     * Routing them through the worker pool puts them behind pending
+     * bulk-IN reads, which is the deadlock cdc-acm hit before this
+     * fix: SET_CONTROL_LINE_STATE waited behind 16 pending bulk reads
+     * that would only complete once the device saw line state set.
+     *
+     * Bulk/interrupt OUT URBs also run inline. The kernel emits a
+     * write only when it has data ready and expects ACK quickly; the
+     * IDF returns within milliseconds. Inlining prevents head-of-line
+     * blocking when all worker pool slots are occupied by pending IN
+     * URBs (cdc-acm keeps 16 read URBs queued). */
+    if (hdr->ep == 0 || hdr->direction == USBIP_DIR_OUT) {
+        run_inflight(u);
+        return true;
     }
 
-    bool ok = send_ret_submit(fd, hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                              status,
-                              (status == 0 && hdr->direction == USBIP_DIR_IN) ? in_buf : NULL,
-                              (status == 0 && hdr->direction == USBIP_DIR_IN)
-                                ? (uint32_t)in_len : 0);
-
-    if (s_urb_verbose) {
-        ESP_LOGI(TAG, "usbip_out: busid=%.32s ep=%" PRIu32 " ok=%d",
-                 busid, hdr->ep, ok ? 1 : 0);
+    if (xQueueSend(conn->submit_queue, &u, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "submit queue saturated, seq=%" PRIu32, hdr->seqnum);
+        inflight_unlink(conn, u);
+        inflight_free(u);
+        return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                             hdr->ep, -EBUSY, NULL, 0);
     }
-
-    free(out_buf);
-    free(in_buf);
-    return ok;
+    return true;
 }
 
-static bool handle_urb_stream(int fd,
+static bool handle_urb_stream(conn_state_t *conn,
                               const char busid[USBIP_BUSID_SIZE],
                               uint32_t expected_devid)
 {
-    urb_stream_ctx_t ctx = { .fd = fd, .cancel = false };
     const bool is_virtual = (usbip_find_virtual_device(busid) != NULL);
 
     while (true) {
         usbip_header_t raw;
-        if (!read_exact(fd, &raw, sizeof(raw))) {
+        if (!read_exact(conn->fd, &raw, sizeof(raw))) {
             return false;
         }
-        ctx.cancel = false;
 
         usbip_decoded_header_t hdr;
         usbip_proto_unpack_header(&raw, &hdr);
 
         if (hdr.command == USBIP_CMD_SUBMIT) {
-            TaskHandle_t watchdog = NULL;
-            if (!is_virtual) {
-                /* Real-device URBs may block on USB I/O; spawn a
-                 * watchdog that aborts when the client disconnects.
-                 * Synthetic URBs complete in microseconds and do
-                 * not need this. */
-                xTaskCreatePinnedToCore(socket_watchdog_task, "usbip_wd",
-                                        USBIP_WATCHDOG_STACK, &ctx,
-                                        USBIP_CLIENT_TASK_PRIORITY, &watchdog,
-                                        USBIP_TASK_CORE);
-            }
-
-            bool ok = dispatch_submit(fd, &hdr, busid, expected_devid,
-                                      is_virtual, &ctx.cancel);
-
-            if (watchdog != NULL) {
-                ctx.cancel = true;
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
-            if (!ok) {
+            if (!intake_submit(conn, &hdr, busid, expected_devid, is_virtual)) {
                 return false;
             }
         } else if (hdr.command == USBIP_CMD_UNLINK) {
-            /* Phase 2 policy: reply 0 (URB already complete). The
-             * synthetic device path satisfies every URB locally with
-             * bounded latency; the real-USB path will gain seqnum-
-             * tracking cancellation in WS-B. */
-            if (!send_ret_unlink(fd, hdr.seqnum, hdr.devid,
-                                 hdr.direction, hdr.ep, 0)) {
+            /* USB/IP cancel ordering: signal the worker, wait for it
+             * to send RET_SUBMIT (status -ECONNRESET) which gives the
+             * URB back via vhci_rx's priv_rx path, THEN send our
+             * RET_UNLINK. Sending RET_UNLINK first while the URB is
+             * still on priv_rx leaves usb_kill_urb spinning because
+             * the kernel cannot find the seqnum on either list. */
+            inflight_urb_t *u = inflight_begin_cancel(conn, hdr.unlink_seqnum);
+            if (u != NULL) {
+                /* 250 ms ceiling: usbhost halt+flush+clear drives IDF
+                 * completion within ~50 ms in practice. The read loop
+                 * handles one UNLINK at a time so a tight cap keeps
+                 * the close-storm of ~16 UNLINKs from stalling the
+                 * connection for many seconds. If a cancel still
+                 * hasn't landed we send RET_UNLINK anyway and let the
+                 * worker's eventual RET_SUBMIT unblock the kernel
+                 * giveback. */
+                (void)xSemaphoreTake(u->cancel_done_sem, pdMS_TO_TICKS(250));
+                inflight_release_after_cancel(conn, u);
+            }
+            if (!tx_ret_unlink(conn, hdr.seqnum, hdr.devid,
+                               hdr.direction, hdr.ep, 0)) {
                 return false;
             }
         } else {
@@ -616,8 +859,6 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
         return true;
     }
 
-    /* Multiple-host serialisation: only one connection may import a
-     * given busid at a time. */
     size_t my_slot = 0;
     if (!attachment_acquire(fd, busid, &my_slot)) {
         ESP_LOGW(TAG, "IMPORT: busid '%.32s' already attached, refusing", busid);
@@ -631,17 +872,12 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
         return false;
     }
 
-    /* The IMPORT reply carries the device descriptor only, no
-     * interface descriptors. The kernel reads exactly
-     * sizeof(struct usbip_usb_device); extra bytes get parsed as
-     * URB PDU and the connection breaks. */
     usbip_device_desc_t wire;
     usbip_proto_pack_device_desc(&device, &wire);
     if (!write_all(fd, &wire, sizeof(wire))) {
         return false;
     }
 
-    /* Optional virtual-device on_attach hook. */
     virtual_device_t *vdev = usbip_find_virtual_device(busid);
     if (vdev && vdev->ops->on_attach) {
         if (vdev->ops->on_attach(vdev) != 0) {
@@ -649,7 +885,96 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
         }
     }
 
-    bool ok = handle_urb_stream(fd, busid, usbip_proto_make_devid(&device));
+    /* Stand up the per-connection async URB plumbing. */
+    conn_state_t conn = {
+        .fd              = fd,
+        .shutdown        = false,
+        .tx_mutex        = xSemaphoreCreateMutex(),
+        .inflight_mutex  = xSemaphoreCreateMutex(),
+        .submit_queue    = xQueueCreate(USBIP_INFLIGHT_MAX, sizeof(inflight_urb_t *)),
+        .inflight_head   = NULL,
+        .inflight_count  = 0,
+        .inflight_drain  = xSemaphoreCreateBinary(),
+        .workers_alive   = 0,
+        .workers_done    = xSemaphoreCreateBinary(),
+    };
+
+    bool plumbing_ok = (conn.tx_mutex != NULL && conn.inflight_mutex != NULL &&
+                        conn.submit_queue != NULL && conn.inflight_drain != NULL &&
+                        conn.workers_done != NULL);
+
+    /* Spawn submit workers for the real-host path. Synthetic devices
+     * never need them; running inline avoids the queue hop. */
+    int workers_started = 0;
+    if (plumbing_ok && vdev == NULL) {
+        for (int i = 0; i < USBIP_SUBMIT_POOL_SIZE; i++) {
+            xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
+            conn.workers_alive++;
+            xSemaphoreGive(conn.inflight_mutex);
+            if (xTaskCreatePinnedToCore(submit_worker_task, "usbip_w",
+                                        USBIP_WORKER_TASK_STACK, &conn,
+                                        USBIP_WORKER_TASK_PRIORITY, NULL,
+                                        USBIP_TASK_CORE) == pdPASS) {
+                workers_started++;
+            } else {
+                xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
+                conn.workers_alive--;
+                xSemaphoreGive(conn.inflight_mutex);
+            }
+        }
+    }
+
+    bool ok = false;
+    if (plumbing_ok) {
+        ok = handle_urb_stream(&conn, busid, usbip_proto_make_devid(&device));
+    }
+
+    /* Tear down: signal cancellation for any in-flight URBs, then
+     * drain the queue with NULL sentinels so workers exit. */
+    xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
+    for (inflight_urb_t *u = conn.inflight_head; u != NULL; u = u->next) {
+        u->cancel = true;
+    }
+    int outstanding = conn.inflight_count;
+    xSemaphoreGive(conn.inflight_mutex);
+
+    if (outstanding > 0) {
+        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+        while (true) {
+            xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
+            int n = conn.inflight_count;
+            xSemaphoreGive(conn.inflight_mutex);
+            if (n == 0) break;
+            if (xTaskGetTickCount() >= deadline) break;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+
+    for (int i = 0; i < workers_started; i++) {
+        inflight_urb_t *sentinel = NULL;
+        xQueueSend(conn.submit_queue, &sentinel, portMAX_DELAY);
+    }
+    if (workers_started > 0) {
+        xSemaphoreTake(conn.workers_done, pdMS_TO_TICKS(2000));
+    }
+
+    /* Free any straggler inflight records. */
+    xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
+    inflight_urb_t *u = conn.inflight_head;
+    while (u != NULL) {
+        inflight_urb_t *next = u->next;
+        inflight_free(u);
+        u = next;
+    }
+    conn.inflight_head = NULL;
+    conn.inflight_count = 0;
+    xSemaphoreGive(conn.inflight_mutex);
+
+    if (conn.tx_mutex)       vSemaphoreDelete(conn.tx_mutex);
+    if (conn.inflight_mutex) vSemaphoreDelete(conn.inflight_mutex);
+    if (conn.submit_queue)   vQueueDelete(conn.submit_queue);
+    if (conn.inflight_drain) vSemaphoreDelete(conn.inflight_drain);
+    if (conn.workers_done)   vSemaphoreDelete(conn.workers_done);
 
     if (vdev && vdev->ops->on_detach) {
         vdev->ops->on_detach(vdev);
@@ -700,6 +1025,9 @@ static void client_task(void *arg)
     if (slot_held) {
         attachment_release(slot_idx);
     }
+    /* Force a FIN on close so the kernel sees the disconnect even if
+     * any cached state is hanging on a half-closed socket. */
+    shutdown(fd, SHUT_RDWR);
     close(fd);
     ESP_LOGI(TAG, "Client disconnected");
     vTaskDelete(NULL);
@@ -799,8 +1127,6 @@ int usbip_server_start(uint16_t port)
         }
     }
 
-    /* Lazy-init the host backend. The Phase 2 stub is a no-op; WS-B
-     * replaces it with the TinyUSB host stack. */
     (void)usbhost_start();
 
     if (port == 0) {
@@ -825,8 +1151,6 @@ int usbip_server_stop(void)
     if (!s_state.running) {
         return 0;
     }
-    /* Setting running=false then closing the listener forces accept()
-     * out of its blocked state. The task self-terminates from there. */
     s_state.running = false;
     if (s_state.listen_fd >= 0) {
         shutdown(s_state.listen_fd, SHUT_RDWR);
@@ -853,9 +1177,6 @@ int32_t usbip_server_max_transfer(void)
 
 #else /* MPY_POD_HOST_TEST_BUILD */
 
-/* Host-test shim. The real entry points are stubbed so a host
- * harness can link the protocol module without needing a TCP
- * listener. */
 #include <stdio.h>
 
 int usbip_server_start(uint16_t port)

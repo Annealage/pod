@@ -1,26 +1,41 @@
-/* Annealage Pod: USB host (WS-B) backend.
+/* Annealage Pod: USB host backend.
  *
- * Replaces the WS-A-installed -ENOSYS stub at usbhost_stub.c with a
- * real backend feeding the multiplexer at src/c_modules/usbip/.
- * Implements the API contract in usbhost.h against the ESP-IDF
- * `usb_host` component (`components/usb/include/usb/usb_host.h`).
+ * Implements the API in usbhost.h against the ESP-IDF `usb_host`
+ * component (`components/usb/include/usb/usb_host.h`).
  *
- * Stack-selection rationale and design documentation:
- * docs/design/usbhost.md.
+ * Concurrency model (R15 refactor):
  *
- * Concurrency: two FreeRTOS tasks pinned to APP_CPU. `usb_host_daemon`
- * pumps `usb_host_lib_handle_events` (the library-wide event pump,
- * required by the IDF API). `usbhost_worker` registers the USB host
- * client and serialises pre-filled per-pipe request slots through
- * `usb_host_client_handle_events`. Caller threads block on a per-slot
- * binary semaphore.
+ *   The IDF requires that a single thread of control owns the call
+ *   to `usb_host_client_handle_events`. The earlier shape ran every
+ *   submit synchronously inside the worker, which serialised all
+ *   URBs through one event-pump call. CDC ACM open submits an
+ *   interrupt-IN that is intentionally pending forever, then a bulk
+ *   OUT class control; with serialised dispatch the bulk OUT queues
+ *   behind the pending IN and the device never sees line state.
  *
- * Vendoring: the slot/pipe topology is shape-equivalent to
- * `referencea/esp-usbip-bridge/main/usb_backend.c`; no upstream
- * licence is shipped with the reference repo so the implementation
- * is a clean rewrite. The wire-protocol structures consumed here
- * (usbip_dev_record_t, usbip_setup_packet_t) come from the
- * mpy-pod usbip module headers, not the reference.
+ *   The worker now does only event pumping. Submit functions are
+ *   called from any task context, fill out a per-call inflight
+ *   record (held on the caller's stack), allocate an IDF
+ *   `usb_transfer_t`, and submit it. The IDF transfer-completion
+ *   callback (which fires inside the worker's
+ *   `usb_host_client_handle_events`) writes back into the inflight
+ *   record and gives `done_sem`. The submit caller blocks on its
+ *   own `done_sem`, so many URBs can be in flight concurrently.
+ *
+ *   Cancellation: when `*cancel` flips true, the submit caller
+ *   halts and flushes the endpoint, which causes the IDF to
+ *   complete the URB with status CANCELED. The completion callback
+ *   then signals `done_sem` as usual.
+ *
+ *   Interfaces are claimed eagerly in `handle_new_device` (the lazy
+ *   path in the previous implementation interacted badly with the
+ *   busy-wait event pump). Hubs are still rejected before claim.
+ *
+ * Vendoring: the slot/pipe topology was shape-equivalent to
+ * `referencea/esp-usbip-bridge/main/usb_backend.c`; this file is a
+ * clean rewrite of that shape. The wire-protocol structures
+ * (usbip_dev_record_t, usbip_setup_packet_t) come from the mpy-pod
+ * usbip module headers, not the reference.
  */
 
 #include "usbhost.h"
@@ -45,9 +60,6 @@
 #include "usb/usb_types_stack.h"
 
 /* Compile-time defaults; override at link time with -DUSBHOST_*=N. */
-#ifndef USBHOST_NUM_PIPES
-#define USBHOST_NUM_PIPES 16
-#endif
 #ifndef USBHOST_MAX_DEVICES
 #define USBHOST_MAX_DEVICES 4
 #endif
@@ -57,15 +69,18 @@
 #ifndef USBHOST_MAX_ENDPOINTS
 #define USBHOST_MAX_ENDPOINTS 16
 #endif
-#ifndef USBHOST_TRANSFER_TIMEOUT_MS
-#define USBHOST_TRANSFER_TIMEOUT_MS 5000
+/* Control transfers complete in ms; non-control IN URBs may legitimately
+ * pend forever (CDC interrupt-IN waits for a notification). 0 = no
+ * timeout in the IDF. */
+#ifndef USBHOST_CONTROL_TIMEOUT_MS
+#define USBHOST_CONTROL_TIMEOUT_MS 5000
 #endif
 #ifndef USBHOST_EVENT_QUEUE_LEN
 #define USBHOST_EVENT_QUEUE_LEN 16
 #endif
 
 #ifndef USBHOST_TASK_CORE
-#define USBHOST_TASK_CORE 1   /* APP_CPU per spec.md §2 / architecture.md §3 */
+#define USBHOST_TASK_CORE 1   /* APP_CPU per spec.md S2 / architecture.md S3 */
 #endif
 #ifndef USBHOST_DAEMON_TASK_PRIORITY
 #define USBHOST_DAEMON_TASK_PRIORITY 10
@@ -88,7 +103,8 @@ static const char *TAG = "usbhost";
 
 /* Event queue between the IDF client-event callback (runs in the
  * worker's `usb_host_client_handle_events` context) and the worker's
- * main loop. Decouples the callback from the slow-path bookkeeping. */
+ * main loop. Decouples the callback from device-attach bookkeeping,
+ * which would otherwise re-enter the IDF from inside the callback. */
 typedef enum {
     USBHOST_EVENT_NEW_DEV = 1,
     USBHOST_EVENT_DEV_GONE = 2,
@@ -101,30 +117,6 @@ typedef struct {
         usb_device_handle_t dev_hdl;
     } u;
 } usbhost_event_t;
-
-/* Per-pipe request slot. One slot per USB host pipe. The caller fills
- * a pre-assigned slot (allocated at device-attach time), sets active,
- * notifies the worker, and waits on done_sem. */
-typedef struct {
-    bool                 assigned;       /* reserved for a (device,ep) */
-    volatile bool        active;         /* transfer is pending */
-    char                 busid[USBIP_BUSID_SIZE];
-    uint8_t              endpoint_addr;  /* 0 for control, 0x80|N for IN, N for OUT */
-    usbip_setup_packet_t setup;          /* used iff endpoint_addr == 0 */
-    const uint8_t       *out_data;
-    size_t               out_len;
-    uint8_t             *in_data;
-    size_t               in_capacity;
-    size_t              *in_len_out;
-    int                 *status_out;
-    volatile bool       *cancel;
-    SemaphoreHandle_t    done_sem;       /* pre-allocated, never freed */
-} usbhost_pipe_req_t;
-
-typedef struct {
-    bool          done;
-    volatile bool *cancel;
-} transfer_done_ctx_t;
 
 /* Cached endpoint description, populated from the active config
  * descriptor at device-attach time. */
@@ -139,12 +131,18 @@ typedef struct {
     bool                 in_use;
     bool                 interfaces_claimed;
     usb_device_handle_t  dev_hdl;
-    usbip_dev_record_t   device;            /* mirrored to multiplexer */
-    int                  ep0_pipe;          /* pipe index for EP0, -1 if none */
-    int                  ep_pipes[USBHOST_MAX_ENDPOINTS];
+    usbip_dev_record_t   device;
     uint8_t              num_endpoints;
     usbhost_ep_t         endpoints[USBHOST_MAX_ENDPOINTS];
 } usbhost_slot_t;
+
+/* Per-call inflight record. Lives on the caller's stack for the
+ * duration of the submit; the IDF callback writes `done` and gives
+ * `done_sem`. */
+typedef struct {
+    SemaphoreHandle_t  done_sem;
+    usb_transfer_t    *xfer;
+} usbhost_inflight_t;
 
 typedef struct {
     bool                       started;
@@ -153,14 +151,11 @@ typedef struct {
     TaskHandle_t               worker_hdl;
     TaskHandle_t               daemon_hdl;
     usb_host_client_handle_t   client_hdl;
-    usbhost_pipe_req_t         pipes[USBHOST_NUM_PIPES];
     usbhost_slot_t             devices[USBHOST_MAX_DEVICES];
 } usbhost_state_t;
 
 static usbhost_state_t s_state;
 
-/* Per-URB observability flag, toggled at runtime via
- * usbhost_set_verbose(). Default off. */
 static volatile bool s_urb_verbose = false;
 
 void usbhost_set_verbose(bool enable)
@@ -205,9 +200,8 @@ static bool busid_eq(const char a[USBIP_BUSID_SIZE], const char b[USBIP_BUSID_SI
     return memcmp(a, b, USBIP_BUSID_SIZE) == 0;
 }
 
-/* Walk the active configuration descriptor; populate the device's
- * num_interfaces / interfaces[] and the caller's endpoint cache from
- * the USB 2.0 chapter 9 fields. The caller holds state_mutex. */
+/* Walk the active configuration descriptor; populate desc->num_interfaces /
+ * interfaces[] and the caller's endpoint cache. */
 static void parse_config_desc(const usb_config_desc_t *cfg,
                               usbip_dev_record_t *desc,
                               usbhost_ep_t *eps_out,
@@ -230,8 +224,6 @@ static void parse_config_desc(const usb_config_desc_t *cfg,
         }
         if (dtype == USB_B_DESCRIPTOR_TYPE_INTERFACE && dlen >= 9) {
             if (intf_count < USBIP_MAX_INTERFACES) {
-                /* USB 2.0 §9.6.5: bInterfaceClass at offset 5,
-                 * bInterfaceSubClass at 6, bInterfaceProtocol at 7. */
                 desc->interfaces[intf_count].interface_class    = raw[off + 5];
                 desc->interfaces[intf_count].interface_subclass = raw[off + 6];
                 desc->interfaces[intf_count].interface_protocol = raw[off + 7];
@@ -239,9 +231,6 @@ static void parse_config_desc(const usb_config_desc_t *cfg,
             }
         } else if (dtype == USB_B_DESCRIPTOR_TYPE_ENDPOINT && dlen >= 7) {
             if (ep_count < USBHOST_MAX_ENDPOINTS) {
-                /* USB 2.0 §9.6.6: bEndpointAddress at offset 2,
-                 * bmAttributes at 3, wMaxPacketSize at 4 (LE 16-bit),
-                 * bInterval at 6. */
                 eps_out[ep_count].address         = raw[off + 2];
                 eps_out[ep_count].attributes      = raw[off + 3];
                 eps_out[ep_count].max_packet_size = (uint16_t)raw[off + 4]
@@ -302,40 +291,12 @@ static int find_free_slot_locked(void)
     return -1;
 }
 
-static int alloc_pipe_locked(void)
-{
-    for (int i = 0; i < USBHOST_NUM_PIPES; i++) {
-        if (!s_state.pipes[i].assigned) {
-            s_state.pipes[i].assigned = true;
-            s_state.pipes[i].active   = false;
-            return i;
-        }
-    }
-    return -1;
-}
-
-static void free_pipe_locked(int pipe)
-{
-    if (pipe >= 0 && pipe < USBHOST_NUM_PIPES) {
-        s_state.pipes[pipe].assigned = false;
-        s_state.pipes[pipe].active   = false;
-    }
-}
-
 static void clear_slot_locked(int slot)
 {
     if (slot < 0 || slot >= USBHOST_MAX_DEVICES) {
         return;
     }
-    free_pipe_locked(s_state.devices[slot].ep0_pipe);
-    for (int i = 0; i < USBHOST_MAX_ENDPOINTS; i++) {
-        free_pipe_locked(s_state.devices[slot].ep_pipes[i]);
-    }
     memset(&s_state.devices[slot], 0, sizeof(s_state.devices[slot]));
-    s_state.devices[slot].ep0_pipe = -1;
-    for (int i = 0; i < USBHOST_MAX_ENDPOINTS; i++) {
-        s_state.devices[slot].ep_pipes[i] = -1;
-    }
 }
 
 static void release_interfaces_locked(int slot)
@@ -355,19 +316,12 @@ static void release_interfaces_locked(int slot)
             ESP_LOGW(TAG, "interface_release(%u) failed: %s", i, esp_err_to_name(err));
         }
     }
-    for (int i = 0; i < USBHOST_MAX_ENDPOINTS; i++) {
-        free_pipe_locked(s_state.devices[slot].ep_pipes[i]);
-        s_state.devices[slot].ep_pipes[i] = -1;
-    }
     s_state.devices[slot].interfaces_claimed = false;
 }
 
-/* Composite-device support: claim every interface in the active
- * configuration. CDC + MSC simultaneous use (typical MicroPython DUT
- * shape per spec.md §4.5) needs both interfaces claimed concurrently,
- * which is the IDF default behaviour for a single client when the
- * interfaces don't overlap on endpoints. */
-static esp_err_t ensure_interfaces_claimed_locked(int slot)
+/* Eagerly claim every interface in the active configuration. Called
+ * inside handle_new_device, off the IDF callback path. */
+static esp_err_t claim_interfaces_locked(int slot)
 {
     if (slot < 0 || slot >= USBHOST_MAX_DEVICES || !s_state.devices[slot].in_use) {
         return ESP_ERR_INVALID_STATE;
@@ -385,16 +339,6 @@ static esp_err_t ensure_interfaces_claimed_locked(int slot)
             ESP_LOGW(TAG, "interface_claim(%u) failed: %s", i, esp_err_to_name(err));
             return err;
         }
-    }
-    /* One pipe slot per (cached) endpoint. */
-    for (uint8_t i = 0; i < s_state.devices[slot].num_endpoints; i++) {
-        int pipe = alloc_pipe_locked();
-        if (pipe < 0) {
-            ESP_LOGE(TAG, "no free pipe slots for ep 0x%02x on %s",
-                     s_state.devices[slot].endpoints[i].address, d->busid);
-            return ESP_ERR_NO_MEM;
-        }
-        s_state.devices[slot].ep_pipes[i] = pipe;
     }
     s_state.devices[slot].interfaces_claimed = true;
     return ESP_OK;
@@ -474,7 +418,7 @@ static void handle_new_device(uint8_t address)
     usbip_dev_record_t desc;
     memset(&desc, 0, sizeof(desc));
     desc.present             = true;
-    desc.busnum              = 1;                            /* real DUT bus */
+    desc.busnum              = 1;
     desc.devnum              = dev_info.dev_addr;
     desc.speed               = speed_to_usbip(dev_info.speed);
     desc.id_vendor           = dev_desc->idVendor;
@@ -504,14 +448,11 @@ static void handle_new_device(uint8_t address)
         return;
     }
 
-    /* Busid namespace: real DUT lives on bus 1 per
-     * research/usbip-multiplexing-design.md §1.1.2. */
     snprintf(desc.busid, sizeof(desc.busid), "1-%u", dev_info.dev_addr);
     snprintf(desc.path, sizeof(desc.path), "/esp-usb-host/1-%u", dev_info.dev_addr);
 
     xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
 
-    /* If the device address re-used an existing slot, close it first. */
     int existing = -1;
     for (int i = 0; i < USBHOST_MAX_DEVICES; i++) {
         if (s_state.devices[i].in_use && s_state.devices[i].device.devnum == desc.devnum) {
@@ -538,16 +479,15 @@ static void handle_new_device(uint8_t address)
     s_state.devices[slot].num_endpoints      = num_eps;
     memcpy(s_state.devices[slot].endpoints, eps, sizeof(eps[0]) * num_eps);
 
-    /* EP0 always gets a pipe slot. */
-    s_state.devices[slot].ep0_pipe = alloc_pipe_locked();
-    if (s_state.devices[slot].ep0_pipe < 0) {
-        ESP_LOGW(TAG, "no pipe slot for EP0 on %s", desc.busid);
+    /* Pre-claim interfaces: the kernel cdc-acm driver pends an
+     * interrupt-IN immediately on open, and waiting for that URB to
+     * trigger lazy claim deadlocks (the IN never completes until line
+     * state is set, which needs the OUT class control to dispatch). */
+    esp_err_t cerr = claim_interfaces_locked(slot);
+    if (cerr != ESP_OK) {
+        ESP_LOGW(TAG, "claim_interfaces failed for %s: %s",
+                 desc.busid, esp_err_to_name(cerr));
     }
-    for (int i = 0; i < USBHOST_MAX_ENDPOINTS; i++) {
-        s_state.devices[slot].ep_pipes[i] = -1;
-    }
-    /* Non-zero endpoint pipes are allocated lazily in
-     * ensure_interfaces_claimed_locked. */
 
     xSemaphoreGive(s_state.state_mutex);
 
@@ -584,160 +524,15 @@ static void drain_event_queue(void)
 }
 
 /* ------------------------------------------------------------------------ */
-/* URB submission (called on the worker task)                               */
+/* IDF transfer completion callback                                         */
 /* ------------------------------------------------------------------------ */
 
 static void transfer_done_cb(usb_transfer_t *xfer)
 {
-    transfer_done_ctx_t *ctx = (transfer_done_ctx_t *)xfer->context;
-    ctx->done = true;
-}
-
-/* Caller holds state_mutex. Returns the wMaxPacketSize for `ep_addr`
- * on the slot's cached endpoint table, defaulting to 64 if not found. */
-static uint16_t get_endpoint_mps_locked(int slot, uint8_t ep_addr)
-{
-    for (uint8_t i = 0; i < s_state.devices[slot].num_endpoints; i++) {
-        if (s_state.devices[slot].endpoints[i].address == ep_addr) {
-            uint16_t mps = s_state.devices[slot].endpoints[i].max_packet_size;
-            return (mps != 0) ? mps : 64;
-        }
+    usbhost_inflight_t *inflight = (usbhost_inflight_t *)xfer->context;
+    if (inflight != NULL && inflight->done_sem != NULL) {
+        xSemaphoreGive(inflight->done_sem);
     }
-    return 64;
-}
-
-static int process_pipe_request(usbhost_pipe_req_t *req)
-{
-    if (req->in_len_out != NULL) {
-        *req->in_len_out = 0;
-    }
-
-    const bool is_control = (req->endpoint_addr == 0);
-    const bool is_in = is_control
-        ? (req->setup.bmRequestType & USBIP_REQUEST_DIR_IN) != 0
-        : (req->endpoint_addr & 0x80) != 0;
-
-    /* Resolve dev_hdl + ensure interfaces are claimed under the mutex. */
-    usb_device_handle_t dev_hdl = NULL;
-    size_t xfer_len = is_control
-        ? (USB_SETUP_PACKET_SIZE + (is_in ? req->in_capacity : req->out_len))
-        : (is_in ? req->in_capacity : req->out_len);
-
-    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
-    int slot = find_slot_by_busid_locked(req->busid);
-    if (slot >= 0) {
-        if (!is_control) {
-            esp_err_t cerr = ensure_interfaces_claimed_locked(slot);
-            if (cerr != ESP_OK) {
-                xSemaphoreGive(s_state.state_mutex);
-                return -EIO;
-            }
-            /* Round IN bulk/interrupt up to MPS to satisfy the IDF
-             * transfer constraint that data length be a multiple of
-             * wMaxPacketSize. */
-            if (is_in && req->in_capacity > 0) {
-                uint16_t mps = get_endpoint_mps_locked(slot, req->endpoint_addr);
-                if (mps > 0 && (xfer_len % mps) != 0) {
-                    xfer_len = ((xfer_len + mps - 1) / mps) * mps;
-                }
-            }
-        }
-        dev_hdl = s_state.devices[slot].dev_hdl;
-    }
-    xSemaphoreGive(s_state.state_mutex);
-
-    if (dev_hdl == NULL) {
-        return -ENODEV;
-    }
-    const size_t payload_len = is_in ? req->in_capacity : req->out_len;
-    if (payload_len > USBHOST_MAX_TRANSFER) {
-        return -EMSGSIZE;
-    }
-
-    usb_transfer_t *xfer = NULL;
-    esp_err_t err = usb_host_transfer_alloc(xfer_len > 0 ? xfer_len : 1, 0, &xfer);
-    if (err != ESP_OK || xfer == NULL) {
-        return -ENOMEM;
-    }
-
-    if (is_control) {
-        /* USB chapter 9: setup packet (8 bytes) followed by data stage. */
-        memcpy(xfer->data_buffer, &req->setup, USB_SETUP_PACKET_SIZE);
-        if (!is_in && req->out_len > 0 && req->out_data != NULL) {
-            memcpy(xfer->data_buffer + USB_SETUP_PACKET_SIZE,
-                   req->out_data, req->out_len);
-        }
-    } else if (!is_in && req->out_len > 0 && req->out_data != NULL) {
-        memcpy(xfer->data_buffer, req->out_data, req->out_len);
-    }
-
-    transfer_done_ctx_t done_ctx = {.done = false, .cancel = req->cancel};
-    xfer->callback         = transfer_done_cb;
-    xfer->context          = &done_ctx;
-    xfer->device_handle    = dev_hdl;
-    xfer->bEndpointAddress = req->endpoint_addr;
-    xfer->num_bytes        = (int)xfer_len;
-    xfer->timeout_ms       = USBHOST_TRANSFER_TIMEOUT_MS;
-
-    if (is_control) {
-        err = usb_host_transfer_submit_control(s_state.client_hdl, xfer);
-    } else {
-        err = usb_host_transfer_submit(xfer);
-    }
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "transfer_submit ep=0x%02x failed: %s",
-                 req->endpoint_addr, esp_err_to_name(err));
-        usb_host_transfer_free(xfer);
-        return (err == ESP_ERR_INVALID_STATE) ? -ENODEV : -EIO;
-    }
-
-    /* Drive client events until the transfer's callback fires or the
-     * caller flips *cancel. The IDF API requires a single thread of
-     * control through usb_host_client_handle_events; the worker task
-     * is the only caller, so this nested call is safe. */
-    bool cancelled = false;
-    while (!done_ctx.done) {
-        if (!cancelled && req->cancel != NULL && *req->cancel) {
-            cancelled = true;
-        }
-        err = usb_host_client_handle_events(s_state.client_hdl, pdMS_TO_TICKS(10));
-        if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
-            ESP_LOGW(TAG, "client_handle_events err=%s ep=0x%02x done=%d",
-                     esp_err_to_name(err), req->endpoint_addr, done_ctx.done);
-            break;
-        }
-    }
-    if (cancelled) {
-        usb_host_transfer_free(xfer);
-        return -ECONNRESET;
-    }
-
-    int status = map_transfer_status_to_errno(xfer->status);
-    if (status == 0 && is_in && req->in_data != NULL && req->in_capacity > 0) {
-        size_t bytes;
-        if (is_control) {
-            bytes = (xfer->actual_num_bytes > USB_SETUP_PACKET_SIZE)
-                  ? (size_t)(xfer->actual_num_bytes - USB_SETUP_PACKET_SIZE)
-                  : 0;
-        } else {
-            bytes = (size_t)xfer->actual_num_bytes;
-            if (bytes > payload_len) {
-                bytes = payload_len;     /* IN was MPS-rounded; trim. */
-            }
-        }
-        if (bytes > req->in_capacity) {
-            bytes = req->in_capacity;
-        }
-        const uint8_t *src = is_control
-            ? (xfer->data_buffer + USB_SETUP_PACKET_SIZE)
-            : xfer->data_buffer;
-        memcpy(req->in_data, src, bytes);
-        if (req->in_len_out != NULL) {
-            *req->in_len_out = bytes;
-        }
-    }
-    usb_host_transfer_free(xfer);
-    return status;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -760,6 +555,11 @@ static void usb_host_daemon_task(void *arg)
     }
 }
 
+/* The worker is the sole owner of `usb_host_client_handle_events`.
+ * It pumps in a tight loop with a small block, draining attach/detach
+ * events from the IDF callback path and firing transfer-done callbacks
+ * for any URBs that completed. Submit calls from other tasks queue
+ * IDF-side and block on their own `done_sem`. */
 static void usbhost_worker_task(void *arg)
 {
     (void)arg;
@@ -778,30 +578,15 @@ static void usbhost_worker_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(TAG, "USB host worker running (%d pipe slots, %d device slots)",
-             USBHOST_NUM_PIPES, USBHOST_MAX_DEVICES);
+    ESP_LOGI(TAG, "USB host worker running (event-pump mode, %d device slots)",
+             USBHOST_MAX_DEVICES);
 
     while (true) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
-
-        err = usb_host_client_handle_events(s_state.client_hdl, 0);
+        err = usb_host_client_handle_events(s_state.client_hdl, pdMS_TO_TICKS(10));
         if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
             ESP_LOGW(TAG, "client_handle_events: %s", esp_err_to_name(err));
         }
         drain_event_queue();
-
-        for (int i = 0; i < USBHOST_NUM_PIPES; i++) {
-            usbhost_pipe_req_t *p = &s_state.pipes[i];
-            if (!p->active) {
-                continue;
-            }
-            int status = process_pipe_request(p);
-            if (p->status_out != NULL) {
-                *p->status_out = status;
-            }
-            p->active = false;
-            xSemaphoreGive(p->done_sem);
-        }
     }
 }
 
@@ -816,22 +601,10 @@ int usbhost_start(void)
     }
 
     memset(&s_state, 0, sizeof(s_state));
-    for (int i = 0; i < USBHOST_MAX_DEVICES; i++) {
-        s_state.devices[i].ep0_pipe = -1;
-        for (int j = 0; j < USBHOST_MAX_ENDPOINTS; j++) {
-            s_state.devices[i].ep_pipes[j] = -1;
-        }
-    }
 
     s_state.state_mutex = xSemaphoreCreateMutex();
     if (s_state.state_mutex == NULL) {
         return -ENOMEM;
-    }
-    for (int i = 0; i < USBHOST_NUM_PIPES; i++) {
-        s_state.pipes[i].done_sem = xSemaphoreCreateBinary();
-        if (s_state.pipes[i].done_sem == NULL) {
-            return -ENOMEM;
-        }
     }
     s_state.event_queue = xQueueCreate(USBHOST_EVENT_QUEUE_LEN, sizeof(usbhost_event_t));
     if (s_state.event_queue == NULL) {
@@ -901,82 +674,174 @@ bool usbhost_get_device_by_busid(const char busid[USBIP_BUSID_SIZE],
     return found;
 }
 
-/* Internal: pre-fill a pipe req slot, notify the worker, wait. */
-static int submit_pipe(const char busid[USBIP_BUSID_SIZE],
+/* Caller holds state_mutex. Returns wMaxPacketSize for ep_addr; 64 if
+ * not found. */
+static uint16_t get_endpoint_mps_locked(int slot, uint8_t ep_addr)
+{
+    for (uint8_t i = 0; i < s_state.devices[slot].num_endpoints; i++) {
+        if (s_state.devices[slot].endpoints[i].address == ep_addr) {
+            uint16_t mps = s_state.devices[slot].endpoints[i].max_packet_size;
+            return (mps != 0) ? mps : 64;
+        }
+    }
+    return 64;
+}
+
+/* The submit core. Runs entirely in the caller's task. The IDF
+ * transfer-completion callback fires inside the worker's
+ * usb_host_client_handle_events loop (single-threaded as required by
+ * the IDF) and gives our done_sem. */
+static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
                        uint8_t ep_addr,
+                       bool is_control,
                        const usbip_setup_packet_t *setup,
                        const uint8_t *out_data, size_t out_len,
                        uint8_t *in_data, size_t in_capacity, size_t *in_len,
-                       volatile bool *cancel)
+                       volatile bool *cancel,
+                       uint32_t timeout_ms)
 {
     if (busid == NULL || in_len == NULL) {
         return -EINVAL;
     }
     *in_len = 0;
 
-    /* Look up the pre-allocated pipe slot for (device, endpoint). For
-     * a non-zero endpoint that hasn't had its interface claimed yet
-     * we use the EP0 slot temporarily; the worker claims interfaces
-     * before the actual IDF transfer. */
-    int pipe_idx = -1;
+    const bool is_in = is_control
+        ? (setup != NULL && (setup->bmRequestType & USBIP_REQUEST_DIR_IN) != 0)
+        : (ep_addr & 0x80) != 0;
+    const size_t payload_len = is_in ? in_capacity : out_len;
+    if (payload_len > USBHOST_MAX_TRANSFER) {
+        return -EMSGSIZE;
+    }
+
+    /* Resolve dev_hdl + MPS-rounded transfer length. */
+    usb_device_handle_t dev_hdl = NULL;
+    size_t xfer_len = is_control
+        ? (USB_SETUP_PACKET_SIZE + payload_len)
+        : payload_len;
+
     xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
     int slot = find_slot_by_busid_locked(busid);
     if (slot >= 0) {
-        if (ep_addr == 0) {
-            pipe_idx = s_state.devices[slot].ep0_pipe;
-        } else {
-            for (uint8_t i = 0; i < s_state.devices[slot].num_endpoints; i++) {
-                if (s_state.devices[slot].endpoints[i].address == ep_addr) {
-                    pipe_idx = s_state.devices[slot].ep_pipes[i];
-                    break;
-                }
-            }
-            if (pipe_idx < 0) {
-                pipe_idx = s_state.devices[slot].ep0_pipe;
+        if (!is_control && is_in && in_capacity > 0) {
+            uint16_t mps = get_endpoint_mps_locked(slot, ep_addr);
+            if (mps > 0 && (xfer_len % mps) != 0) {
+                xfer_len = ((xfer_len + mps - 1) / mps) * mps;
             }
         }
+        dev_hdl = s_state.devices[slot].dev_hdl;
     }
     xSemaphoreGive(s_state.state_mutex);
 
-    if (slot < 0) {
+    if (dev_hdl == NULL) {
         return -ENODEV;
     }
-    if (pipe_idx < 0) {
-        ESP_LOGW(TAG, "no pipe slot for ep=0x%02x on %.32s", ep_addr, busid);
-        return -ENODEV;
-    }
-
-    usbhost_pipe_req_t *p = &s_state.pipes[pipe_idx];
-    int status = -EIO;
-
-    memcpy(p->busid, busid, sizeof(p->busid));
-    p->endpoint_addr = ep_addr;
-    if (setup != NULL) {
-        p->setup = *setup;
-    }
-    p->out_data    = out_data;
-    p->out_len     = out_len;
-    p->in_data     = in_data;
-    p->in_capacity = in_capacity;
-    p->in_len_out  = in_len;
-    p->status_out  = &status;
-    p->cancel      = cancel;
 
     if (s_urb_verbose) {
-        const bool is_in = (ep_addr & 0x80) != 0;
-        const size_t len = is_in ? in_capacity : out_len;
         ESP_LOGI(TAG, "usbhost_submit: dev=%.32s ep=0x%02x dir=%s len=%u",
                  busid, ep_addr,
-                 (ep_addr == 0) ? "CTRL" : (is_in ? "IN" : "OUT"),
-                 (unsigned)len);
+                 is_control ? "CTRL" : (is_in ? "IN" : "OUT"),
+                 (unsigned)payload_len);
     }
 
-    p->active = true;
-    if (s_state.worker_hdl != NULL) {
-        xTaskNotifyGive(s_state.worker_hdl);
+    usb_transfer_t *xfer = NULL;
+    esp_err_t err = usb_host_transfer_alloc(xfer_len > 0 ? xfer_len : 1, 0, &xfer);
+    if (err != ESP_OK || xfer == NULL) {
+        return -ENOMEM;
     }
-    /* The done_sem is pre-allocated and never freed under us. */
-    xSemaphoreTake(p->done_sem, portMAX_DELAY);
+
+    if (is_control) {
+        memcpy(xfer->data_buffer, setup, USB_SETUP_PACKET_SIZE);
+        if (!is_in && out_len > 0 && out_data != NULL) {
+            memcpy(xfer->data_buffer + USB_SETUP_PACKET_SIZE, out_data, out_len);
+        }
+    } else if (!is_in && out_len > 0 && out_data != NULL) {
+        memcpy(xfer->data_buffer, out_data, out_len);
+    }
+
+    /* Per-call inflight: stack-resident, lifetime is this function. */
+    usbhost_inflight_t inflight = {
+        .done_sem = xSemaphoreCreateBinary(),
+        .xfer     = xfer,
+    };
+    if (inflight.done_sem == NULL) {
+        usb_host_transfer_free(xfer);
+        return -ENOMEM;
+    }
+
+    xfer->callback         = transfer_done_cb;
+    xfer->context          = &inflight;
+    xfer->device_handle    = dev_hdl;
+    xfer->bEndpointAddress = is_control ? 0 : ep_addr;
+    xfer->num_bytes        = (int)xfer_len;
+    xfer->timeout_ms       = timeout_ms;
+
+    if (is_control) {
+        err = usb_host_transfer_submit_control(s_state.client_hdl, xfer);
+    } else {
+        err = usb_host_transfer_submit(xfer);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "transfer_submit ep=0x%02x failed: %s",
+                 ep_addr, esp_err_to_name(err));
+        vSemaphoreDelete(inflight.done_sem);
+        usb_host_transfer_free(xfer);
+        return (err == ESP_ERR_INVALID_STATE) ? -ENODEV : -EIO;
+    }
+
+    /* Wait for completion or cancel. The worker pumps client events
+     * and drives the callback that gives done_sem. */
+    bool cancelled = false;
+    while (xSemaphoreTake(inflight.done_sem, pdMS_TO_TICKS(50)) != pdTRUE) {
+        if (!cancelled && cancel != NULL && *cancel) {
+            cancelled = true;
+            /* Halt + flush forces the IDF to complete the URB with
+             * status CANCELED. The completion callback then gives
+             * done_sem and the next iteration takes it. clear() is
+             * needed so the endpoint can be re-used afterward. */
+            const uint8_t halt_ep = is_control ? 0x00 : ep_addr;
+            esp_err_t herr = usb_host_endpoint_halt(dev_hdl, halt_ep);
+            if (herr != ESP_OK && herr != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "endpoint_halt(0x%02x) failed: %s",
+                         halt_ep, esp_err_to_name(herr));
+            }
+            herr = usb_host_endpoint_flush(dev_hdl, halt_ep);
+            if (herr != ESP_OK && herr != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "endpoint_flush(0x%02x) failed: %s",
+                         halt_ep, esp_err_to_name(herr));
+            }
+            herr = usb_host_endpoint_clear(dev_hdl, halt_ep);
+            if (herr != ESP_OK && herr != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "endpoint_clear(0x%02x) failed: %s",
+                         halt_ep, esp_err_to_name(herr));
+            }
+        }
+    }
+
+    int status = map_transfer_status_to_errno(xfer->status);
+    if (status == 0 && is_in && in_data != NULL && in_capacity > 0) {
+        size_t bytes;
+        if (is_control) {
+            bytes = (xfer->actual_num_bytes > USB_SETUP_PACKET_SIZE)
+                  ? (size_t)(xfer->actual_num_bytes - USB_SETUP_PACKET_SIZE)
+                  : 0;
+        } else {
+            bytes = (size_t)xfer->actual_num_bytes;
+            if (bytes > payload_len) {
+                bytes = payload_len;
+            }
+        }
+        if (bytes > in_capacity) {
+            bytes = in_capacity;
+        }
+        const uint8_t *src = is_control
+            ? (xfer->data_buffer + USB_SETUP_PACKET_SIZE)
+            : xfer->data_buffer;
+        memcpy(in_data, src, bytes);
+        *in_len = bytes;
+    }
+
+    vSemaphoreDelete(inflight.done_sem);
+    usb_host_transfer_free(xfer);
 
     if (s_urb_verbose) {
         ESP_LOGI(TAG, "usbhost_complete: dev=%.32s ep=0x%02x status=%d actual=%u",
@@ -994,8 +859,9 @@ int usbhost_control_transfer(const char busid[USBIP_BUSID_SIZE],
     if (setup == NULL) {
         return -EINVAL;
     }
-    return submit_pipe(busid, 0, setup,
-                       out_data, out_len, in_data, in_capacity, in_len, cancel);
+    return submit_xfer(busid, 0, true, setup,
+                       out_data, out_len, in_data, in_capacity, in_len,
+                       cancel, USBHOST_CONTROL_TIMEOUT_MS);
 }
 
 int usbhost_bulk_transfer(const char busid[USBIP_BUSID_SIZE],
@@ -1007,8 +873,11 @@ int usbhost_bulk_transfer(const char busid[USBIP_BUSID_SIZE],
     if (ep_addr == 0) {
         return -EINVAL;
     }
-    return submit_pipe(busid, ep_addr, NULL,
-                       out_data, out_len, in_data, in_capacity, in_len, cancel);
+    /* No timeout for bulk; OUT completes when ACK lands, IN may pend
+     * indefinitely on a starved device until cancellation. */
+    return submit_xfer(busid, ep_addr, false, NULL,
+                       out_data, out_len, in_data, in_capacity, in_len,
+                       cancel, 0);
 }
 
 int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
@@ -1020,8 +889,11 @@ int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
     if (ep_addr == 0) {
         return -EINVAL;
     }
-    return submit_pipe(busid, ep_addr, NULL,
-                       out_data, out_len, in_data, in_capacity, in_len, cancel);
+    /* No timeout for interrupt IN; the cdc-acm interrupt-IN URB may
+     * legitimately pend for seconds waiting for a notification. */
+    return submit_xfer(busid, ep_addr, false, NULL,
+                       out_data, out_len, in_data, in_capacity, in_len,
+                       cancel, 0);
 }
 
 bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],
@@ -1038,7 +910,6 @@ bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],
     if (slot >= 0) {
         for (uint8_t i = 0; i < s_state.devices[slot].num_endpoints; i++) {
             if (s_state.devices[slot].endpoints[i].address == ep_addr) {
-                /* USB 2.0 §9.6.6: bmAttributes bits 0..1 == 0x03 -> Interrupt. */
                 is_intr = (s_state.devices[slot].endpoints[i].attributes & 0x03) == 0x03;
                 break;
             }
