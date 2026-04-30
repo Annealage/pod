@@ -1236,6 +1236,18 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
     }
     xSemaphoreGive(conn->inflight_mutex);
 
+    /* Release the attachment slot now: the kernel-side connection has
+     * dropped, the device is no longer "attached" from any client's
+     * point of view. Holding the slot through the cancel-storm/worker
+     * drain (up to 11 s) blocks a fresh IMPORT for the same busid with
+     * "already attached, refusing". The conn_state is heap-allocated
+     * and refcounted, so workers still draining safely keep their own
+     * references; a parallel new IMPORT spawns its own conn_state. */
+    if (slot_held != NULL && *slot_held && slot_idx != NULL) {
+        attachment_release(*slot_idx);
+        *slot_held = false;
+    }
+
     if (outstanding_drain_wait(conn, pdMS_TO_TICKS(3000)) != 0) {
         ESP_LOGW(TAG, "teardown: inflight drain timed out, count=%d",
                  conn->inflight_count);
