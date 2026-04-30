@@ -576,7 +576,14 @@ static bool tx_ret_unlink(conn_state_t *conn,
  * matches USB/IP arrival order); done gates the RET_SUBMIT TCP write
  * (workers must hit tx_ret_submit in ticket order so the kernel sees
  * givebacks in seqnum-correlated order). Both share the same spin shape:
- * acquire inflight_mutex, check counter == my ticket, advance or wait.
+ * acquire inflight_mutex, check counter has reached my ticket, advance
+ * or wait.
+ *
+ * Comparison uses sequence-number subtraction cast to int32_t so the
+ * 32-bit ticket/counter pair handles wraparound correctly. Equality
+ * compare would fail across the 4G boundary if a worker were preempted
+ * long enough for the gate to lap it (~3 days of sustained streaming on
+ * one EP). The cast costs nothing and removes the sharp edge.
  *
  * IDF completion ordering on its own would not be enough: workers wake
  * from done_sem in completion order but race for tx_mutex from there;
@@ -589,7 +596,7 @@ static void tx_order_wait(conn_state_t *conn, uint8_t idx, uint32_t ticket,
         uint32_t cur = wait_submit
             ? conn->tx_order[idx].submit_done
             : conn->tx_order[idx].done;
-        bool my_turn = (cur == ticket);
+        bool my_turn = ((int32_t)(cur - ticket) >= 0);
         xSemaphoreGive(conn->inflight_mutex);
         if (my_turn) break;
         vTaskDelay(1);
