@@ -1,0 +1,198 @@
+R15 findings - 2026-04-30
+
+Status: CODE COMPLETE, HARDWARE-TEST INCOMPLETE.
+
+Quick summary
+-------------
+
+Code refactor done; firmware compiles cleanly. Unable to validate on
+hardware in this session because the rig's flash workflow stopped
+working partway through. The flash on the ESP32-S3 is still the
+prior-to-R15 build (confirmed by boot banner showing "16 pipe slots, 4
+device slots", which is the old per-pipe table that this refactor
+removes). Smoke against the OLD firmware passed 3 of the first 3
+checks before pyOCD list hung on a stuck vhci_hcd kernel attachment
+left over from before this session.
+
+Files modified
+--------------
+
+src/c_modules/usbhost/usbhost.c        (full rewrite, see below)
+src/c_modules/usbip/usbip_server.c     (full rewrite, see below)
+test/integration/phase3/p315-r15-findings.log    (this file)
+test/integration/phase3/uart_trace_pre_r15.log   (the 92-line UART
+                                                  trace at task start)
+
+The rest of the source tree is untouched.
+
+What was changed
+----------------
+
+usbhost.c
+
+  - Removed the per-pipe slot table and the lazy interface-claim
+    path. Single worker task is now the sole owner of
+    usb_host_client_handle_events; it just pumps in a 10 ms-block
+    loop and drains the IDF callback queue.
+  - submit_xfer is callable from any task. It allocates a
+    usb_transfer_t plus a per-call binary done_sem, fills in the
+    transfer, calls usb_host_transfer_submit_control or
+    usb_host_transfer_submit, and blocks the calling task on
+    done_sem with a 50 ms tick. The IDF transfer-completion
+    callback fires from inside the worker's event-pump and gives
+    done_sem.
+  - Multiple URBs can be in flight concurrently because the IDF
+    accepts submission from any thread, only event handling has to
+    be single-threaded.
+  - Cancellation: if *cancel goes high while waiting, the caller
+    halts + flushes + clears the endpoint. The IDF reports CANCELED
+    via the callback, the caller wakes, returns -ECONNRESET. Halt /
+    flush / clear sequence is per the IDF docs (state machine
+    requires all three).
+  - Interface claim moved to handle_new_device, eagerly. The lazy
+    path was deadlocking the cdc-acm open: cdc-acm submits an
+    interrupt-IN immediately, that submit triggers the lazy claim,
+    which holds state_mutex while it does the IDF API calls, and
+    the IDF callbacks for the previous URBs were starved.
+  - USBHOST_TRANSFER_TIMEOUT_MS was 5000 for everything. Now 5000
+    for control only; bulk and interrupt use 0 (no timeout). The
+    cdc-acm interrupt-IN may legitimately pend for seconds waiting
+    for a device-side notification; the previous timeout would
+    cancel that and confuse the kernel.
+
+usbip_server.c
+
+  - handle_urb_stream becomes a pure read loop. For each
+    CMD_SUBMIT it allocates an inflight_urb_t, populates the OUT
+    buffer if any, links it into the per-connection inflight list
+    (keyed by seqnum), and either runs it inline (synthetic vdev,
+    microsecond latency) or pushes it to the per-connection submit
+    worker queue.
+  - 4 submit worker tasks are spawned per real-device connection.
+    Each pulls inflight_urb_t pointers from the queue, calls
+    usbhost_*_transfer (now async-friendly), and writes RET_SUBMIT
+    under a per-connection tx_mutex. Multiple URBs are concurrent.
+  - CMD_UNLINK is real now: looks up the seqnum, sets the cancel
+    flag on the matching inflight, and sends RET_UNLINK status=0
+    immediately. The submit worker observes cancel inside
+    usbhost_*_transfer and the URB completes with -ECONNRESET; the
+    worker then sends the corresponding RET_SUBMIT under tx_mutex.
+  - Connection teardown: signal cancel for every pending URB, wait
+    up to 2 s for inflight_count to drain, then push 4 NULL
+    sentinels on the worker queue, wait up to 2 s for the workers
+    to acknowledge by signalling workers_done. Mutexes / queues
+    are deleted only after workers_done fires (so tx_mutex is
+    valid for every worker that may still be executing run_inflight).
+  - One-line %zu -> %u fix in handle_devlist_request. IDF
+    newlib-nano printf does not implement %zu.
+
+What was tested
+---------------
+
+  - Build: PASSED (firmware.bin produced, expected size).
+  - Flash: FAILED (see below).
+  - Smoke against OLD firmware (still on flash): 3 PASS, then run.sh
+    aborted at P3.1.4 because pyocd hung on a stale vhci_hcd kernel
+    attachment.
+  - pyocd reset against busid 2-1: NOT RUN.
+  - mpremote round-trip against busid 1-1 forwarded CDC: NOT RUN.
+
+Why flash failed
+----------------
+
+This board's CH340N USB-UART bridge has only RTS wired to EN. DTR is
+not wired to GPIO0. Therefore esptool's standard auto-reset (DTR/RTS
+toggling) cannot enter the ROM download mode on this hardware:
+
+  RTS=True alone -> POWERON reset (boot:0x8 SPI_FAST_FLASH_BOOT)
+  DTR toggling alone -> no observable boot-mode effect
+
+machine.bootloader() from the running firmware DOES enter download
+mode (boot:0x0 DOWNLOAD(USB/UART0) confirmed in the ROM banner). A
+manually-crafted SLIP sync packet at 115200 baud DOES get a sync
+reply (verified: send 0xC0 0x00 0x08 0x24 ... 0xC0 + 32x 0x55 + 0xC0,
+get back 7 copies of 0xC0 0x01 0x08 0x04 ... 0xC0). But esptool with
+--before no_reset hangs at "Connecting..." regardless of -b 115200
+vs -b 460800, --no-stub vs default, --connect-attempts up to 8.
+/proc/$pid/io shows it sends 340 bytes then sleeps forever.
+
+I do not understand why esptool fails when manual sync works. The
+hypotheses I'd investigate next:
+
+  - Compare the first SLIP frames esptool transmits with what the
+    manual probe sends. Capture both via stty -F + cat -v or a
+    small pyserial sniffer.
+  - Check if the IDF firmware leaves DOWNLOAD(USB/UART0) in a
+    half-state where it is listening on USB Serial JTAG (the OTG
+    port, currently in host mode with the Pico DUT wired to it) but
+    the UART0 path is somehow gated. Try disabling the host setup
+    in handle_new_device before calling machine.bootloader() (or
+    just don't run usbip_server.start() in test mode, then enter
+    bootloader, then flash).
+  - The S3 ROM bootloader has a known issue around USB-OTG download
+    mode if the OTG was previously configured as host. A full power
+    cycle (hardware) recovers it.
+
+Kernel state hazard
+-------------------
+
+vhci_hcd port 0000 has a stale attachment (busid 5-1, sockfd 3) from
+a prior session. usbip detach -p 0 silently fails. rmmod vhci_hcd
+returns "Device or resource busy" because the [vhci_rx] / [vhci_tx]
+kernel threads are still alive servicing the dead socket. This is
+why pyocd hung at P3.1.4 - it enumerated USB and tried to access the
+phantom device. A reboot or careful tracking-down of the userspace
+fd holding the socket is needed.
+
+Test environment hazard
+-----------------------
+
+mpy-dev list and mpy-dev info both hang on this host (timed out at
+30 s and 60 s in this session). mpy-dev tty <label> works (returns
+immediately). mpy-dev cycle <label> hangs. So the documented
+runbook-power-cycle path via uhubctl is currently inoperative;
+physical replug is the fallback. Several uhubctl processes are
+running on this host (518xxx range) which might be causing the
+contention.
+
+Next steps
+----------
+
+1. Power cycle the ESP32-S3 board (physical USB unplug, count to ten,
+   replug). This also clears the stuck vhci_hcd attachment because
+   the underlying socket dies.
+2. Confirm 192.168.0.166 pings.
+3. Re-run the smoke against the OLD firmware to confirm 5/0 baseline.
+4. Pick one of the flash workarounds:
+   a. Investigate why esptool hangs after the sync exchange (compare
+      with a known-good capture).
+   b. Implement the flash protocol directly via pyserial - we know
+      SLIP sync works.
+   c. Add a hardware mod (wire BOOT to a spare CH340N pin or use the
+      USB JTAG / DFU path on a different connector).
+5. Once flashed, run the success triple from the brief.
+
+Architectural notes
+-------------------
+
+- The synthetic-fast-path (running run_inflight inline from the read
+  loop, skipping the worker pool) preserves the CMSIS-DAP regression
+  baseline. Latency is microseconds; CMSIS-DAP never has more than
+  one URB in flight at once on the synthetic side.
+
+- Teardown ordering of the connection state matters: workers may be
+  inside run_inflight (calling tx_ret_submit which takes tx_mutex)
+  when the read loop exits. Teardown waits for inflight_count==0
+  (every run_inflight done) BEFORE pushing sentinels and waiting for
+  workers_done. tx_mutex is freed only after workers_done fires.
+
+- Inflight back-pressure: read loop blocks (vTaskDelay 2ms) when
+  inflight_count >= USBIP_INFLIGHT_MAX (32). The kernel never queues
+  that many in practice.
+
+- Stable busid mapping (out-of-scope per the brief, flagging here):
+  the real-device busid is 1-N where N = dev_info.dev_addr. That
+  counter increments on every re-enumeration, so `usbip attach -r
+  host -b 1-1` silently targets a different DUT after the Pico is
+  replugged. A stable scheme keyed on iSerialNumber (or a hash of
+  it) would solve this. Recommended follow-up.
