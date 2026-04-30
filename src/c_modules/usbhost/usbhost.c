@@ -78,6 +78,22 @@
 #ifndef USBHOST_EVENT_QUEUE_LEN
 #define USBHOST_EVENT_QUEUE_LEN 16
 #endif
+/* Hard cap on how long submit_xfer waits for done_sem after issuing
+ * the cancel halt/flush/clear sequence. If exceeded, the URB is
+ * declared leaked (IDF never retired it) and we synthesise
+ * -ETIMEDOUT to the caller while keeping the heap inflight alive
+ * for the IDF callback. */
+#ifndef USBHOST_CANCEL_WATCHDOG_MS
+#define USBHOST_CANCEL_WATCHDOG_MS 2000
+#endif
+/* Per-EP wedge threshold: number of consecutive cancel cycles in
+ * which halt/flush/clear all returned ESP_ERR_INVALID_STATE before
+ * the slot is flagged for device reopen. Set to 1 because once one
+ * cancel reports the EP cannot be recovered, every subsequent
+ * transfer on that EP wedges the same way (iter4 evidence). */
+#ifndef USBHOST_EP_WEDGE_THRESHOLD
+#define USBHOST_EP_WEDGE_THRESHOLD 1
+#endif
 
 #ifndef USBHOST_TASK_CORE
 #define USBHOST_TASK_CORE 1   /* APP_CPU per spec.md S2 / architecture.md S3 */
@@ -127,22 +143,42 @@ typedef struct {
     uint8_t  interval;
 } usbhost_ep_t;
 
+/* Per-call inflight record. Heap-allocated so the IDF callback always
+ * sees valid memory even when the caller has given up waiting (the
+ * "leaked URB" path used by the wedge-recovery watchdog). The submit
+ * caller holds a reference; the callback drops one when it gives the
+ * sem; whichever ref reaches zero frees the record and the xfer. */
+typedef struct usbhost_inflight {
+    SemaphoreHandle_t      done_sem;
+    usb_transfer_t        *xfer;
+    volatile int           ref;            /* 2 = caller + IDF */
+    volatile bool          caller_gone;    /* true once submit_xfer left */
+    SemaphoreHandle_t      ref_lock;
+} usbhost_inflight_t;
+
 typedef struct {
     bool                 in_use;
     bool                 interfaces_claimed;
+    bool                 needs_reopen;     /* worker should reopen device */
+    uint8_t              reopen_address;   /* USB address to reopen */
     usb_device_handle_t  dev_hdl;
     usbip_dev_record_t   device;
     uint8_t              num_endpoints;
     usbhost_ep_t         endpoints[USBHOST_MAX_ENDPOINTS];
+    /* Per-endpoint submit mutexes serialise the IDF-side
+     * usb_host_transfer_submit call AND the cancel halt/flush/clear
+     * sequence so URBs reach the wire in the order the read loop
+     * dequeued them, and so concurrent EP commands cannot wedge the
+     * IDF's per-EP state machine (the `EP command error:
+     * ESP_ERR_INVALID_STATE` symptom seen in iter4). Indexed by
+     * ep_addr (0..15 OUT, 0x80..0x9F IN -> high bit folded). Lazy-
+     * created on first use. */
+    SemaphoreHandle_t    ep_submit_mutex[32];
+    /* Per-EP wedge counter. Incremented when halt/flush/clear during
+     * a cancel returns ESP_ERR_INVALID_STATE; reset on a successful
+     * submit. Threshold trips a device reopen. */
+    uint8_t              ep_wedge[32];
 } usbhost_slot_t;
-
-/* Per-call inflight record. Lives on the caller's stack for the
- * duration of the submit; the IDF callback writes `done` and gives
- * `done_sem`. */
-typedef struct {
-    SemaphoreHandle_t  done_sem;
-    usb_transfer_t    *xfer;
-} usbhost_inflight_t;
 
 typedef struct {
     bool                       started;
@@ -296,7 +332,39 @@ static void clear_slot_locked(int slot)
     if (slot < 0 || slot >= USBHOST_MAX_DEVICES) {
         return;
     }
+    for (size_t i = 0; i < sizeof(s_state.devices[slot].ep_submit_mutex) /
+                          sizeof(s_state.devices[slot].ep_submit_mutex[0]); i++) {
+        if (s_state.devices[slot].ep_submit_mutex[i] != NULL) {
+            vSemaphoreDelete(s_state.devices[slot].ep_submit_mutex[i]);
+        }
+    }
     memset(&s_state.devices[slot], 0, sizeof(s_state.devices[slot]));
+}
+
+/* Map ep_addr to a 5-bit slot index: number in low 4 bits, direction
+ * in bit 4. EP0 IN and OUT collapse to the same entry (control xfers
+ * use the same pipe in both directions). */
+static uint8_t ep_mutex_index(uint8_t ep_addr)
+{
+    return (uint8_t)((ep_addr & 0x0F) | ((ep_addr & 0x80) >> 3));
+}
+
+/* Lazy-create and return the per-endpoint submit mutex. Called with
+ * state_mutex held. Returns NULL on allocation failure; caller falls
+ * back to unserialised submit (degrades to pre-fix behaviour for that
+ * one URB rather than failing). */
+static SemaphoreHandle_t get_ep_submit_mutex_locked(int slot, uint8_t ep_addr)
+{
+    if (slot < 0 || slot >= USBHOST_MAX_DEVICES || !s_state.devices[slot].in_use) {
+        return NULL;
+    }
+    uint8_t idx = ep_mutex_index(ep_addr);
+    SemaphoreHandle_t m = s_state.devices[slot].ep_submit_mutex[idx];
+    if (m == NULL) {
+        m = xSemaphoreCreateMutex();
+        s_state.devices[slot].ep_submit_mutex[idx] = m;
+    }
+    return m;
 }
 
 static void release_interfaces_locked(int slot)
@@ -523,16 +591,151 @@ static void drain_event_queue(void)
     }
 }
 
+/* Reopen a device whose IDF EPs have wedged. Called from the worker
+ * task only, off the IDF callback path. The slot stays present and
+ * keeps its busid so submit_xfer callers see a brief -ENODEV window
+ * but the kernel-side cdc-acm bind survives. Steps:
+ *   1. Release interfaces and close the existing dev_hdl (this cancels
+ *      every IDF URB on the device; their callbacks fire and unref
+ *      the heap inflight records, which then free).
+ *   2. Re-open by address; if it succeeds, re-claim interfaces and
+ *      install the new dev_hdl into the slot. Endpoint cache is reused
+ *      from the prior parse (descriptor-stable).
+ *   3. Reset the wedge counters and clear needs_reopen.
+ * If reopen fails the slot is dropped entirely so a future NEW_DEV
+ * event re-creates it. */
+static void handle_reopen_request(int slot)
+{
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    if (slot < 0 || slot >= USBHOST_MAX_DEVICES
+            || !s_state.devices[slot].in_use
+            || !s_state.devices[slot].needs_reopen) {
+        xSemaphoreGive(s_state.state_mutex);
+        return;
+    }
+    uint8_t address = s_state.devices[slot].reopen_address;
+    char busid[USBIP_BUSID_SIZE];
+    memcpy(busid, s_state.devices[slot].device.busid, sizeof(busid));
+
+    ESP_LOGW(TAG, "reopen busid=%.32s addr=%u (releasing interfaces)",
+             busid, address);
+    /* Release+close the wedged dev_hdl. This is what fires the IDF
+     * cancellations on outstanding URBs. */
+    release_interfaces_locked(slot);
+    usb_device_handle_t old_hdl = s_state.devices[slot].dev_hdl;
+    s_state.devices[slot].dev_hdl = NULL;
+    /* Drop the mutex while we make IDF calls; submit_xfer will see
+     * dev_hdl=NULL and return -ENODEV during this brief window. */
+    xSemaphoreGive(s_state.state_mutex);
+
+    if (old_hdl != NULL) {
+        esp_err_t cerr = usb_host_device_close(s_state.client_hdl, old_hdl);
+        if (cerr != ESP_OK) {
+            ESP_LOGW(TAG, "reopen: device_close failed: %s", esp_err_to_name(cerr));
+        }
+    }
+    /* Let the IDF settle the close. */
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    /* Reopen by address. */
+    usb_device_handle_t new_hdl = NULL;
+    esp_err_t err = usb_host_device_open(s_state.client_hdl, address, &new_hdl);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "reopen: device_open(%u) failed: %s; dropping slot",
+                 address, esp_err_to_name(err));
+        xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+        if (slot >= 0 && slot < USBHOST_MAX_DEVICES && s_state.devices[slot].in_use) {
+            s_state.devices[slot].interfaces_claimed = false;
+            s_state.devices[slot].needs_reopen       = false;
+            clear_slot_locked(slot);
+        }
+        xSemaphoreGive(s_state.state_mutex);
+        return;
+    }
+
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    if (!s_state.devices[slot].in_use) {
+        /* Slot was reaped by a DEV_GONE event in the gap; close the
+         * fresh handle and bail. */
+        xSemaphoreGive(s_state.state_mutex);
+        usb_host_device_close(s_state.client_hdl, new_hdl);
+        return;
+    }
+    s_state.devices[slot].dev_hdl            = new_hdl;
+    s_state.devices[slot].interfaces_claimed = false;
+    /* Reset wedge counters; the new pipes start clean. */
+    memset(s_state.devices[slot].ep_wedge, 0, sizeof(s_state.devices[slot].ep_wedge));
+    esp_err_t cerr = claim_interfaces_locked(slot);
+    if (cerr != ESP_OK) {
+        ESP_LOGW(TAG, "reopen: claim_interfaces failed: %s", esp_err_to_name(cerr));
+    }
+    s_state.devices[slot].needs_reopen = false;
+    xSemaphoreGive(s_state.state_mutex);
+    ESP_LOGW(TAG, "reopen busid=%.32s addr=%u OK", busid, address);
+}
+
+static void drain_reopen_requests(void)
+{
+    /* Snapshot indices first to avoid holding state_mutex across the
+     * heavy reopen path. */
+    for (int i = 0; i < USBHOST_MAX_DEVICES; i++) {
+        bool needs;
+        xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+        needs = s_state.devices[i].in_use && s_state.devices[i].needs_reopen;
+        xSemaphoreGive(s_state.state_mutex);
+        if (needs) {
+            handle_reopen_request(i);
+        }
+    }
+}
+
 /* ------------------------------------------------------------------------ */
 /* IDF transfer completion callback                                         */
 /* ------------------------------------------------------------------------ */
 
+/* Drop one ref on a heap-allocated inflight; free it (and its xfer)
+ * when the count reaches zero. Safe to call from any task and from
+ * the IDF callback context. */
+static void inflight_unref(usbhost_inflight_t *inflight)
+{
+    if (inflight == NULL) {
+        return;
+    }
+    bool free_now = false;
+    xSemaphoreTake(inflight->ref_lock, portMAX_DELAY);
+    inflight->ref--;
+    if (inflight->ref <= 0) {
+        free_now = true;
+    }
+    xSemaphoreGive(inflight->ref_lock);
+    if (!free_now) {
+        return;
+    }
+    if (inflight->done_sem != NULL) {
+        vSemaphoreDelete(inflight->done_sem);
+    }
+    if (inflight->ref_lock != NULL) {
+        vSemaphoreDelete(inflight->ref_lock);
+    }
+    if (inflight->xfer != NULL) {
+        usb_host_transfer_free(inflight->xfer);
+    }
+    free(inflight);
+}
+
 static void transfer_done_cb(usb_transfer_t *xfer)
 {
     usbhost_inflight_t *inflight = (usbhost_inflight_t *)xfer->context;
-    if (inflight != NULL && inflight->done_sem != NULL) {
+    if (inflight == NULL) {
+        return;
+    }
+    /* Wake the caller if it is still waiting. If the caller has
+     * already left (watchdog fired), this give is harmless: nobody
+     * is taking from the sem and inflight_unref below will free it. */
+    if (inflight->done_sem != NULL) {
         xSemaphoreGive(inflight->done_sem);
     }
+    inflight_unref(inflight);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -587,6 +790,7 @@ static void usbhost_worker_task(void *arg)
             ESP_LOGW(TAG, "client_handle_events: %s", esp_err_to_name(err));
         }
         drain_event_queue();
+        drain_reopen_requests();
     }
 }
 
@@ -698,7 +902,8 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
                        const uint8_t *out_data, size_t out_len,
                        uint8_t *in_data, size_t in_capacity, size_t *in_len,
                        volatile bool *cancel,
-                       uint32_t timeout_ms)
+                       uint32_t timeout_ms,
+                       const usbhost_submit_order_t *order)
 {
     if (busid == NULL || in_len == NULL) {
         return -EINVAL;
@@ -719,6 +924,9 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
         ? (USB_SETUP_PACKET_SIZE + payload_len)
         : payload_len;
 
+    SemaphoreHandle_t ep_submit_mutex = NULL;
+    const uint8_t submit_ep = is_control ? 0x00 : ep_addr;
+
     xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
     int slot = find_slot_by_busid_locked(busid);
     if (slot >= 0) {
@@ -729,6 +937,7 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
             }
         }
         dev_hdl = s_state.devices[slot].dev_hdl;
+        ep_submit_mutex = get_ep_submit_mutex_locked(slot, submit_ep);
     }
     xSemaphoreGive(s_state.state_mutex);
 
@@ -758,66 +967,205 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
         memcpy(xfer->data_buffer, out_data, out_len);
     }
 
-    /* Per-call inflight: stack-resident, lifetime is this function. */
-    usbhost_inflight_t inflight = {
-        .done_sem = xSemaphoreCreateBinary(),
-        .xfer     = xfer,
-    };
-    if (inflight.done_sem == NULL) {
+    /* Heap-allocated inflight: refcounted so the IDF callback can fire
+     * after the caller has given up (watchdog-leaked URB). */
+    usbhost_inflight_t *inflight = calloc(1, sizeof(*inflight));
+    if (inflight == NULL) {
+        usb_host_transfer_free(xfer);
+        return -ENOMEM;
+    }
+    inflight->done_sem    = xSemaphoreCreateBinary();
+    inflight->ref_lock    = xSemaphoreCreateMutex();
+    inflight->xfer        = xfer;
+    inflight->ref         = 2; /* caller + IDF callback */
+    inflight->caller_gone = false;
+    if (inflight->done_sem == NULL || inflight->ref_lock == NULL) {
+        if (inflight->done_sem != NULL) vSemaphoreDelete(inflight->done_sem);
+        if (inflight->ref_lock != NULL) vSemaphoreDelete(inflight->ref_lock);
+        free(inflight);
         usb_host_transfer_free(xfer);
         return -ENOMEM;
     }
 
     xfer->callback         = transfer_done_cb;
-    xfer->context          = &inflight;
+    xfer->context          = inflight;
     xfer->device_handle    = dev_hdl;
     xfer->bEndpointAddress = is_control ? 0 : ep_addr;
     xfer->num_bytes        = (int)xfer_len;
     xfer->timeout_ms       = timeout_ms;
 
+    /* Per-endpoint submit serialisation. Two layers:
+     *   (1) The optional `order` hook is a ticket-based gate that
+     *       enforces submit order matching USB/IP arrival order. It
+     *       must run BEFORE acquiring the per-EP mutex, otherwise a
+     *       later-ticket worker can grab the mutex first and then spin
+     *       inside wait_fn forever, blocking the earlier-ticket worker
+     *       from ever entering the critical section.
+     *   (2) The per-EP mutex serialises the actual submit call so the
+     *       IDF only sees one outstanding submit at a time on this EP.
+     *       The IDF preserves submit order per pipe, so combining (1)
+     *       and (2) yields a strictly ticket-ordered wire submission. */
+    if (order != NULL && order->wait_fn != NULL) {
+        order->wait_fn(order->ctx);
+    }
+    if (ep_submit_mutex != NULL) {
+        xSemaphoreTake(ep_submit_mutex, portMAX_DELAY);
+    }
     if (is_control) {
         err = usb_host_transfer_submit_control(s_state.client_hdl, xfer);
     } else {
         err = usb_host_transfer_submit(xfer);
     }
+    if (order != NULL && order->advance_fn != NULL) {
+        order->advance_fn(order->ctx);
+    }
+    if (ep_submit_mutex != NULL) {
+        xSemaphoreGive(ep_submit_mutex);
+    }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "transfer_submit ep=0x%02x failed: %s",
-                 ep_addr, esp_err_to_name(err));
-        vSemaphoreDelete(inflight.done_sem);
-        usb_host_transfer_free(xfer);
+        ESP_LOGW(TAG, "transfer_submit ep=0x%02x failed: %s (ctrl=%d)",
+                 ep_addr, esp_err_to_name(err), (int)is_control);
+        if (err == ESP_ERR_INVALID_STATE) {
+            /* Submit refused because the IDF EP is in a bad state.
+             * Flag the slot for reopen so the worker recovers it. */
+            xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+            int s2 = find_slot_by_busid_locked(busid);
+            if (s2 >= 0 && !s_state.devices[s2].needs_reopen) {
+                s_state.devices[s2].needs_reopen   = true;
+                s_state.devices[s2].reopen_address = s_state.devices[s2].device.devnum;
+                ESP_LOGW(TAG, "flag reopen busid=%.32s addr=%u (submit INVALID_STATE)",
+                         busid, s_state.devices[s2].reopen_address);
+            }
+            xSemaphoreGive(s_state.state_mutex);
+        }
+        /* IDF rejected submit; it will not call our callback. Drop the
+         * IDF reference. The caller still holds its ref; we drop it
+         * below by unref'ing twice. */
+        inflight_unref(inflight); /* IDF ref */
+        inflight_unref(inflight); /* caller ref */
         return (err == ESP_ERR_INVALID_STATE) ? -ENODEV : -EIO;
     }
 
     /* Wait for completion or cancel. The worker pumps client events
-     * and drives the callback that gives done_sem. */
-    bool cancelled = false;
-    while (xSemaphoreTake(inflight.done_sem, pdMS_TO_TICKS(50)) != pdTRUE) {
+     * and drives the callback that gives done_sem. After we issue the
+     * halt/flush/clear sequence we bound the post-cancel wait so a
+     * wedged IDF EP cannot block the caller forever. */
+    bool cancelled       = false;
+    bool cancel_invalid_state = true; /* set false if any of halt/flush/clear succeeds */
+    int  watchdog_ms     = 0;
+    bool watchdog_fired  = false;
+    const uint8_t halt_ep = is_control ? 0x00 : ep_addr;
+    while (xSemaphoreTake(inflight->done_sem, pdMS_TO_TICKS(50)) != pdTRUE) {
         if (!cancelled && cancel != NULL && *cancel) {
             cancelled = true;
-            /* Halt + flush forces the IDF to complete the URB with
-             * status CANCELED. The completion callback then gives
-             * done_sem and the next iteration takes it. clear() is
-             * needed so the endpoint can be re-used afterward. */
-            const uint8_t halt_ep = is_control ? 0x00 : ep_addr;
+            /* Hold the per-EP mutex around halt+flush+clear so we
+             * cannot race a parallel submit on the same EP. The IDF's
+             * EP command machine rejects nested commands with
+             * INVALID_STATE; iter4 saw exactly that signature. */
+            if (ep_submit_mutex != NULL) {
+                xSemaphoreTake(ep_submit_mutex, portMAX_DELAY);
+            }
             esp_err_t herr = usb_host_endpoint_halt(dev_hdl, halt_ep);
-            if (herr != ESP_OK && herr != ESP_ERR_INVALID_STATE) {
+            if (herr == ESP_OK) cancel_invalid_state = false;
+            else if (herr != ESP_ERR_INVALID_STATE) {
                 ESP_LOGW(TAG, "endpoint_halt(0x%02x) failed: %s",
                          halt_ep, esp_err_to_name(herr));
+                cancel_invalid_state = false;
+            } else {
+                ESP_LOGW(TAG, "endpoint_halt(0x%02x) INVALID_STATE", halt_ep);
             }
             herr = usb_host_endpoint_flush(dev_hdl, halt_ep);
-            if (herr != ESP_OK && herr != ESP_ERR_INVALID_STATE) {
+            if (herr == ESP_OK) cancel_invalid_state = false;
+            else if (herr != ESP_ERR_INVALID_STATE) {
                 ESP_LOGW(TAG, "endpoint_flush(0x%02x) failed: %s",
                          halt_ep, esp_err_to_name(herr));
+                cancel_invalid_state = false;
+            } else {
+                ESP_LOGW(TAG, "endpoint_flush(0x%02x) INVALID_STATE", halt_ep);
             }
             herr = usb_host_endpoint_clear(dev_hdl, halt_ep);
-            if (herr != ESP_OK && herr != ESP_ERR_INVALID_STATE) {
+            if (herr == ESP_OK) cancel_invalid_state = false;
+            else if (herr != ESP_ERR_INVALID_STATE) {
                 ESP_LOGW(TAG, "endpoint_clear(0x%02x) failed: %s",
                          halt_ep, esp_err_to_name(herr));
+                cancel_invalid_state = false;
+            } else {
+                ESP_LOGW(TAG, "endpoint_clear(0x%02x) INVALID_STATE", halt_ep);
+            }
+            if (ep_submit_mutex != NULL) {
+                xSemaphoreGive(ep_submit_mutex);
+            }
+            /* If all three returned INVALID_STATE the EP is wedged.
+             * Bump the wedge counter; if it crosses the threshold,
+             * mark the slot for device reopen so the worker can
+             * tear it down at a safe point. */
+            if (cancel_invalid_state) {
+                xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+                int s2 = find_slot_by_busid_locked(busid);
+                if (s2 >= 0) {
+                    uint8_t idx = ep_mutex_index(halt_ep);
+                    if (s_state.devices[s2].ep_wedge[idx] < 255) {
+                        s_state.devices[s2].ep_wedge[idx]++;
+                    }
+                    if (s_state.devices[s2].ep_wedge[idx]
+                            >= USBHOST_EP_WEDGE_THRESHOLD
+                            && !s_state.devices[s2].needs_reopen) {
+                        s_state.devices[s2].needs_reopen   = true;
+                        s_state.devices[s2].reopen_address =
+                            s_state.devices[s2].device.devnum;
+                        ESP_LOGW(TAG, "flag reopen busid=%.32s addr=%u "
+                                 "ep=0x%02x (cancel INVALID_STATE x%u)",
+                                 busid,
+                                 s_state.devices[s2].reopen_address,
+                                 halt_ep,
+                                 s_state.devices[s2].ep_wedge[idx]);
+                    }
+                }
+                xSemaphoreGive(s_state.state_mutex);
+            }
+        }
+        if (cancelled) {
+            watchdog_ms += 50;
+            if (watchdog_ms >= USBHOST_CANCEL_WATCHDOG_MS) {
+                ESP_LOGW(TAG, "cancel watchdog: ep=0x%02x dev=%.32s no completion "
+                         "in %d ms; leaking URB",
+                         halt_ep, busid, USBHOST_CANCEL_WATCHDOG_MS);
+                watchdog_fired = true;
+                break;
             }
         }
     }
 
-    int status = map_transfer_status_to_errno(xfer->status);
+    int status;
+    if (watchdog_fired) {
+        /* IDF never completed the URB. Synthesise -ECONNRESET so the
+         * usbip layer sends RET_UNLINK with a sane status. The IDF
+         * still owns one ref on the inflight; if its callback ever
+         * fires (after device reopen tears the pipe down) the unref
+         * there will free everything. We drop only the caller's ref. */
+        status = -ECONNRESET;
+        xSemaphoreTake(inflight->ref_lock, portMAX_DELAY);
+        inflight->caller_gone = true;
+        xSemaphoreGive(inflight->ref_lock);
+        inflight_unref(inflight);
+        if (s_urb_verbose) {
+            ESP_LOGI(TAG, "usbhost_complete: dev=%.32s ep=0x%02x status=%d "
+                     "(watchdog leak)", busid, ep_addr, status);
+        }
+        return status;
+    }
+
+    status = map_transfer_status_to_errno(xfer->status);
+    /* On a successful (non-cancelled, non-stalled) completion clear
+     * the wedge counter for this EP. */
+    if (status == 0) {
+        xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+        int s2 = find_slot_by_busid_locked(busid);
+        if (s2 >= 0) {
+            s_state.devices[s2].ep_wedge[ep_mutex_index(halt_ep)] = 0;
+        }
+        xSemaphoreGive(s_state.state_mutex);
+    }
     if (status == 0 && is_in && in_data != NULL && in_capacity > 0) {
         size_t bytes;
         if (is_control) {
@@ -840,8 +1188,9 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
         *in_len = bytes;
     }
 
-    vSemaphoreDelete(inflight.done_sem);
-    usb_host_transfer_free(xfer);
+    /* Drop the caller's ref. The IDF callback already fired, so the
+     * IDF ref was dropped there too; this should free the inflight. */
+    inflight_unref(inflight);
 
     if (s_urb_verbose) {
         ESP_LOGI(TAG, "usbhost_complete: dev=%.32s ep=0x%02x status=%d actual=%u",
@@ -861,7 +1210,7 @@ int usbhost_control_transfer(const char busid[USBIP_BUSID_SIZE],
     }
     return submit_xfer(busid, 0, true, setup,
                        out_data, out_len, in_data, in_capacity, in_len,
-                       cancel, USBHOST_CONTROL_TIMEOUT_MS);
+                       cancel, USBHOST_CONTROL_TIMEOUT_MS, NULL);
 }
 
 int usbhost_bulk_transfer(const char busid[USBIP_BUSID_SIZE],
@@ -877,7 +1226,22 @@ int usbhost_bulk_transfer(const char busid[USBIP_BUSID_SIZE],
      * indefinitely on a starved device until cancellation. */
     return submit_xfer(busid, ep_addr, false, NULL,
                        out_data, out_len, in_data, in_capacity, in_len,
-                       cancel, 0);
+                       cancel, 0, NULL);
+}
+
+int usbhost_bulk_transfer_ordered(const char busid[USBIP_BUSID_SIZE],
+                                  uint8_t ep_addr,
+                                  const uint8_t *out_data, size_t out_len,
+                                  uint8_t *in_data, size_t in_capacity, size_t *in_len,
+                                  volatile bool *cancel,
+                                  const usbhost_submit_order_t *order)
+{
+    if (ep_addr == 0) {
+        return -EINVAL;
+    }
+    return submit_xfer(busid, ep_addr, false, NULL,
+                       out_data, out_len, in_data, in_capacity, in_len,
+                       cancel, 0, order);
 }
 
 int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
@@ -893,7 +1257,22 @@ int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
      * legitimately pend for seconds waiting for a notification. */
     return submit_xfer(busid, ep_addr, false, NULL,
                        out_data, out_len, in_data, in_capacity, in_len,
-                       cancel, 0);
+                       cancel, 0, NULL);
+}
+
+int usbhost_interrupt_transfer_ordered(const char busid[USBIP_BUSID_SIZE],
+                                       uint8_t ep_addr,
+                                       const uint8_t *out_data, size_t out_len,
+                                       uint8_t *in_data, size_t in_capacity, size_t *in_len,
+                                       volatile bool *cancel,
+                                       const usbhost_submit_order_t *order)
+{
+    if (ep_addr == 0) {
+        return -EINVAL;
+    }
+    return submit_xfer(busid, ep_addr, false, NULL,
+                       out_data, out_len, in_data, in_capacity, in_len,
+                       cancel, 0, order);
 }
 
 bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],

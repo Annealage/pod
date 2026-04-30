@@ -49,6 +49,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "lwip/sockets.h"
@@ -64,6 +65,16 @@ static const char *TAG = "usbip";
 #define USBIP_CLIENT_TASK_PRIORITY 5
 #define USBIP_WORKER_TASK_STACK    8192
 #define USBIP_WORKER_TASK_PRIORITY 5
+
+/* Task stack memory caps. Default xTaskCreatePinnedToCore allocates
+ * stacks from internal SRAM (~232 KiB region on the S3, mostly already
+ * consumed at boot by IDF / wifi / lwIP). 24 workers at 8 KiB plus the
+ * second connection's client_task overflow that region: the second
+ * IMPORT for 2-1 silently fails with errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY.
+ * xTaskCreatePinnedToCoreWithCaps lets us allocate stacks from PSRAM
+ * (8 MiB free) so two concurrent connections coexist. The TCB itself
+ * is still small and stays in internal RAM. */
+#define USBIP_TASK_STACK_CAPS  (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 
 #define USBIP_TASK_CORE 1
 
@@ -305,8 +316,37 @@ typedef struct inflight_urb {
     size_t                 out_len;
     uint8_t               *in_buf;
     size_t                 in_capacity;
+    /* Per-EP tx-order ticket. Assigned in intake_submit under
+     * inflight_mutex (single-threaded read loop). The worker that
+     * runs this URB must wait until tx_ticket == tx_ticket_next_done
+     * for this (ep,dir) before calling tx_ret_submit, then increment
+     * tx_ticket_next_done. This preserves per-EP RET_SUBMIT order
+     * across the worker pool (24 workers race after their done_sem
+     * fires; without this gate cdc-acm sees out-of-order URB
+     * completions and reassembly drops bytes). */
+    uint32_t               tx_ticket;
+    uint8_t                tx_order_idx; /* index into conn->tx_order[] */
+    /* True once tx_order[idx].submit_done has been advanced past
+     * tx_ticket. Set by the submit-order advance callback (workers
+     * going through usbhost_*_transfer_ordered) and used by run_inflight
+     * to advance submit_done unconditionally on paths that bypass the
+     * ordered API (synthetic, EP0, inline OUT, queue-saturated). */
+    bool                   submit_done_advanced;
     volatile bool          cancel;
     volatile bool          retired; /* true once RET_SUBMIT has been sent */
+    /* Atomic ownership of the kernel-visible giveback. Exactly one of
+     * {RET_SUBMIT, RET_UNLINK} must be sent per URB once UNLINK has
+     * been received; both confuses vhci_rx ("cannot find a urb of
+     * seqnum N") and tears down the connection. The worker claims
+     * RET_SUBMIT under inflight_mutex before calling tx_ret_submit;
+     * the UNLINK handler claims RET_UNLINK under the same mutex if
+     * the worker has not already claimed. Whoever loses the race skips
+     * its tx but still advances the tx-order gate. */
+    enum {
+        TX_OWNER_NONE = 0,
+        TX_OWNER_RET_SUBMIT,
+        TX_OWNER_RET_UNLINK,
+    } tx_owner;
     /* Cancel-then-wait coordination per USB/IP spec ordering. The
      * UNLINK handler sets cancel and waits on cancel_done_sem so the
      * worker's RET_SUBMIT (with status -ECONNRESET) reaches the kernel
@@ -319,6 +359,28 @@ typedef struct inflight_urb {
     struct inflight_urb   *next;
 } inflight_urb_t;
 
+/* Per-EP tx-order state. Indexed by ep_addr folded to 5 bits:
+ * (ep_num & 0x0F) | ((direction == IN) ? 0x10 : 0). 32 entries cover
+ * the full USB EP address space. issued is the next ticket number to
+ * hand out at intake; done is the next ticket number that may proceed
+ * to tx_ret_submit. A worker whose URB has tx_ticket=T spin-waits with
+ * vTaskDelay until done == T, calls tx_ret_submit, then sets done=T+1
+ * under inflight_mutex. Spin is cheap because the IDF pipe completes
+ * URBs in submit order, so done lags by at most a few ticks. */
+typedef struct {
+    uint32_t           issued;
+    uint32_t           done;
+    /* submit_done is the ticket of the next URB allowed to call into
+     * the backend submit path. Worker tasks racing through run_inflight
+     * would otherwise reach usb_host_transfer_submit in arbitrary order;
+     * the IDF preserves submit order on the wire, so a scrambled submit
+     * order surfaces as scrambled cdc-acm IN bytes. The submit-order
+     * gate forces workers to submit in ticket (intake) order. The gate
+     * is advanced once the backend submit call has returned, not when
+     * the URB completes, so URBs still complete concurrently. */
+    uint32_t           submit_done;
+} tx_order_slot_t;
+
 typedef struct conn_state {
     int                fd;
     bool               shutdown;        /* stop workers cleanly on disconnect */
@@ -330,7 +392,37 @@ typedef struct conn_state {
     SemaphoreHandle_t  inflight_drain;  /* given when count drops to 0 */
     volatile int       workers_alive;   /* count of pool tasks still running */
     SemaphoreHandle_t  workers_done;    /* given when workers_alive drops to 0 */
+    tx_order_slot_t    tx_order[32];    /* per-(ep,dir) tx-order tickets */
+    /* Refcount under inflight_mutex. Initial value 1 (read loop). Each
+     * spawned worker takes one. Whoever drops the last reference frees
+     * the struct. Heap-allocated so a wedged worker (e.g. submit_xfer
+     * stuck inside an IDF call that never completes) cannot trigger
+     * use-after-free of stack memory once handle_import_request returns. */
+    int                refcount;
 } conn_state_t;
+
+static void conn_state_free(conn_state_t *conn);
+
+/* Drop a reference. If the count reaches zero we own the destruction. */
+static void conn_state_release(conn_state_t *conn)
+{
+    if (conn == NULL) return;
+    bool last = false;
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    if (--conn->refcount == 0) {
+        last = true;
+    }
+    xSemaphoreGive(conn->inflight_mutex);
+    if (last) {
+        conn_state_free(conn);
+    }
+}
+
+/* Fold (ep_num, direction) into a 5-bit index for tx_order[]. */
+static uint8_t tx_order_index(uint32_t ep, uint32_t direction)
+{
+    return (uint8_t)((ep & 0x0F) | ((direction == USBIP_DIR_IN) ? 0x10 : 0));
+}
 
 static void inflight_link(conn_state_t *conn, inflight_urb_t *u)
 {
@@ -422,13 +514,18 @@ static void inflight_release_after_cancel(conn_state_t *conn,
 }
 
 /* Send RET_SUBMIT under tx_mutex so workers do not interleave bytes
- * on the wire. Returns false if the socket dropped. */
+ * on the wire. Returns false if the socket dropped.
+ * site is a short call-site label for instrumentation. */
 static bool tx_ret_submit(conn_state_t *conn,
                           uint32_t seqnum, uint32_t devid,
                           uint32_t direction, uint32_t ep,
                           int32_t status,
-                          const uint8_t *payload, uint32_t payload_len)
+                          const uint8_t *payload, uint32_t payload_len,
+                          const char *site)
 {
+    ESP_LOGW(TAG, "TX_RET_SUBMIT seq=%" PRIu32 " ep=%" PRIu32 " dir=%" PRIu32
+                  " status=%" PRId32 " len=%" PRIu32 " site=%s",
+             seqnum, ep, direction, status, payload_len, site);
     usbip_header_t reply;
     usbip_proto_pack_ret_submit(&reply, seqnum, devid, direction, ep,
                                 status, payload_len);
@@ -455,14 +552,53 @@ static bool tx_ret_submit(conn_state_t *conn,
 static bool tx_ret_unlink(conn_state_t *conn,
                           uint32_t seqnum, uint32_t devid,
                           uint32_t direction, uint32_t ep,
-                          int32_t status)
+                          int32_t status,
+                          const char *site)
 {
+    ESP_LOGW(TAG, "TX_RET_UNLINK seq=%" PRIu32 " ep=%" PRIu32 " dir=%" PRIu32
+                  " status=%" PRId32 " site=%s",
+             seqnum, ep, direction, status, site);
     usbip_header_t reply;
     usbip_proto_pack_ret_unlink(&reply, seqnum, devid, direction, ep, status);
     xSemaphoreTake(conn->tx_mutex, portMAX_DELAY);
     bool ok = write_all(conn->fd, &reply, sizeof(reply));
     xSemaphoreGive(conn->tx_mutex);
     return ok;
+}
+
+/* Submit-order hook context. Passed to usbhost_*_transfer_ordered so
+ * the backend can wait for our ticket before submitting and advance
+ * past our ticket once submit returns. The wait spins on a per-(ep,dir)
+ * counter; the IDF preserves per-pipe submit order on the wire, so
+ * gating the submit step in ticket order is sufficient to keep the
+ * RET_SUBMIT stream in protocol arrival order. */
+typedef struct {
+    inflight_urb_t *u;
+} submit_order_ctx_t;
+
+static void submit_order_wait_cb(void *vctx)
+{
+    submit_order_ctx_t *ctx = (submit_order_ctx_t *)vctx;
+    inflight_urb_t *u = ctx->u;
+    conn_state_t *conn = u->conn;
+    while (true) {
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        bool my_turn = (conn->tx_order[u->tx_order_idx].submit_done == u->tx_ticket);
+        xSemaphoreGive(conn->inflight_mutex);
+        if (my_turn) break;
+        vTaskDelay(1);
+    }
+}
+
+static void submit_order_advance_cb(void *vctx)
+{
+    submit_order_ctx_t *ctx = (submit_order_ctx_t *)vctx;
+    inflight_urb_t *u = ctx->u;
+    conn_state_t *conn = u->conn;
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    conn->tx_order[u->tx_order_idx].submit_done = u->tx_ticket + 1;
+    u->submit_done_advanced = true;
+    xSemaphoreGive(conn->inflight_mutex);
 }
 
 /* Run a single inflight URB end-to-end: backend dispatch + RET_SUBMIT.
@@ -510,17 +646,25 @@ static void run_inflight(inflight_urb_t *u)
     } else {
         uint8_t ep_addr = (uint8_t)(hdr->ep |
                           (hdr->direction == USBIP_DIR_IN ? 0x80u : 0x00u));
+        submit_order_ctx_t order_ctx = { .u = u };
+        usbhost_submit_order_t order = {
+            .wait_fn    = submit_order_wait_cb,
+            .advance_fn = submit_order_advance_cb,
+            .ctx        = &order_ctx,
+        };
         if (usbhost_is_interrupt_endpoint(u->busid, (uint8_t)hdr->ep,
                                           (uint8_t)hdr->direction)) {
-            status = usbhost_interrupt_transfer(u->busid, ep_addr,
+            status = usbhost_interrupt_transfer_ordered(u->busid, ep_addr,
                                                 u->out_buf, u->out_len,
                                                 u->in_buf, u->in_capacity,
-                                                &in_len, &u->cancel);
+                                                &in_len, &u->cancel,
+                                                &order);
         } else {
-            status = usbhost_bulk_transfer(u->busid, ep_addr,
+            status = usbhost_bulk_transfer_ordered(u->busid, ep_addr,
                                            u->out_buf, u->out_len,
                                            u->in_buf, u->in_capacity,
-                                           &in_len, &u->cancel);
+                                           &in_len, &u->cancel,
+                                           &order);
         }
     }
 
@@ -542,12 +686,62 @@ static void run_inflight(inflight_urb_t *u)
                  was_cancelled ? " (cancelled)" : "");
     }
 
-    bool ok = tx_ret_submit(conn,
-                            hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                            status,
-                            (status == 0 && hdr->direction == USBIP_DIR_IN) ? u->in_buf : NULL,
-                            (status == 0 && hdr->direction == USBIP_DIR_IN)
-                              ? (uint32_t)in_len : 0);
+    /* Per-EP tx-order gate. Block until all earlier-numbered URBs on
+     * this (ep,dir) have completed their tx_ret_submit. Without this,
+     * worker tasks racing into tx_mutex emit RET_SUBMITs in completion-
+     * race order rather than submit order, and the kernel cdc-acm
+     * reassembly drops bytes from URBs whose seqnum arrives "earlier"
+     * than its submit position. The IDF preserves per-pipe completion
+     * order, so the gate normally clears within microseconds; spin
+     * with a short delay rather than allocate per-URB semaphores. */
+    bool send_ret_submit = false;
+    while (true) {
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        bool my_turn = (conn->tx_order[u->tx_order_idx].done == u->tx_ticket);
+        if (my_turn) {
+            /* Claim RET_SUBMIT ownership iff the UNLINK handler has not
+             * already claimed RET_UNLINK. Whoever lost the race must
+             * not also send their giveback (vhci_rx tears down on
+             * "cannot find a urb of seqnum N"). */
+            if (u->tx_owner == TX_OWNER_NONE) {
+                u->tx_owner = TX_OWNER_RET_SUBMIT;
+                send_ret_submit = true;
+            }
+        }
+        xSemaphoreGive(conn->inflight_mutex);
+        if (my_turn) {
+            break;
+        }
+        vTaskDelay(1);
+    }
+
+    bool ok = true;
+    if (send_ret_submit) {
+        ok = tx_ret_submit(conn,
+                           hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
+                           status,
+                           (status == 0 && hdr->direction == USBIP_DIR_IN) ? u->in_buf : NULL,
+                           (status == 0 && hdr->direction == USBIP_DIR_IN)
+                             ? (uint32_t)in_len : 0,
+                           "worker");
+    } else if (s_urb_verbose) {
+        ESP_LOGI(TAG, "usbip_suppress: busid=%.32s ep=%" PRIu32
+                      " seq=%" PRIu32 " (RET_UNLINK already sent)",
+                 u->busid, hdr->ep, hdr->seqnum);
+    }
+
+    /* Advance the per-EP tx-order so the next-ticket URB may proceed.
+     * Also advance submit_done if no backend submit-order callback ran
+     * (synthetic, EP0, inline OUT, submit failure paths) so subsequent
+     * URBs on the same (ep,dir) sharing the submit-order gate are not
+     * stranded. */
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    if (!u->submit_done_advanced) {
+        conn->tx_order[u->tx_order_idx].submit_done = u->tx_ticket + 1;
+        u->submit_done_advanced = true;
+    }
+    conn->tx_order[u->tx_order_idx].done = u->tx_ticket + 1;
+    xSemaphoreGive(conn->inflight_mutex);
 
     if (s_urb_verbose) {
         ESP_LOGI(TAG, "usbip_out: busid=%.32s ep=%" PRIu32 " ok=%d",
@@ -591,6 +785,21 @@ static void run_inflight(inflight_urb_t *u)
     }
 }
 
+/* Block until conn->inflight_count reaches 0 or the deadline elapses.
+ * Returns 0 on drained, -1 on timeout. */
+static int outstanding_drain_wait(conn_state_t *conn, TickType_t timeout_ticks)
+{
+    TickType_t deadline = xTaskGetTickCount() + timeout_ticks;
+    while (true) {
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        int n = conn->inflight_count;
+        xSemaphoreGive(conn->inflight_mutex);
+        if (n == 0) return 0;
+        if (xTaskGetTickCount() >= deadline) return -1;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
 /* Worker: pull inflight URBs from the per-connection queue, run them,
  * exit when shutdown is signalled (queue closed by submit of NULL).
  * The pool only services IN URBs (which may pend long); OUT URBs run
@@ -615,7 +824,11 @@ static void submit_worker_task(void *arg)
     if (remaining == 0 && conn->workers_done != NULL) {
         xSemaphoreGive(conn->workers_done);
     }
-    vTaskDelete(NULL);
+    /* Drop the worker's reference. If handle_import_request has already
+     * returned (e.g. it timed out waiting on workers_done) this may be
+     * the final reference; conn_state_release handles the destroy. */
+    conn_state_release(conn);
+    vTaskDeleteWithCaps(NULL);
 }
 
 /* Read one URB worth of OUT-stage data into a fresh malloc buffer. */
@@ -667,15 +880,15 @@ static bool intake_submit(conn_state_t *conn,
             }
         }
         return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                             hdr->ep, -EMSGSIZE, NULL, 0);
+                             hdr->ep, -EMSGSIZE, NULL, 0, "intake_emsgsize");
     }
     if (v == -EINVAL) {
         return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                             hdr->ep, -EINVAL, NULL, 0);
+                             hdr->ep, -EINVAL, NULL, 0, "intake_einval");
     }
     if (v == -EOPNOTSUPP) {
         return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                             hdr->ep, -EOPNOTSUPP, NULL, 0);
+                             hdr->ep, -EOPNOTSUPP, NULL, 0, "intake_eopnotsupp");
     }
 
     if (hdr->devid != expected_devid) {
@@ -687,7 +900,7 @@ static bool intake_submit(conn_state_t *conn,
             }
         }
         return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                             hdr->ep, -ENODEV, NULL, 0);
+                             hdr->ep, -ENODEV, NULL, 0, "intake_enodev");
     }
 
     /* Setup direction sanity for control. */
@@ -700,7 +913,7 @@ static bool intake_submit(conn_state_t *conn,
                 }
             }
             return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                                 hdr->ep, -EINVAL, NULL, 0);
+                                 hdr->ep, -EINVAL, NULL, 0, "intake_setup_dir");
         }
     }
 
@@ -710,7 +923,7 @@ static bool intake_submit(conn_state_t *conn,
             (void)discard_exact(conn->fd, (size_t)hdr->transfer_buffer_length);
         }
         return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                             hdr->ep, -ENOMEM, NULL, 0);
+                             hdr->ep, -ENOMEM, NULL, 0, "intake_enomem_calloc");
     }
     u->hdr = *hdr;
     memcpy(u->busid, busid, USBIP_BUSID_SIZE);
@@ -724,7 +937,7 @@ static bool intake_submit(conn_state_t *conn,
             (void)discard_exact(conn->fd, (size_t)hdr->transfer_buffer_length);
         }
         return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                             hdr->ep, -ENOMEM, NULL, 0);
+                             hdr->ep, -ENOMEM, NULL, 0, "intake_enomem_sem");
     }
 
     if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
@@ -741,7 +954,7 @@ static bool intake_submit(conn_state_t *conn,
             free(u->out_buf);
             free(u);
             return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                                 hdr->ep, -ENOMEM, NULL, 0);
+                                 hdr->ep, -ENOMEM, NULL, 0, "intake_enomem_inbuf");
         }
     }
 
@@ -757,6 +970,15 @@ static bool intake_submit(conn_state_t *conn,
         }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
+
+    /* Assign per-EP tx-order ticket under inflight_mutex. The read
+     * loop is single-threaded, so tickets are issued in protocol
+     * arrival order (matches submit order on the IDF wire after the
+     * per-EP submit mutex). */
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    u->tx_order_idx = tx_order_index(hdr->ep, hdr->direction);
+    u->tx_ticket    = conn->tx_order[u->tx_order_idx].issued++;
+    xSemaphoreGive(conn->inflight_mutex);
 
     inflight_link(conn, u);
 
@@ -786,9 +1008,27 @@ static bool intake_submit(conn_state_t *conn,
     if (xQueueSend(conn->submit_queue, &u, 0) != pdTRUE) {
         ESP_LOGW(TAG, "submit queue saturated, seq=%" PRIu32, hdr->seqnum);
         inflight_unlink(conn, u);
+        /* Wait for our turn at tx_order so we don't bypass an earlier
+         * URB still in flight; then advance both the submit-order and
+         * tx-order gates past us so subsequent URBs aren't stranded. */
+        while (true) {
+            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+            bool my_turn = (conn->tx_order[u->tx_order_idx].done == u->tx_ticket);
+            xSemaphoreGive(conn->inflight_mutex);
+            if (my_turn) break;
+            vTaskDelay(1);
+        }
+        bool ok2 = tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                                 hdr->ep, -EBUSY, NULL, 0, "intake_ebusy_queue");
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        if (!u->submit_done_advanced) {
+            conn->tx_order[u->tx_order_idx].submit_done = u->tx_ticket + 1;
+            u->submit_done_advanced = true;
+        }
+        conn->tx_order[u->tx_order_idx].done = u->tx_ticket + 1;
+        xSemaphoreGive(conn->inflight_mutex);
         inflight_free(u);
-        return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                             hdr->ep, -EBUSY, NULL, 0);
+        return ok2;
     }
     return true;
 }
@@ -819,22 +1059,58 @@ static bool handle_urb_stream(conn_state_t *conn,
              * RET_UNLINK. Sending RET_UNLINK first while the URB is
              * still on priv_rx leaves usb_kill_urb spinning because
              * the kernel cannot find the seqnum on either list. */
+            ESP_LOGW(TAG, "RX_UNLINK seq=%" PRIu32 " unlink_seq=%" PRIu32,
+                     hdr.seqnum, hdr.unlink_seqnum);
             inflight_urb_t *u = inflight_begin_cancel(conn, hdr.unlink_seqnum);
+            bool send_ret_unlink = true;
+            const char *site = "unlink_no_match";
+            /* RET_UNLINK status semantics. The kernel's vhci_recv_ret_unlink
+             * propagates pdu->u.ret_unlink.status into urb->status before
+             * giving the URB back. status=0 means "URB completed normally
+             * with 0 bytes", which cdc-acm interprets as a successful but
+             * empty control transfer; that desyncs its state machine.
+             * For an URB we genuinely cancelled mid-flight the correct
+             * status is -ECONNRESET. For a URB that was already retired
+             * (RET_SUBMIT sent), the kernel will fail the priv_rx pickup
+             * and just log "already given back"; status is irrelevant
+             * there but -ECONNRESET is still spec-correct. */
+            int32_t unlink_status = -ECONNRESET;
             if (u != NULL) {
                 /* 250 ms ceiling: usbhost halt+flush+clear drives IDF
                  * completion within ~50 ms in practice. The read loop
                  * handles one UNLINK at a time so a tight cap keeps
                  * the close-storm of ~16 UNLINKs from stalling the
-                 * connection for many seconds. If a cancel still
-                 * hasn't landed we send RET_UNLINK anyway and let the
-                 * worker's eventual RET_SUBMIT unblock the kernel
-                 * giveback. */
-                (void)xSemaphoreTake(u->cancel_done_sem, pdMS_TO_TICKS(250));
+                 * connection for many seconds. */
+                BaseType_t took = xSemaphoreTake(u->cancel_done_sem, pdMS_TO_TICKS(250));
+                /* Claim RET_UNLINK ownership iff the worker has not
+                 * already claimed RET_SUBMIT. If the worker won, the
+                 * URB has already been given back via RET_SUBMIT and
+                 * we must not send RET_UNLINK; vhci_rx logs "cannot
+                 * find a urb of seqnum N" and tears down the
+                 * connection if both arrive. */
+                xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+                int prior_owner = (int)u->tx_owner;
+                if (u->tx_owner == TX_OWNER_NONE) {
+                    u->tx_owner = TX_OWNER_RET_UNLINK;
+                } else {
+                    send_ret_unlink = false;
+                }
+                xSemaphoreGive(conn->inflight_mutex);
+                ESP_LOGW(TAG, "UNLINK_CLAIM seq=%" PRIu32 " unlink_seq=%" PRIu32
+                              " sem=%d prior_owner=%d send=%d",
+                         hdr.seqnum, hdr.unlink_seqnum,
+                         (int)took, prior_owner, send_ret_unlink ? 1 : 0);
+                site = (took == pdTRUE) ? "unlink_after_worker" : "unlink_timeout";
                 inflight_release_after_cancel(conn, u);
+            } else {
+                ESP_LOGW(TAG, "UNLINK_NO_MATCH seq=%" PRIu32 " unlink_seq=%" PRIu32,
+                         hdr.seqnum, hdr.unlink_seqnum);
             }
-            if (!tx_ret_unlink(conn, hdr.seqnum, hdr.devid,
-                               hdr.direction, hdr.ep, 0)) {
-                return false;
+            if (send_ret_unlink) {
+                if (!tx_ret_unlink(conn, hdr.seqnum, hdr.devid,
+                                   hdr.direction, hdr.ep, unlink_status, site)) {
+                    return false;
+                }
             }
         } else {
             ESP_LOGW(TAG, "Unsupported USB/IP command 0x%08" PRIx32, hdr.command);
@@ -885,109 +1161,134 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
         }
     }
 
-    /* Stand up the per-connection async URB plumbing. */
-    conn_state_t conn = {
-        .fd              = fd,
-        .shutdown        = false,
-        .tx_mutex        = xSemaphoreCreateMutex(),
-        .inflight_mutex  = xSemaphoreCreateMutex(),
-        .submit_queue    = xQueueCreate(USBIP_INFLIGHT_MAX, sizeof(inflight_urb_t *)),
-        .inflight_head   = NULL,
-        .inflight_count  = 0,
-        .inflight_drain  = xSemaphoreCreateBinary(),
-        .workers_alive   = 0,
-        .workers_done    = xSemaphoreCreateBinary(),
-    };
+    /* Stand up the per-connection async URB plumbing on the heap. The
+     * struct outlives this function because a wedged worker (one whose
+     * IDF submit never completes) would otherwise dereference freed
+     * stack memory after handle_import_request returns; that corruption
+     * surfaced as the third-attach raw-REPL handshake failing because
+     * shared usbhost endpoint state had been clobbered. Refcount: 1 for
+     * us plus 1 per spawned worker. */
+    conn_state_t *conn = calloc(1, sizeof(*conn));
+    if (conn == NULL) {
+        if (vdev && vdev->ops->on_detach) {
+            vdev->ops->on_detach(vdev);
+        }
+        return false;
+    }
+    conn->fd              = fd;
+    conn->shutdown        = false;
+    conn->tx_mutex        = xSemaphoreCreateMutex();
+    conn->inflight_mutex  = xSemaphoreCreateMutex();
+    conn->submit_queue    = xQueueCreate(USBIP_INFLIGHT_MAX, sizeof(inflight_urb_t *));
+    conn->inflight_drain  = xSemaphoreCreateBinary();
+    conn->workers_done    = xSemaphoreCreateBinary();
+    conn->refcount        = 1;
 
-    bool plumbing_ok = (conn.tx_mutex != NULL && conn.inflight_mutex != NULL &&
-                        conn.submit_queue != NULL && conn.inflight_drain != NULL &&
-                        conn.workers_done != NULL);
+    bool plumbing_ok = (conn->tx_mutex != NULL && conn->inflight_mutex != NULL &&
+                        conn->submit_queue != NULL && conn->inflight_drain != NULL &&
+                        conn->workers_done != NULL);
 
     /* Spawn submit workers for the real-host path. Synthetic devices
      * never need them; running inline avoids the queue hop. */
     int workers_started = 0;
     if (plumbing_ok && vdev == NULL) {
         for (int i = 0; i < USBIP_SUBMIT_POOL_SIZE; i++) {
-            xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
-            conn.workers_alive++;
-            xSemaphoreGive(conn.inflight_mutex);
-            if (xTaskCreatePinnedToCore(submit_worker_task, "usbip_w",
-                                        USBIP_WORKER_TASK_STACK, &conn,
+            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+            conn->workers_alive++;
+            conn->refcount++;
+            xSemaphoreGive(conn->inflight_mutex);
+            if (xTaskCreatePinnedToCoreWithCaps(submit_worker_task, "usbip_w",
+                                        USBIP_WORKER_TASK_STACK, conn,
                                         USBIP_WORKER_TASK_PRIORITY, NULL,
-                                        USBIP_TASK_CORE) == pdPASS) {
+                                        USBIP_TASK_CORE,
+                                        USBIP_TASK_STACK_CAPS) == pdPASS) {
                 workers_started++;
             } else {
-                xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
-                conn.workers_alive--;
-                xSemaphoreGive(conn.inflight_mutex);
+                xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+                conn->workers_alive--;
+                conn->refcount--;
+                xSemaphoreGive(conn->inflight_mutex);
             }
         }
     }
 
     bool ok = false;
     if (plumbing_ok) {
-        ok = handle_urb_stream(&conn, busid, usbip_proto_make_devid(&device));
+        ok = handle_urb_stream(conn, busid, usbip_proto_make_devid(&device));
     }
 
-    /* Tear down: signal cancellation for any in-flight URBs, then
-     * drain the queue with NULL sentinels so workers exit. */
-    xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
-    for (inflight_urb_t *u = conn.inflight_head; u != NULL; u = u->next) {
+    /* Tear down: signal cancellation for any in-flight URBs so each
+     * worker's submit_xfer returns quickly via halt+flush+clear. */
+    conn->shutdown = true;
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    for (inflight_urb_t *u = conn->inflight_head; u != NULL; u = u->next) {
         u->cancel = true;
     }
-    int outstanding = conn.inflight_count;
-    xSemaphoreGive(conn.inflight_mutex);
+    xSemaphoreGive(conn->inflight_mutex);
 
-    if (outstanding > 0) {
-        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
-        while (true) {
-            xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
-            int n = conn.inflight_count;
-            xSemaphoreGive(conn.inflight_mutex);
-            if (n == 0) break;
-            if (xTaskGetTickCount() >= deadline) break;
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
+    if (outstanding_drain_wait(conn, pdMS_TO_TICKS(3000)) != 0) {
+        ESP_LOGW(TAG, "teardown: inflight drain timed out, count=%d",
+                 conn->inflight_count);
     }
 
     for (int i = 0; i < workers_started; i++) {
         inflight_urb_t *sentinel = NULL;
-        xQueueSend(conn.submit_queue, &sentinel, portMAX_DELAY);
+        xQueueSend(conn->submit_queue, &sentinel, portMAX_DELAY);
     }
     if (workers_started > 0) {
-        xSemaphoreTake(conn.workers_done, pdMS_TO_TICKS(2000));
+        /* Wait for workers to retire. If any worker is wedged inside an
+         * IDF call (rare, but the IDF gives no recovery primitive), the
+         * timeout fires and we drop our reference; the wedged worker
+         * still holds one and will free conn whenever it eventually
+         * exits. Either way our caller is safe. */
+        if (xSemaphoreTake(conn->workers_done, pdMS_TO_TICKS(8000)) != pdTRUE) {
+            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+            int alive = conn->workers_alive;
+            xSemaphoreGive(conn->inflight_mutex);
+            ESP_LOGW(TAG, "teardown: workers_alive=%d after 8s wait", alive);
+        }
     }
 
-    /* Free any straggler inflight records. */
-    xSemaphoreTake(conn.inflight_mutex, portMAX_DELAY);
-    inflight_urb_t *u = conn.inflight_head;
+    if (vdev && vdev->ops->on_detach) {
+        vdev->ops->on_detach(vdev);
+    }
+
+    /* Drop our reference. If all workers have already exited, this is
+     * the last reference and conn_state_free frees everything. */
+    conn_state_release(conn);
+    return ok;
+}
+
+/* Free conn_state_t and all attached resources. Called only when the
+ * refcount hits zero, so no other task is using any of these. */
+static void conn_state_free(conn_state_t *conn)
+{
+    /* Free any straggler inflight records. With refcount-driven destroy
+     * we can only reach here once every worker has dropped its ref, so
+     * the inflight list contains URBs that were never picked up (e.g.
+     * still queued at teardown). */
+    inflight_urb_t *u = conn->inflight_head;
     while (u != NULL) {
         inflight_urb_t *next = u->next;
         inflight_free(u);
         u = next;
     }
-    conn.inflight_head = NULL;
-    conn.inflight_count = 0;
-    xSemaphoreGive(conn.inflight_mutex);
-
-    if (conn.tx_mutex)       vSemaphoreDelete(conn.tx_mutex);
-    if (conn.inflight_mutex) vSemaphoreDelete(conn.inflight_mutex);
-    if (conn.submit_queue)   vQueueDelete(conn.submit_queue);
-    if (conn.inflight_drain) vSemaphoreDelete(conn.inflight_drain);
-    if (conn.workers_done)   vSemaphoreDelete(conn.workers_done);
-
-    if (vdev && vdev->ops->on_detach) {
-        vdev->ops->on_detach(vdev);
-    }
-    return ok;
+    if (conn->tx_mutex)       vSemaphoreDelete(conn->tx_mutex);
+    if (conn->inflight_mutex) vSemaphoreDelete(conn->inflight_mutex);
+    if (conn->submit_queue)   vQueueDelete(conn->submit_queue);
+    if (conn->inflight_drain) vSemaphoreDelete(conn->inflight_drain);
+    if (conn->workers_done)   vSemaphoreDelete(conn->workers_done);
+    free(conn);
 }
 
 /* ---------- accept loop ---------- */
 
 static void handle_client(int fd, size_t *slot_idx, bool *slot_held)
 {
+    ESP_LOGI(TAG, "handle_client: fd=%d", fd);
     usbip_op_common_t op_raw;
     if (!read_exact(fd, &op_raw, sizeof(op_raw))) {
+        ESP_LOGW(TAG, "handle_client: fd=%d op_common read failed", fd);
         return;
     }
     uint16_t version, code;
@@ -1018,6 +1319,7 @@ static void client_task(void *arg)
     client_task_arg_t *ctx = (client_task_arg_t *)arg;
     int fd = ctx->fd;
     free(ctx);
+    ESP_LOGI(TAG, "client_task: fd=%d", fd);
 
     size_t slot_idx = 0;
     bool   slot_held = false;
@@ -1030,7 +1332,7 @@ static void client_task(void *arg)
     shutdown(fd, SHUT_RDWR);
     close(fd);
     ESP_LOGI(TAG, "Client disconnected");
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 static void usbip_server_task(void *arg)
@@ -1081,6 +1383,9 @@ static void usbip_server_task(void *arg)
             ESP_LOGW(TAG, "accept() failed: errno=%d", errno);
             continue;
         }
+        ESP_LOGI(TAG, "accept: fd=%d from=%s:%u", client_fd,
+                 inet_ntoa(client_addr.sin_addr),
+                 (unsigned)ntohs(client_addr.sin_port));
 
         int nodelay = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
@@ -1091,12 +1396,18 @@ static void usbip_server_task(void *arg)
             continue;
         }
         cargs->fd = client_fd;
-        if (xTaskCreatePinnedToCore(client_task, "usbip_client",
+        BaseType_t xrc = xTaskCreatePinnedToCoreWithCaps(client_task, "usbip_client",
                                     USBIP_CLIENT_TASK_STACK, cargs,
                                     USBIP_CLIENT_TASK_PRIORITY, NULL,
-                                    USBIP_TASK_CORE) != pdPASS) {
+                                    USBIP_TASK_CORE,
+                                    USBIP_TASK_STACK_CAPS);
+        if (xrc != pdPASS) {
+            ESP_LOGW(TAG, "xTaskCreatePinnedToCore(client_task) failed rc=%d fd=%d",
+                     (int)xrc, client_fd);
             free(cargs);
             close(client_fd);
+        } else {
+            ESP_LOGI(TAG, "spawned client_task for fd=%d", client_fd);
         }
     }
 
