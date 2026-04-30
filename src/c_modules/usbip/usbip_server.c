@@ -570,12 +570,54 @@ static bool tx_ret_unlink(conn_state_t *conn,
     return ok;
 }
 
+/* Two ticket gates per (ep,dir) sit in tx_order_slot_t: submit_done and
+ * done. submit_done gates the IDF-side submit call (workers must call
+ * usb_host_transfer_submit in ticket order so the wire byte stream
+ * matches USB/IP arrival order); done gates the RET_SUBMIT TCP write
+ * (workers must hit tx_ret_submit in ticket order so the kernel sees
+ * givebacks in seqnum-correlated order). Both share the same spin shape:
+ * acquire inflight_mutex, check counter == my ticket, advance or wait.
+ *
+ * IDF completion ordering on its own would not be enough: workers wake
+ * from done_sem in completion order but race for tx_mutex from there;
+ * without the done gate they emit RET_SUBMITs in wake-race order. */
+static void tx_order_wait(conn_state_t *conn, uint8_t idx, uint32_t ticket,
+                          bool wait_submit)
+{
+    while (true) {
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        uint32_t cur = wait_submit
+            ? conn->tx_order[idx].submit_done
+            : conn->tx_order[idx].done;
+        bool my_turn = (cur == ticket);
+        xSemaphoreGive(conn->inflight_mutex);
+        if (my_turn) break;
+        vTaskDelay(1);
+    }
+}
+
+/* Advance one or both gates past `ticket`. Caller holds no mutex.
+ * If both flags set, advances submit_done first then done in one
+ * critical section (the order-of-advance does not matter; the gates
+ * are independent counters). */
+static void tx_order_advance(inflight_urb_t *u,
+                             bool advance_submit, bool advance_done)
+{
+    conn_state_t *conn = u->conn;
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    if (advance_submit && !u->submit_done_advanced) {
+        conn->tx_order[u->tx_order_idx].submit_done = u->tx_ticket + 1;
+        u->submit_done_advanced = true;
+    }
+    if (advance_done) {
+        conn->tx_order[u->tx_order_idx].done = u->tx_ticket + 1;
+    }
+    xSemaphoreGive(conn->inflight_mutex);
+}
+
 /* Submit-order hook context. Passed to usbhost_*_transfer_ordered so
  * the backend can wait for our ticket before submitting and advance
- * past our ticket once submit returns. The wait spins on a per-(ep,dir)
- * counter; the IDF preserves per-pipe submit order on the wire, so
- * gating the submit step in ticket order is sufficient to keep the
- * RET_SUBMIT stream in protocol arrival order. */
+ * past our ticket once submit returns. */
 typedef struct {
     inflight_urb_t *u;
 } submit_order_ctx_t;
@@ -584,25 +626,13 @@ static void submit_order_wait_cb(void *vctx)
 {
     submit_order_ctx_t *ctx = (submit_order_ctx_t *)vctx;
     inflight_urb_t *u = ctx->u;
-    conn_state_t *conn = u->conn;
-    while (true) {
-        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-        bool my_turn = (conn->tx_order[u->tx_order_idx].submit_done == u->tx_ticket);
-        xSemaphoreGive(conn->inflight_mutex);
-        if (my_turn) break;
-        vTaskDelay(1);
-    }
+    tx_order_wait(u->conn, u->tx_order_idx, u->tx_ticket, true);
 }
 
 static void submit_order_advance_cb(void *vctx)
 {
     submit_order_ctx_t *ctx = (submit_order_ctx_t *)vctx;
-    inflight_urb_t *u = ctx->u;
-    conn_state_t *conn = u->conn;
-    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-    conn->tx_order[u->tx_order_idx].submit_done = u->tx_ticket + 1;
-    u->submit_done_advanced = true;
-    xSemaphoreGive(conn->inflight_mutex);
+    tx_order_advance(ctx->u, true, false);
 }
 
 /* Run a single inflight URB end-to-end: backend dispatch + RET_SUBMIT.
@@ -690,34 +720,19 @@ static void run_inflight(inflight_urb_t *u)
                  was_cancelled ? " (cancelled)" : "");
     }
 
-    /* Per-EP tx-order gate. Block until all earlier-numbered URBs on
-     * this (ep,dir) have completed their tx_ret_submit. Without this,
-     * worker tasks racing into tx_mutex emit RET_SUBMITs in completion-
-     * race order rather than submit order, and the kernel cdc-acm
-     * reassembly drops bytes from URBs whose seqnum arrives "earlier"
-     * than its submit position. The IDF preserves per-pipe completion
-     * order, so the gate normally clears within microseconds; spin
-     * with a short delay rather than allocate per-URB semaphores. */
+    /* Per-EP RET_SUBMIT-order gate. Block until all earlier-numbered
+     * URBs on this (ep,dir) have completed their tx_ret_submit, then
+     * claim RET_SUBMIT ownership atomically (the UNLINK handler claims
+     * the same gate; whichever loses skips its giveback so vhci_rx does
+     * not see a duplicate "cannot find a urb of seqnum N"). */
+    tx_order_wait(conn, u->tx_order_idx, u->tx_ticket, false);
     bool send_ret_submit = false;
-    while (true) {
-        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-        bool my_turn = (conn->tx_order[u->tx_order_idx].done == u->tx_ticket);
-        if (my_turn) {
-            /* Claim RET_SUBMIT ownership iff the UNLINK handler has not
-             * already claimed RET_UNLINK. Whoever lost the race must
-             * not also send their giveback (vhci_rx tears down on
-             * "cannot find a urb of seqnum N"). */
-            if (u->tx_owner == TX_OWNER_NONE) {
-                u->tx_owner = TX_OWNER_RET_SUBMIT;
-                send_ret_submit = true;
-            }
-        }
-        xSemaphoreGive(conn->inflight_mutex);
-        if (my_turn) {
-            break;
-        }
-        vTaskDelay(1);
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    if (u->tx_owner == TX_OWNER_NONE) {
+        u->tx_owner = TX_OWNER_RET_SUBMIT;
+        send_ret_submit = true;
     }
+    xSemaphoreGive(conn->inflight_mutex);
 
     bool ok = true;
     if (send_ret_submit) {
@@ -734,18 +749,10 @@ static void run_inflight(inflight_urb_t *u)
                  u->busid, hdr->ep, hdr->seqnum);
     }
 
-    /* Advance the per-EP tx-order so the next-ticket URB may proceed.
-     * Also advance submit_done if no backend submit-order callback ran
-     * (synthetic, EP0, inline OUT, submit failure paths) so subsequent
-     * URBs on the same (ep,dir) sharing the submit-order gate are not
-     * stranded. */
-    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-    if (!u->submit_done_advanced) {
-        conn->tx_order[u->tx_order_idx].submit_done = u->tx_ticket + 1;
-        u->submit_done_advanced = true;
-    }
-    conn->tx_order[u->tx_order_idx].done = u->tx_ticket + 1;
-    xSemaphoreGive(conn->inflight_mutex);
+    /* Advance both gates past us so subsequent URBs may proceed. The
+     * submit gate is advanced here only if no backend submit-order
+     * callback ran (synthetic, EP0, inline OUT, submit failure). */
+    tx_order_advance(u, true, true);
 
     if (s_urb_verbose) {
         ESP_LOGI(TAG, "usbip_out: busid=%.32s ep=%" PRIu32 " ok=%d",
@@ -1012,25 +1019,13 @@ static bool intake_submit(conn_state_t *conn,
     if (xQueueSend(conn->submit_queue, &u, 0) != pdTRUE) {
         ESP_LOGW(TAG, "submit queue saturated, seq=%" PRIu32, hdr->seqnum);
         inflight_unlink(conn, u);
-        /* Wait for our turn at tx_order so we don't bypass an earlier
-         * URB still in flight; then advance both the submit-order and
-         * tx-order gates past us so subsequent URBs aren't stranded. */
-        while (true) {
-            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-            bool my_turn = (conn->tx_order[u->tx_order_idx].done == u->tx_ticket);
-            xSemaphoreGive(conn->inflight_mutex);
-            if (my_turn) break;
-            vTaskDelay(1);
-        }
+        /* Wait for our turn at the RET_SUBMIT gate so we don't bypass
+         * an earlier URB still in flight, then advance both gates past
+         * us so subsequent URBs aren't stranded. */
+        tx_order_wait(conn, u->tx_order_idx, u->tx_ticket, false);
         bool ok2 = tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
                                  hdr->ep, -EBUSY, NULL, 0, "intake_ebusy_queue");
-        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-        if (!u->submit_done_advanced) {
-            conn->tx_order[u->tx_order_idx].submit_done = u->tx_ticket + 1;
-            u->submit_done_advanced = true;
-        }
-        conn->tx_order[u->tx_order_idx].done = u->tx_ticket + 1;
-        xSemaphoreGive(conn->inflight_mutex);
+        tx_order_advance(u, true, true);
         inflight_free(u);
         return ok2;
     }
