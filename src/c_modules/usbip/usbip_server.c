@@ -523,9 +523,11 @@ static bool tx_ret_submit(conn_state_t *conn,
                           const uint8_t *payload, uint32_t payload_len,
                           const char *site)
 {
-    ESP_LOGW(TAG, "TX_RET_SUBMIT seq=%" PRIu32 " ep=%" PRIu32 " dir=%" PRIu32
-                  " status=%" PRId32 " len=%" PRIu32 " site=%s",
-             seqnum, ep, direction, status, payload_len, site);
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "TX_RET_SUBMIT seq=%" PRIu32 " ep=%" PRIu32 " dir=%" PRIu32
+                      " status=%" PRId32 " len=%" PRIu32 " site=%s",
+                 seqnum, ep, direction, status, payload_len, site);
+    }
     usbip_header_t reply;
     usbip_proto_pack_ret_submit(&reply, seqnum, devid, direction, ep,
                                 status, payload_len);
@@ -555,9 +557,11 @@ static bool tx_ret_unlink(conn_state_t *conn,
                           int32_t status,
                           const char *site)
 {
-    ESP_LOGW(TAG, "TX_RET_UNLINK seq=%" PRIu32 " ep=%" PRIu32 " dir=%" PRIu32
-                  " status=%" PRId32 " site=%s",
-             seqnum, ep, direction, status, site);
+    if (s_urb_verbose) {
+        ESP_LOGI(TAG, "TX_RET_UNLINK seq=%" PRIu32 " ep=%" PRIu32 " dir=%" PRIu32
+                      " status=%" PRId32 " site=%s",
+                 seqnum, ep, direction, status, site);
+    }
     usbip_header_t reply;
     usbip_proto_pack_ret_unlink(&reply, seqnum, devid, direction, ep, status);
     xSemaphoreTake(conn->tx_mutex, portMAX_DELAY);
@@ -1059,8 +1063,10 @@ static bool handle_urb_stream(conn_state_t *conn,
              * RET_UNLINK. Sending RET_UNLINK first while the URB is
              * still on priv_rx leaves usb_kill_urb spinning because
              * the kernel cannot find the seqnum on either list. */
-            ESP_LOGW(TAG, "RX_UNLINK seq=%" PRIu32 " unlink_seq=%" PRIu32,
-                     hdr.seqnum, hdr.unlink_seqnum);
+            if (s_urb_verbose) {
+                ESP_LOGI(TAG, "RX_UNLINK seq=%" PRIu32 " unlink_seq=%" PRIu32,
+                         hdr.seqnum, hdr.unlink_seqnum);
+            }
             inflight_urb_t *u = inflight_begin_cancel(conn, hdr.unlink_seqnum);
             bool send_ret_unlink = true;
             const char *site = "unlink_no_match";
@@ -1096,15 +1102,19 @@ static bool handle_urb_stream(conn_state_t *conn,
                     send_ret_unlink = false;
                 }
                 xSemaphoreGive(conn->inflight_mutex);
-                ESP_LOGW(TAG, "UNLINK_CLAIM seq=%" PRIu32 " unlink_seq=%" PRIu32
-                              " sem=%d prior_owner=%d send=%d",
-                         hdr.seqnum, hdr.unlink_seqnum,
-                         (int)took, prior_owner, send_ret_unlink ? 1 : 0);
+                if (s_urb_verbose) {
+                    ESP_LOGI(TAG, "UNLINK_CLAIM seq=%" PRIu32 " unlink_seq=%" PRIu32
+                                  " sem=%d prior_owner=%d send=%d",
+                             hdr.seqnum, hdr.unlink_seqnum,
+                             (int)took, prior_owner, send_ret_unlink ? 1 : 0);
+                }
                 site = (took == pdTRUE) ? "unlink_after_worker" : "unlink_timeout";
                 inflight_release_after_cancel(conn, u);
             } else {
-                ESP_LOGW(TAG, "UNLINK_NO_MATCH seq=%" PRIu32 " unlink_seq=%" PRIu32,
-                         hdr.seqnum, hdr.unlink_seqnum);
+                if (s_urb_verbose) {
+                    ESP_LOGI(TAG, "UNLINK_NO_MATCH seq=%" PRIu32 " unlink_seq=%" PRIu32,
+                             hdr.seqnum, hdr.unlink_seqnum);
+                }
             }
             if (send_ret_unlink) {
                 if (!tx_ret_unlink(conn, hdr.seqnum, hdr.devid,
