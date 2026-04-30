@@ -64,12 +64,41 @@ int usbhost_bulk_transfer(const char busid[USBIP_BUSID_SIZE],
                           uint8_t *in_data, size_t in_capacity, size_t *in_len,
                           volatile bool *cancel);
 
+/* Submit-order hook. The backend invokes wait_fn(ctx) immediately
+ * before calling the underlying USB host submit, and advance_fn(ctx)
+ * immediately after the submit returns (regardless of success). The
+ * caller uses this to enforce per-pipe submit ordering when multiple
+ * worker tasks may race into a single pipe; without it, the IDF sees
+ * submits in worker-race order and the device-side byte stream is
+ * scrambled. Both function pointers may be NULL to skip the hook. */
+typedef struct usbhost_submit_order {
+    void (*wait_fn)(void *ctx);
+    void (*advance_fn)(void *ctx);
+    void  *ctx;
+} usbhost_submit_order_t;
+
+/* Bulk transfer with an explicit submit-order hook. */
+int usbhost_bulk_transfer_ordered(const char busid[USBIP_BUSID_SIZE],
+                                  uint8_t ep_addr,
+                                  const uint8_t *out_data, size_t out_len,
+                                  uint8_t *in_data, size_t in_capacity, size_t *in_len,
+                                  volatile bool *cancel,
+                                  const usbhost_submit_order_t *order);
+
 /* Submit an interrupt transfer; same shape as bulk. */
 int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
                                uint8_t ep_addr,
                                const uint8_t *out_data, size_t out_len,
                                uint8_t *in_data, size_t in_capacity, size_t *in_len,
                                volatile bool *cancel);
+
+/* Interrupt transfer with an explicit submit-order hook. */
+int usbhost_interrupt_transfer_ordered(const char busid[USBIP_BUSID_SIZE],
+                                       uint8_t ep_addr,
+                                       const uint8_t *out_data, size_t out_len,
+                                       uint8_t *in_data, size_t in_capacity, size_t *in_len,
+                                       volatile bool *cancel,
+                                       const usbhost_submit_order_t *order);
 
 /* Returns true if (busid, ep_num, direction) refers to an interrupt
  * endpoint on the real-device side. The multiplexer uses this to
