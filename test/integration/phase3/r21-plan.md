@@ -97,15 +97,33 @@ worth chasing (caveat 1 below).
 
 ### Experiment 3: measure throughput
 
-Use the script in R20's "Validation" section F (the elapsed-time
-read-back). Run pre-R21 baseline first, then re-run after each
-proposed change in this plan. Report bytes/sec.
+Use `test/integration/phase3/cdc_throughput.py`, which wraps the
+upstream `src/micropython/tests/serial_test.py` `read_test` function
+(DATA IN direction). The wrapper exists because:
+- the upstream `serial_test.py` echo test depends on
+  `sys.stdin.readinto`, which RP2 stdin does not implement (fails
+  before reaching the read_test stage)
+- the upstream `send_script` is timing-fragile over USB/IP latency;
+  the wrapper uses `pyboard.Pyboard.enter_raw_repl` for robust entry
+- the host->device direction is artificially capped by the Pico's
+  stdin ringbuffer and does not measure the USB/IP pipe
 
-Target: 800 KB/s sustained on a 64 KiB read across the Pico CDC. The
-hard ceiling on Pico FS bulk is ~1.2 MB/s; 800 KB/s is roughly 2/3
-of that, which matches what well-tuned cdc-acm-over-usbip stacks
-achieve on similar hardware. Numbers below 400 KB/s after R20 + R21
-indicate a software bottleneck still uncaught.
+Run:
+```bash
+PICO_TTY=/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_<sn>-if00
+python3 test/integration/phase3/cdc_throughput.py $PICO_TTY
+```
+
+Pre-R21 baseline (post-R20) lives at
+`test/integration/phase3/cdc_throughput.baseline.txt`. Run that exact
+command after each implementation step in this plan and compare.
+
+Target: 200+ KiB/s sustained at bufsize=256 (currently ~11 KiB/s
+post-R20). The hard wire ceiling on Pico FS bulk is ~1200 KiB/s;
+200 KiB/s is the believable next step that confirms a per-URB
+overhead reduction without requiring a kernel patch. Anything above
+500 KiB/s likely requires path A (kernel cdc-acm readsize bump).
+Numbers below baseline are a regression.
 
 ### Experiment 4: alternate function class (sanity check)
 
