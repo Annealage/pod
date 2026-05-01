@@ -374,21 +374,21 @@ typedef struct {
 
 /* Per-EP tx-order state. Indexed by ep_addr folded to 5 bits:
  * (ep_num & 0x0F) | ((direction == IN) ? 0x10 : 0). 32 entries cover
- * the full USB EP address space. issued is the next ticket number to
- * hand out at intake; done is the next ticket number that may proceed
- * to tx_ret_submit. A worker whose URB has tx_ticket=T spin-waits with
- * vTaskDelay until done == T, calls tx_ret_submit, then sets done=T+1
- * under inflight_mutex. Spin is cheap because the IDF pipe completes
- * URBs in submit order, so done lags by at most a few ticks. */
+ * the full USB EP address space.
+ *
+ * submit_done gates the IDF-side submit call. Workers must submit in
+ * ticket (intake) order so the IDF receives URBs in arrival order;
+ * the IDF preserves submit order on the wire so the byte stream
+ * matches USB/IP arrival order.
+ *
+ * The former "done" gate (RET_SUBMIT ordering) is removed in R20 step2.
+ * Per-EP lanes serialise by construction: one task per (ep,dir) calls
+ * tx_ret_submit in FIFO arrival order without a spin gate. */
 typedef struct {
     uint32_t           issued;
-    uint32_t           done;
     /* submit_done is the ticket of the next URB allowed to call into
-     * the backend submit path. Worker tasks racing through run_inflight
-     * would otherwise reach usb_host_transfer_submit in arbitrary order;
-     * the IDF preserves submit order on the wire, so a scrambled submit
-     * order surfaces as scrambled cdc-acm IN bytes. The submit-order
-     * gate forces workers to submit in ticket (intake) order. The gate
+     * the backend submit path. The submit-order gate forces workers
+     * (now lane tasks) to submit in ticket (intake) order. The gate
      * is advanced once the backend submit call has returned, not when
      * the URB completes, so URBs still complete concurrently. */
     uint32_t           submit_done;
@@ -589,32 +589,19 @@ static bool tx_ret_unlink(conn_state_t *conn,
     return ok;
 }
 
-/* Two ticket gates per (ep,dir) sit in tx_order_slot_t: submit_done and
- * done. submit_done gates the IDF-side submit call (workers must call
- * usb_host_transfer_submit in ticket order so the wire byte stream
- * matches USB/IP arrival order); done gates the RET_SUBMIT TCP write
- * (workers must hit tx_ret_submit in ticket order so the kernel sees
- * givebacks in seqnum-correlated order). Both share the same spin shape:
- * acquire inflight_mutex, check counter has reached my ticket, advance
- * or wait.
+/* Submit-order gate: spin until conn->tx_order[idx].submit_done has
+ * reached `ticket`. Comparison uses signed subtraction so 32-bit
+ * wraparound at 4G URBs is handled correctly.
  *
- * Comparison uses sequence-number subtraction cast to int32_t so the
- * 32-bit ticket/counter pair handles wraparound correctly. Equality
- * compare would fail across the 4G boundary if a worker were preempted
- * long enough for the gate to lap it (~3 days of sustained streaming on
- * one EP). The cast costs nothing and removes the sharp edge.
- *
- * IDF completion ordering on its own would not be enough: workers wake
- * from done_sem in completion order but race for tx_mutex from there;
- * without the done gate they emit RET_SUBMITs in wake-race order. */
-static void tx_order_wait(conn_state_t *conn, uint8_t idx, uint32_t ticket,
-                          bool wait_submit)
+ * The "done" gate (RET_SUBMIT ordering) is removed in R20 step2.
+ * Per-EP lanes guarantee FIFO order: run_inflight on each lane task
+ * calls tx_ret_submit after each URB completes, which is already in
+ * arrival order. */
+static void tx_order_wait(conn_state_t *conn, uint8_t idx, uint32_t ticket)
 {
     while (true) {
         xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-        uint32_t cur = wait_submit
-            ? conn->tx_order[idx].submit_done
-            : conn->tx_order[idx].done;
+        uint32_t cur = conn->tx_order[idx].submit_done;
         bool my_turn = ((int32_t)(cur - ticket) >= 0);
         xSemaphoreGive(conn->inflight_mutex);
         if (my_turn) break;
@@ -622,21 +609,15 @@ static void tx_order_wait(conn_state_t *conn, uint8_t idx, uint32_t ticket,
     }
 }
 
-/* Advance one or both gates past `ticket`. Caller holds no mutex.
- * If both flags set, advances submit_done first then done in one
- * critical section (the order-of-advance does not matter; the gates
- * are independent counters). */
-static void tx_order_advance(inflight_urb_t *u,
-                             bool advance_submit, bool advance_done)
+/* Advance submit_done past `ticket` if it has not already been advanced.
+ * The done gate is gone; only submit ordering is tracked here. */
+static void tx_order_advance(inflight_urb_t *u)
 {
     conn_state_t *conn = u->conn;
     xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-    if (advance_submit && !u->submit_done_advanced) {
+    if (!u->submit_done_advanced) {
         conn->tx_order[u->tx_order_idx].submit_done = u->tx_ticket + 1;
         u->submit_done_advanced = true;
-    }
-    if (advance_done) {
-        conn->tx_order[u->tx_order_idx].done = u->tx_ticket + 1;
     }
     xSemaphoreGive(conn->inflight_mutex);
 }
@@ -652,13 +633,13 @@ static void submit_order_wait_cb(void *vctx)
 {
     submit_order_ctx_t *ctx = (submit_order_ctx_t *)vctx;
     inflight_urb_t *u = ctx->u;
-    tx_order_wait(u->conn, u->tx_order_idx, u->tx_ticket, true);
+    tx_order_wait(u->conn, u->tx_order_idx, u->tx_ticket);
 }
 
 static void submit_order_advance_cb(void *vctx)
 {
     submit_order_ctx_t *ctx = (submit_order_ctx_t *)vctx;
-    tx_order_advance(ctx->u, true, false);
+    tx_order_advance(ctx->u);
 }
 
 /* Run a single inflight URB end-to-end: backend dispatch + RET_SUBMIT.
@@ -746,12 +727,11 @@ static void run_inflight(inflight_urb_t *u)
                  was_cancelled ? " (cancelled)" : "");
     }
 
-    /* Per-EP RET_SUBMIT-order gate. Block until all earlier-numbered
-     * URBs on this (ep,dir) have completed their tx_ret_submit, then
-     * claim RET_SUBMIT ownership atomically (the UNLINK handler claims
-     * the same gate; whichever loses skips its giveback so vhci_rx does
-     * not see a duplicate "cannot find a urb of seqnum N"). */
-    tx_order_wait(conn, u->tx_order_idx, u->tx_ticket, false);
+    /* Claim RET_SUBMIT ownership atomically. The UNLINK handler claims
+     * the same field under inflight_mutex; whichever loses skips its
+     * giveback so vhci_rx does not see a duplicate "cannot find a urb
+     * of seqnum N". The done gate is removed in R20 step2: per-EP lanes
+     * serialise by construction (one lane task per pipe, FIFO queue). */
     bool send_ret_submit = false;
     xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
     if (u->tx_owner == TX_OWNER_NONE) {
@@ -775,10 +755,9 @@ static void run_inflight(inflight_urb_t *u)
                  u->busid, hdr->ep, hdr->seqnum);
     }
 
-    /* Advance both gates past us so subsequent URBs may proceed. The
-     * submit gate is advanced here only if no backend submit-order
-     * callback ran (synthetic, EP0, inline OUT, submit failure). */
-    tx_order_advance(u, true, true);
+    /* Advance the submit gate past us so subsequent URBs may proceed.
+     * No-op if the submit-order callback already advanced it. */
+    tx_order_advance(u);
 
     if (s_urb_verbose) {
         ESP_LOGI(TAG, "usbip_out: busid=%.32s ep=%" PRIu32 " ok=%d",
@@ -1140,10 +1119,9 @@ static bool intake_submit(conn_state_t *conn,
     if (!lane_dispatch(conn, u)) {
         ESP_LOGW(TAG, "lane_dispatch failed, seq=%" PRIu32, hdr->seqnum);
         inflight_unlink(conn, u);
-        tx_order_wait(conn, u->tx_order_idx, u->tx_ticket, false);
         bool ok2 = tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
                                  hdr->ep, -EBUSY, NULL, 0, "intake_ebusy_lane");
-        tx_order_advance(u, true, true);
+        tx_order_advance(u);
         inflight_free(u);
         return ok2;
     }
