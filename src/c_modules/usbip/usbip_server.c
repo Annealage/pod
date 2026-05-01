@@ -51,6 +51,7 @@
 #include "freertos/idf_additions.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"  /* for esp_timer_get_time() in verbose timing probes */
 
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
@@ -77,7 +78,7 @@ static const char *TAG = "usbip";
  * Step 3 sets depth=1 (bisect-safe; functionally equivalent to current).
  * Step 4 opens to 16 for the throughput gain. */
 #ifndef USBIP_PIPELINE_DEPTH
-#define USBIP_PIPELINE_DEPTH 1
+#define USBIP_PIPELINE_DEPTH 16
 #endif
 
 /* Task stack memory caps. Default xTaskCreatePinnedToCore allocates
@@ -403,6 +404,9 @@ typedef struct inflight_urb {
      * relationship via the queue send/receive pair. */
     int                    comp_status;
     size_t                 comp_in_len;
+    /* R22 diagnostic timing (verbose only): microseconds since boot. */
+    int64_t                t_submit; /* when lane_task called submit_async */
+    int64_t                t_cb;     /* when lane_completion_cb ran */
 } inflight_urb_t;
 
 /* Per-EP lane: one task + one queue per active (ep,dir). The lane task
@@ -838,6 +842,9 @@ static void lane_completion_cb(void *ctx, int status, size_t in_len)
     inflight_urb_t *u = (inflight_urb_t *)ctx;
     u->comp_status = status;
     u->comp_in_len = in_len;
+    if (s_urb_verbose) {
+        u->t_cb = esp_timer_get_time();
+    }
     /* Non-blocking send: responder_queue is sized at USBIP_INFLIGHT_MAX*2
      * so it should never be full if the pipeline depth is respected. */
     BaseType_t sent = xQueueSend(u->conn->responder_queue, &u, 0);
@@ -899,6 +906,9 @@ static void lane_task(void *arg)
             memcpy(&setup, hdr->setup, sizeof(setup));
         }
 
+        if (s_urb_verbose) {
+            u->t_submit = esp_timer_get_time();
+        }
         int err = usbhost_submit_async(
             u->busid,
             ep_addr, is_control,
@@ -992,6 +1002,7 @@ static void responder_task(void *arg)
 
         bool ok = true;
         if (send_ret_submit) {
+            int64_t t_resp = s_urb_verbose ? esp_timer_get_time() : 0;
             ok = tx_ret_submit(conn,
                                hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
                                status,
@@ -1000,6 +1011,21 @@ static void responder_task(void *arg)
                                (status == 0 && hdr->direction == USBIP_DIR_IN)
                                    ? (uint32_t)in_len : 0,
                                "responder");
+            if (s_urb_verbose) {
+                int64_t t_done = esp_timer_get_time();
+                /* t_submit -> t_cb: USB wire time (IDF async); t_cb -> t_resp:
+                 * responder wakeup latency; t_resp -> t_done: TCP send cost */
+                ESP_LOGI(TAG, "R22 timing seq=%" PRIu32
+                         " t_wire_us=%" PRId64
+                         " t_wakeup_us=%" PRId64
+                         " t_tcp_us=%" PRId64
+                         " q_depth=%u",
+                         hdr->seqnum,
+                         (u->t_cb > 0 && u->t_submit > 0) ? (u->t_cb - u->t_submit) : -1LL,
+                         (u->t_cb > 0) ? (t_resp - u->t_cb) : -1LL,
+                         t_done - t_resp,
+                         (unsigned)uxQueueMessagesWaiting(conn->responder_queue));
+            }
         }
 
         /* Give back the lane's pipeline slot so it can submit the next URB. */
