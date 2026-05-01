@@ -236,3 +236,70 @@ The ceiling is the kernel vhci-hcd single-URB pipeline. Options per R22:
 - Patch kernel vhci-hcd to pipeline more CMD_SUBMITs per endpoint.
 - Larger TCP receive buffer or TCP_NODELAY tuning to reduce delayed-ACK
   exposure (marginal effect while kernel queues 1 URB).
+
+## CORRECTION (2026-05-01): the kernel does pipeline; IDF host stack is the bottleneck
+
+The conclusion above blamed the kernel vhci-hcd. Subsequent web research
+(`drivers/usb/usbip/vhci_tx.c` `vhci_send_cmd_submit`) confirmed
+vhci-hcd does NOT serialize CMD_SUBMITs: `vhci_tx_loop` drains
+`priv_tx` continuously without waiting for RET_SUBMIT. cdc-acm queues
+`NR_BUFFERS=16` bulk-IN URBs concurrently. Per kernel source, multiple
+CMD_SUBMITs go onto the TCP stream back-to-back.
+
+A second firmware-side probe was added (a counter of `inflight_count`
+at intake time, logging every 100 wakes) and run on the same hardware
+and benchmark. Result over 1300 URBs:
+
+```
+intake_count=100  avg_depth=13.16 max_depth=18 depth1=15/100
+intake_count=200  avg_depth=14.81 max_depth=18 depth1=15/200
+intake_count=300  avg_depth=15.34 max_depth=18 depth1=15/300
+intake_count=400  avg_depth=15.45 max_depth=18 depth1=15/400
+...
+intake_count=1300 avg_depth=11.50 max_depth=18 depth1=15/1300
+```
+
+The kernel pipelines: 13-18 URBs are simultaneously in our pipeline
+at intake. Only 15 of 1300 had depth=1.
+
+Throughput = 88 URBs/sec, pipeline depth ~16. By Little's Law, per-URB
+residence time = 16 / 88 = **182 ms**. Wire time at FS bulk for a 128 B
+URB is ~110 us. **99.94% of per-URB latency is somewhere in our
+pipeline downstream of intake.**
+
+The lane queue holds at most depth-16; URBs sit there only if the
+counting sem is full. The lane task pulls URBs and calls
+`usbhost_submit_async` (non-blocking IDF submit). The IDF callback
+fires per URB and pushes onto the responder queue. The responder
+(priority 11) drains one URB at a time.
+
+The responder per-URB cost is bounded by `tx_ret_submit` TCP send
+(~1 ms LAN-local). 88/s × 1 ms = 88 ms/sec, well within the responder's
+capacity. The responder is NOT the bottleneck.
+
+Therefore the bottleneck is the IDF host stack: it accepts our
+back-to-back submits but processes them on the wire at ~88/sec rather
+than the ~9000/sec the FS bulk wire would support. Per-URB IDF
+processing time is ~11 ms, of which only ~110 us is wire transmission.
+
+This is consistent with the IDF v5.5 host stack on DWC2 ESP32-S3 not
+pipelining transfers within a single bulk pipe. Verifying with t_submit
+to t_cb timing (R22 step 4 instrumentation) is the next concrete step.
+
+The right action items therefore are NOT what R23 implemented (Wi-Fi
+PS, TCP coalescing). Both stay on main as structural improvements
+without throughput effect. The actual lever for throughput is one of:
+
+1. Verify IDF host stack URB pipelining behavior (by probing
+   `submit_xfer` timing or testing with a different USB host stack).
+2. Switch to TinyUSB host (`docs/design/usbhost.md` §11), which has a
+   different scheduling model and may pipeline transfers better. The
+   firmware infrastructure for this pivot is already linked in the build
+   but our `usbhost.c` still uses IDF `usb_host_*`.
+3. If the IDF host stack on DWC2 fundamentally cannot pipeline FS bulk
+   above 88 URBs/sec per pipe, that's the hardware/IDF ceiling and a
+   board change (P4 with Ethernet or HS USB) is the only remaining lever.
+
+R20-R23 work is correct architecture for whichever USB host stack is in
+place; the current ceiling is below that architecture. Next step is to
+probe IDF behavior, not to refactor what we already have.
