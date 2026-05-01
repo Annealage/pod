@@ -564,9 +564,18 @@ static void run_inflight(inflight_urb_t *u)
     conn_state_t *conn = u->conn;
     const usbip_decoded_header_t *hdr = &u->hdr;
 
+    /* Experiment 2: per-URB latency breakdown (verbose-gated).
+     * t0 = entry, t1 = after IDF transfer, t2 = after tcp send.
+     * xTaskGetTickCount() resolution is 1 ms (configTICK_RATE_HZ=1000). */
+    TickType_t t0 = 0, t1 = 0;
     if (s_urb_verbose) {
-        ESP_LOGI(TAG, "usbip_dispatch: busid=%.32s ep=%" PRIu32 " target=%s",
-                 u->busid, hdr->ep, u->is_virtual ? "virtual" : "host");
+        t0 = xTaskGetTickCount();
+        ESP_LOGI(TAG, "usbip_dispatch: busid=%.32s ep=%" PRIu32 " dir=%s len=%" PRIu32
+                      " target=%s",
+                 u->busid, hdr->ep,
+                 (hdr->direction == USBIP_DIR_IN) ? "IN" : "OUT",
+                 hdr->transfer_buffer_length,
+                 u->is_virtual ? "virtual" : "host");
     }
 
     int    status = 0;
@@ -618,6 +627,10 @@ static void run_inflight(inflight_urb_t *u)
         }
     }
 
+    if (s_urb_verbose) {
+        t1 = xTaskGetTickCount();
+    }
+
     /* If the URB was cancelled (UNLINK arrived, or teardown signalled),
      * the kernel expects RET_SUBMIT with status -ECONNRESET. usbhost
      * may have returned -ECONNRESET, 0 (race: completed just before
@@ -631,9 +644,10 @@ static void run_inflight(inflight_urb_t *u)
 
     if (s_urb_verbose) {
         ESP_LOGI(TAG, "usbip_complete: busid=%.32s ep=%" PRIu32
-                      " status=%d actual=%u%s",
+                      " status=%d actual=%u%s t_idf_ms=%" PRIu32,
                  u->busid, hdr->ep, status, (unsigned)in_len,
-                 was_cancelled ? " (cancelled)" : "");
+                 was_cancelled ? " (cancelled)" : "",
+                 (uint32_t)(t1 - t0));
     }
 
     /* Claim RET_SUBMIT ownership atomically. The UNLINK handler claims
@@ -665,8 +679,16 @@ static void run_inflight(inflight_urb_t *u)
     }
 
     if (s_urb_verbose) {
-        ESP_LOGI(TAG, "usbip_out: busid=%.32s ep=%" PRIu32 " ok=%d",
-                 u->busid, hdr->ep, ok ? 1 : 0);
+        TickType_t t2 = xTaskGetTickCount();
+        ESP_LOGI(TAG, "usbip_timing: ep=%" PRIu32 " dir=%s len=%" PRIu32
+                      " t_idf_ms=%" PRIu32 " t_tcp_ms=%" PRIu32
+                      " t_total_ms=%" PRIu32,
+                 hdr->ep,
+                 (hdr->direction == USBIP_DIR_IN) ? "IN" : "OUT",
+                 hdr->transfer_buffer_length,
+                 (uint32_t)(t1 - t0),
+                 (uint32_t)(t2 - t1),
+                 (uint32_t)(t2 - t0));
     }
 
     /* Retire: remove from inflight list, mark retired, and either
