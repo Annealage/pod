@@ -51,6 +51,7 @@
 #include "freertos/idf_additions.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"  /* for esp_timer_get_time() in verbose timing probes */
 
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
@@ -65,6 +66,20 @@ static const char *TAG = "usbip";
 #define USBIP_CLIENT_TASK_PRIORITY 5
 #define USBIP_WORKER_TASK_STACK    8192
 #define USBIP_WORKER_TASK_PRIORITY 5
+
+/* R22 responder task: priority above IDF worker (9) so completion
+ * callbacks preempt the worker immediately. See r22-plan.md caveat 1:
+ * priority 11 is above Wi-Fi TX (8) and lwIP (5). If Wi-Fi disconnects
+ * or lwip_writev returns EAGAIN under sustained load, drop to 10. */
+#define USBIP_RESPONDER_TASK_STACK    8192
+#define USBIP_RESPONDER_TASK_PRIORITY 11
+
+/* Pipeline depth per (ep,dir) lane: max URBs in flight concurrently.
+ * Step 3 sets depth=1 (bisect-safe; functionally equivalent to current).
+ * Step 4 opens to 16 for the throughput gain. */
+#ifndef USBIP_PIPELINE_DEPTH
+#define USBIP_PIPELINE_DEPTH 16
+#endif
 
 /* Task stack memory caps. Default xTaskCreatePinnedToCore allocates
  * stacks from internal SRAM (~232 KiB region on the S3, mostly already
@@ -382,16 +397,32 @@ typedef struct inflight_urb {
     int                    cancel_waiters;
     struct conn_state     *conn;
     struct inflight_urb   *next;
+    /* R22: completion result written by lane_completion_cb (from IDF
+     * callback context) and read by the responder task. The responder
+     * runs at priority 11 > IDF worker 9; it reads these fields only
+     * after the queue-send in the callback establishes a happens-before
+     * relationship via the queue send/receive pair. */
+    int                    comp_status;
+    size_t                 comp_in_len;
+    /* R22 diagnostic timing (verbose only): microseconds since boot. */
+    int64_t                t_submit; /* when lane_task called submit_async */
+    int64_t                t_cb;     /* when lane_completion_cb ran */
 } inflight_urb_t;
 
 /* Per-EP lane: one task + one queue per active (ep,dir). The lane task
  * calls run_inflight for each URB it dequeues, serialising all URBs on
  * one pipe through a single task (no worker-race). NULL sentinel posted
- * at teardown causes the task to exit. */
+ * at teardown causes the task to exit.
+ *
+ * R22: inflight_slots is a counting semaphore initialised to
+ * USBIP_PIPELINE_DEPTH. The lane task takes one slot before each
+ * async submit. The responder gives it back after each RET_SUBMIT.
+ * This bounds the pipeline depth per pipe. */
 typedef struct {
-    QueueHandle_t  queue;  /* inflight_urb_t* drained by lane task */
-    TaskHandle_t   task;   /* NULL if lane not yet spawned */
-    bool           alive;  /* false after sentinel processed */
+    QueueHandle_t  queue;          /* inflight_urb_t* drained by lane task */
+    TaskHandle_t   task;           /* NULL if lane not yet spawned */
+    bool           alive;          /* false after sentinel processed */
+    SemaphoreHandle_t inflight_slots; /* counting sem, max=USBIP_PIPELINE_DEPTH */
 } per_ep_lane_t;
 
 /* tx_order_slot_t and the submit-order spin gate are removed in R20
@@ -414,6 +445,16 @@ typedef struct conn_state {
     per_ep_lane_t      lanes[32];
     volatile int       lanes_alive;    /* count of live lane tasks */
     SemaphoreHandle_t  lanes_done;     /* given when lanes_alive drops to 0 */
+    /* R22 responder task. One per connection at priority 11 (above IDF
+     * worker at 9). Completions are pushed onto responder_queue from
+     * the IDF callback context; the responder drains it, sends
+     * RET_SUBMIT under tx_mutex, and gives back the lane's inflight
+     * slot. Spawned in handle_import_request for real-host paths.
+     * Teardown: post NULL sentinel, wait on responder_alive.
+     * Queue sized at USBIP_INFLIGHT_MAX * 2 to cover two pipes. */
+    QueueHandle_t      responder_queue;  /* inflight_urb_t* of completed URBs */
+    TaskHandle_t       responder_task;
+    SemaphoreHandle_t  responder_alive;  /* given when responder exits */
     /* Refcount under inflight_mutex. Initial value 1 (read loop). Each
      * spawned lane task takes one reference. Whoever drops the last
      * reference frees the struct. Heap-allocated so a lane task wedged
@@ -790,8 +831,37 @@ typedef struct {
     uint8_t       idx;
 } lane_task_arg_t;
 
-/* Per-EP lane task. Drains lane->queue calling run_inflight for each
- * URB. Exits on NULL sentinel. One task per active (ep,dir) pair. */
+/* IDF transfer completion callback for async submits. Runs in IDF worker
+ * context (priority 9). Must be short: push to responder_queue and return.
+ * The responder (priority 11) preempts the worker immediately on queue-send.
+ *
+ * comp_status and comp_in_len are written here and read by the responder.
+ * The queue send/receive pair establishes the happens-before relationship. */
+static void lane_completion_cb(void *ctx, int status, size_t in_len)
+{
+    inflight_urb_t *u = (inflight_urb_t *)ctx;
+    u->comp_status = status;
+    u->comp_in_len = in_len;
+    if (s_urb_verbose) {
+        u->t_cb = esp_timer_get_time();
+    }
+    /* Non-blocking send: responder_queue is sized at USBIP_INFLIGHT_MAX*2
+     * so it should never be full if the pipeline depth is respected. */
+    BaseType_t sent = xQueueSend(u->conn->responder_queue, &u, 0);
+    if (sent != pdTRUE) {
+        /* Queue full - should not happen with proper depth management.
+         * Log and synthesise an error completion. The URB will not be
+         * given back; this leaks the inflight slot but avoids a hang. */
+        ESP_LOGE("usbip", "lane_completion_cb: responder_queue full, seq=%" PRIu32,
+                 u->hdr.seqnum);
+    }
+}
+
+/* Per-EP lane task. Drains lane->queue, submits each URB asynchronously
+ * via usbhost_submit_async. Backpressure via inflight_slots counting sem
+ * (max=USBIP_PIPELINE_DEPTH). Exits on NULL sentinel.
+ *
+ * One task per active (ep,dir) pair. */
 static void lane_task(void *arg)
 {
     lane_task_arg_t *la   = (lane_task_arg_t *)arg;
@@ -800,6 +870,7 @@ static void lane_task(void *arg)
     free(la);
 
     QueueHandle_t q = conn->lanes[idx].queue;
+    SemaphoreHandle_t slots = conn->lanes[idx].inflight_slots;
 
     while (true) {
         inflight_urb_t *u = NULL;
@@ -810,7 +881,53 @@ static void lane_task(void *arg)
             /* NULL sentinel: teardown requested. */
             break;
         }
-        run_inflight(u);
+
+        /* Backpressure: wait for a pipeline slot. */
+        xSemaphoreTake(slots, portMAX_DELAY);
+
+        /* If cancelled before we even submitted (UNLINK arrived while
+         * URB was queued), synthesise a completion rather than submitting.
+         * This avoids a submit+immediate-cancel round-trip. */
+        if (u->cancel) {
+            u->comp_status = -ECONNRESET;
+            u->comp_in_len = 0;
+            xQueueSend(conn->responder_queue, &u, portMAX_DELAY);
+            continue;
+        }
+
+        const usbip_decoded_header_t *hdr = &u->hdr;
+        bool is_control = (hdr->ep == 0);
+        bool is_in = (hdr->direction == USBIP_DIR_IN);
+        uint8_t ep_addr = is_control ? 0
+            : (uint8_t)(hdr->ep | (is_in ? 0x80u : 0x00u));
+
+        usbip_setup_packet_t setup;
+        if (is_control) {
+            memcpy(&setup, hdr->setup, sizeof(setup));
+        }
+
+        if (s_urb_verbose) {
+            u->t_submit = esp_timer_get_time();
+        }
+        int err = usbhost_submit_async(
+            u->busid,
+            ep_addr, is_control,
+            is_control ? &setup : NULL,
+            u->out_buf, u->out_len,
+            u->in_buf,  u->in_capacity,
+            lane_completion_cb, u);
+
+        if (err < 0) {
+            /* IDF rejected submit: synthesise completion so the responder
+             * can send RET_SUBMIT and free the slot. The IDF will NOT
+             * call the callback in this case. */
+            u->comp_status = err;
+            u->comp_in_len = 0;
+            if (xQueueSend(conn->responder_queue, &u, portMAX_DELAY) != pdTRUE) {
+                /* Responder queue full (should not happen). Return slot. */
+                xSemaphoreGive(slots);
+            }
+        }
     }
 
     xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
@@ -823,6 +940,135 @@ static void lane_task(void *arg)
     }
     /* Drop the lane's reference to conn. */
     conn_state_release(conn);
+    vTaskDeleteWithCaps(NULL);
+}
+
+/* R22 responder task. One per connection at USBIP_RESPONDER_TASK_PRIORITY
+ * (11 > IDF worker 9). Blocks on conn->responder_queue. When a completed
+ * inflight_urb_t* arrives (pushed by lane_completion_cb from the IDF callback
+ * context at priority 9), FreeRTOS preempts the worker and runs this task
+ * immediately within the same tick.
+ *
+ * Post-R22-step-3: this task handles the RET_SUBMIT/tx_owner logic and gives
+ * back the lane's inflight slot. In step 2 the queue is never populated (it
+ * is wired up in step 3); the task just waits on the NULL sentinel at teardown.
+ *
+ * RET_SUBMIT ordering invariant: for any single (ep,dir) pipe, the IDF
+ * preserves completion order = submit order. This task is the sole sender
+ * of RET_SUBMIT, so no additional ordering gate is needed. Cross-pipe order
+ * is irrelevant (the kernel keys URBs by seqnum). If a future change adds
+ * parallel responders or parallel TCP sends, this invariant becomes load-
+ * bearing again and must be re-gated. */
+static void responder_task(void *arg)
+{
+    conn_state_t *conn = (conn_state_t *)arg;
+
+    while (true) {
+        inflight_urb_t *u = NULL;
+        if (xQueueReceive(conn->responder_queue, &u, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (u == NULL) {
+            /* NULL sentinel: teardown. */
+            break;
+        }
+
+        const usbip_decoded_header_t *hdr = &u->hdr;
+        int    status = u->comp_status;
+        size_t in_len = u->comp_in_len;
+
+        /* If the URB was cancelled (UNLINK arrived, or teardown signalled),
+         * the kernel expects RET_SUBMIT with status -ECONNRESET. Override
+         * regardless of what the IDF returned. See caveat 5 in r22-plan.md:
+         * cancel is written under inflight_mutex (release semantics) and
+         * read here without the mutex; the race is acceptable because the
+         * tx_owner claim below is the authoritative decision. */
+        bool was_cancelled = u->cancel;
+        if (was_cancelled) {
+            status = -ECONNRESET;
+            in_len = 0;
+        }
+
+        /* Claim RET_SUBMIT ownership atomically under inflight_mutex. The
+         * UNLINK handler races for the same field; whoever loses skips the
+         * giveback so vhci_rx does not see a duplicate seqnum. */
+        bool send_ret_submit = false;
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        if (u->tx_owner == TX_OWNER_NONE) {
+            u->tx_owner = TX_OWNER_RET_SUBMIT;
+            send_ret_submit = true;
+        }
+        xSemaphoreGive(conn->inflight_mutex);
+
+        bool ok = true;
+        if (send_ret_submit) {
+            int64_t t_resp = s_urb_verbose ? esp_timer_get_time() : 0;
+            ok = tx_ret_submit(conn,
+                               hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
+                               status,
+                               (status == 0 && hdr->direction == USBIP_DIR_IN)
+                                   ? u->in_buf : NULL,
+                               (status == 0 && hdr->direction == USBIP_DIR_IN)
+                                   ? (uint32_t)in_len : 0,
+                               "responder");
+            if (s_urb_verbose) {
+                int64_t t_done = esp_timer_get_time();
+                /* t_submit -> t_cb: USB wire time (IDF async); t_cb -> t_resp:
+                 * responder wakeup latency; t_resp -> t_done: TCP send cost */
+                ESP_LOGI(TAG, "R22 timing seq=%" PRIu32
+                         " t_wire_us=%" PRId64
+                         " t_wakeup_us=%" PRId64
+                         " t_tcp_us=%" PRId64
+                         " q_depth=%u",
+                         hdr->seqnum,
+                         (u->t_cb > 0 && u->t_submit > 0) ? (u->t_cb - u->t_submit) : -1LL,
+                         (u->t_cb > 0) ? (t_resp - u->t_cb) : -1LL,
+                         t_done - t_resp,
+                         (unsigned)uxQueueMessagesWaiting(conn->responder_queue));
+            }
+        }
+
+        /* Give back the lane's pipeline slot so it can submit the next URB. */
+        per_ep_lane_t *lane = &conn->lanes[u->lane_idx];
+        if (lane->inflight_slots != NULL) {
+            xSemaphoreGive(lane->inflight_slots);
+        }
+
+        /* Retire: remove from inflight list, signal cancel waiter if any. */
+        bool free_now = false;
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        inflight_urb_t **p = &conn->inflight_head;
+        while (*p != NULL) {
+            if (*p == u) {
+                *p = u->next;
+                conn->inflight_count--;
+                if (conn->inflight_count == 0 && conn->inflight_drain != NULL) {
+                    xSemaphoreGive(conn->inflight_drain);
+                }
+                break;
+            }
+            p = &(*p)->next;
+        }
+        u->retired = true;
+        if (u->cancel_waiters == 0) {
+            free_now = true;
+        } else if (u->cancel_done_sem != NULL) {
+            xSemaphoreGive(u->cancel_done_sem);
+        }
+        xSemaphoreGive(conn->inflight_mutex);
+
+        if (free_now) {
+            inflight_free(u);
+        }
+
+        if (!ok) {
+            shutdown(conn->fd, SHUT_RDWR);
+        }
+    }
+
+    if (conn->responder_alive != NULL) {
+        xSemaphoreGive(conn->responder_alive);
+    }
     vTaskDeleteWithCaps(NULL);
 }
 
@@ -845,8 +1091,22 @@ static bool lane_dispatch(conn_state_t *conn, inflight_urb_t *u)
             return false;
         }
 
+        /* Counting semaphore bounds concurrent in-flight URBs per pipe.
+         * The lane task takes one slot before each async submit; the
+         * responder gives it back after each RET_SUBMIT. */
+        lane->inflight_slots = xSemaphoreCreateCounting(USBIP_PIPELINE_DEPTH,
+                                                         USBIP_PIPELINE_DEPTH);
+        if (lane->inflight_slots == NULL) {
+            vQueueDelete(lane->queue);
+            lane->queue = NULL;
+            xSemaphoreGive(conn->inflight_mutex);
+            return false;
+        }
+
         lane_task_arg_t *la = malloc(sizeof(*la));
         if (la == NULL) {
+            vSemaphoreDelete(lane->inflight_slots);
+            lane->inflight_slots = NULL;
             vQueueDelete(lane->queue);
             lane->queue = NULL;
             xSemaphoreGive(conn->inflight_mutex);
@@ -871,6 +1131,8 @@ static bool lane_dispatch(conn_state_t *conn, inflight_urb_t *u)
             conn->refcount--;
             lane->alive = false;
             conn->lanes_alive--;
+            vSemaphoreDelete(lane->inflight_slots);
+            lane->inflight_slots = NULL;
             vQueueDelete(lane->queue);
             lane->queue = NULL;
             free(la);
@@ -1102,6 +1364,20 @@ static bool handle_urb_stream(conn_state_t *conn,
              * there but -ECONNRESET is still spec-correct. */
             int32_t unlink_status = -ECONNRESET;
             if (u != NULL) {
+                /* R22: force the in-flight URB to complete by halting,
+                 * flushing, and clearing the endpoint. The IDF then
+                 * delivers the URB to lane_completion_cb with
+                 * USB_TRANSFER_STATUS_CANCELED; the responder sends
+                 * RET_SUBMIT(-ECONNRESET) and gives the cancel_done_sem.
+                 * This replaces the old submit_xfer cancel polling loop.
+                 * The per-EP submit mutex inside usbhost_cancel_ep
+                 * serialises against any concurrent submit on the same EP. */
+                if (!u->is_virtual) {
+                    uint8_t ep_addr = (u->hdr.ep == 0) ? 0x00
+                        : (uint8_t)(u->hdr.ep |
+                              (u->hdr.direction == USBIP_DIR_IN ? 0x80u : 0x00u));
+                    usbhost_cancel_ep(u->busid, ep_addr);
+                }
                 /* 250 ms ceiling: usbhost halt+flush+clear drives IDF
                  * completion within ~50 ms in practice. The read loop
                  * handles one UNLINK at a time so a tight cap keeps
@@ -1209,10 +1485,37 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
     conn->inflight_mutex  = xSemaphoreCreateMutex();
     conn->inflight_drain  = xSemaphoreCreateBinary();
     conn->lanes_done      = xSemaphoreCreateBinary();
+    /* R22: responder queue sized at USBIP_INFLIGHT_MAX * 2 to cover two
+     * EPs' completions across both directions in worst case. */
+    conn->responder_queue = xQueueCreate(USBIP_INFLIGHT_MAX * 2,
+                                         sizeof(inflight_urb_t *));
+    conn->responder_alive = xSemaphoreCreateBinary();
     conn->refcount        = 1;
 
     bool plumbing_ok = (conn->tx_mutex != NULL && conn->inflight_mutex != NULL &&
-                        conn->inflight_drain != NULL && conn->lanes_done != NULL);
+                        conn->inflight_drain != NULL && conn->lanes_done != NULL &&
+                        conn->responder_queue != NULL && conn->responder_alive != NULL);
+
+    /* Spawn the responder task for real-host connections. The responder
+     * blocks on responder_queue waiting for completions. In step 2 the
+     * queue is never populated (step 3 wires it up); the task just idles
+     * and exits on the NULL sentinel posted in teardown. */
+    if (plumbing_ok) {
+        const virtual_device_t *vdev_check = usbip_find_virtual_device(busid);
+        if (vdev_check == NULL) {
+            /* Real-host path: spawn responder. */
+            BaseType_t rrc = xTaskCreatePinnedToCoreWithCaps(
+                responder_task, "usbip_resp",
+                USBIP_RESPONDER_TASK_STACK, conn,
+                USBIP_RESPONDER_TASK_PRIORITY,
+                &conn->responder_task,
+                USBIP_TASK_CORE, USBIP_TASK_STACK_CAPS);
+            if (rrc != pdPASS) {
+                ESP_LOGW(TAG, "spawn responder_task failed");
+                plumbing_ok = false;
+            }
+        }
+    }
 
     bool ok = false;
     if (plumbing_ok) {
@@ -1271,6 +1574,19 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
         }
     }
 
+    /* Drain the responder task. Post NULL sentinel; wait up to 2 s.
+     * All lane tasks have exited above, so no new completions can arrive.
+     * Any completions already queued will be processed before the sentinel. */
+    if (conn->responder_task != NULL && conn->responder_queue != NULL) {
+        inflight_urb_t *resp_sentinel = NULL;
+        xQueueSend(conn->responder_queue, &resp_sentinel, portMAX_DELAY);
+        if (conn->responder_alive != NULL) {
+            if (xSemaphoreTake(conn->responder_alive, pdMS_TO_TICKS(2000)) != pdTRUE) {
+                ESP_LOGW(TAG, "teardown: responder still alive after 2s wait");
+            }
+        }
+    }
+
     if (vdev && vdev->ops->on_detach) {
         vdev->ops->on_detach(vdev);
     }
@@ -1294,17 +1610,23 @@ static void conn_state_free(conn_state_t *conn)
         inflight_free(u);
         u = next;
     }
-    /* Free any lane queues that were created (tasks already exited). */
+    /* Free any lane queues and inflight_slots that were created (tasks already exited). */
     for (int i = 0; i < 32; i++) {
         if (conn->lanes[i].queue != NULL) {
             vQueueDelete(conn->lanes[i].queue);
             conn->lanes[i].queue = NULL;
         }
+        if (conn->lanes[i].inflight_slots != NULL) {
+            vSemaphoreDelete(conn->lanes[i].inflight_slots);
+            conn->lanes[i].inflight_slots = NULL;
+        }
     }
-    if (conn->tx_mutex)       vSemaphoreDelete(conn->tx_mutex);
-    if (conn->inflight_mutex) vSemaphoreDelete(conn->inflight_mutex);
-    if (conn->inflight_drain) vSemaphoreDelete(conn->inflight_drain);
-    if (conn->lanes_done)     vSemaphoreDelete(conn->lanes_done);
+    if (conn->tx_mutex)        vSemaphoreDelete(conn->tx_mutex);
+    if (conn->inflight_mutex)  vSemaphoreDelete(conn->inflight_mutex);
+    if (conn->inflight_drain)  vSemaphoreDelete(conn->inflight_drain);
+    if (conn->lanes_done)      vSemaphoreDelete(conn->lanes_done);
+    if (conn->responder_queue) vQueueDelete(conn->responder_queue);
+    if (conn->responder_alive) vSemaphoreDelete(conn->responder_alive);
     free(conn);
 }
 

@@ -83,6 +83,28 @@ int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
 bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],
                                    uint8_t ep_num, uint8_t direction);
 
+/* Non-blocking async submit. Calls cb(ctx, status, in_len) from the IDF
+ * worker context (priority 9) when the transfer completes. The caller does
+ * NOT block; ownership of the transfer is with the IDF until the callback
+ * fires. Returns 0 if the IDF accepted the submit, negative errno on
+ * immediate failure (IDF rejected submit; callback will NOT be called in
+ * that case). ep_addr's high bit carries direction (0x8N = IN, 0x0N = OUT).
+ * cancel is polled by the per-EP lane prior to submit; the UNLINK handler
+ * drives cancellation via usbhost_cancel_ep instead of the cancel flag. */
+int usbhost_submit_async(const char busid[USBIP_BUSID_SIZE],
+                         uint8_t ep_addr, bool is_control,
+                         const usbip_setup_packet_t *setup,
+                         const uint8_t *out_data, size_t out_len,
+                         uint8_t *in_data, size_t in_capacity,
+                         void (*cb)(void *ctx, int status, size_t in_len),
+                         void *ctx);
+
+/* Synchronous halt+flush+clear of a specific endpoint. Called from the
+ * UNLINK handler (under the per-EP submit mutex) to force-cancel any
+ * in-flight URB on this EP. The IDF delivers the cancelled URB to the
+ * async callback with status -ECONNRESET. */
+void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr);
+
 /* Toggle per-URB observability logging on the usbhost backend. When
  * enabled every transfer submit and completion emits one ESP_LOGI
  * line under the "usbhost" tag. Default off. */
