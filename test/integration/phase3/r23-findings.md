@@ -182,6 +182,52 @@ for adjustment if needed.
 Steps 1 and 2 completed in one agent session. No bisect cycles. No unexpected
 failures or hardware issues. Two commits, no reruns.
 
+## Post-R23 verification: responder batch-size measurement (2026-05-01)
+
+The agent's claim that "the responder queue holds only 1 entry per wakeup"
+was empirically verified by adding a diagnostic counter inside the
+responder that logs `wakes`, `avg_batch`, `max_batch`, and `size1/wakes`
+every 100 wakes. The instrumentation was applied locally on top of
+`bc2ea91`, built, flashed, run during the same `cdc_throughput.py`
+benchmark, then reverted (not committed).
+
+UART log excerpt (1300 wakes captured during a single benchmark run):
+
+```
+responder wakes=100  avg_batch=1.00 max_batch=1 size1=100/100
+responder wakes=200  avg_batch=1.00 max_batch=1 size1=200/200
+responder wakes=300  avg_batch=1.00 max_batch=1 size1=300/300
+responder wakes=400  avg_batch=1.00 max_batch=1 size1=400/400
+responder wakes=500  avg_batch=1.00 max_batch=1 size1=500/500
+responder wakes=600  avg_batch=1.00 max_batch=1 size1=600/600
+responder wakes=700  avg_batch=1.01 max_batch=5 size1=699/700
+responder wakes=800  avg_batch=1.00 max_batch=5 size1=799/800
+...
+responder wakes=1300 avg_batch=1.00 max_batch=5 size1=1299/1300
+```
+
+1299 of 1300 wakes had `batch_n=1`. One outlier of `batch_n=5`. Average
+batch size 1.00 (truncated to two decimal places).
+
+This proves the IDF callback is firing for one URB at a time end-to-end:
+the responder cannot coalesce because there is never anything queued at
+its wake. With pipeline depth=16 set in the lane task and no firmware-
+side gate observable, the only remaining explanation is that the IDF
+sees one outstanding submit at a time, which means the lane queue holds
+at most one URB at a time, which means the read loop receives at most
+one CMD_SUBMIT before processing it, which means the kernel vhci-hcd
+sends at most one CMD_SUBMIT before waiting for the corresponding
+RET_SUBMIT.
+
+The arithmetic that follows: 1 URB / RTT * 128 B/URB. With observed
+TCP RTT 5-12 ms during streaming this gives a 10-25 KiB/s envelope;
+observed 11.2 KiB/s sits inside it.
+
+R20 through R23 firmware architecture is exhausted as a throughput
+lever for this transport. Future improvements require lower kernel-
+side RTT (Ethernet or better Wi-Fi link) or kernel-side vhci-hcd
+pipelining (out of scope for mpy-pod).
+
 ## Path to further improvement
 
 The ceiling is the kernel vhci-hcd single-URB pipeline. Options per R22:
