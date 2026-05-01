@@ -130,12 +130,28 @@ typedef struct {
  * IDF callback may fire after the submit caller has returned (rare,
  * but observable on close-storm teardowns). The submit caller holds
  * one ref; the callback drops one when it gives done_sem; whichever
- * ref reaches zero frees the record and the IDF xfer. */
+ * ref reaches zero frees the record and the IDF xfer.
+ *
+ * For async submits (usbhost_submit_async), done_sem is NULL and
+ * user_cb + user_ctx are set instead. The IDF callback calls user_cb
+ * directly rather than giving done_sem. ref is 1 in the async case
+ * (IDF owns the record until the callback fires; there is no caller
+ * reference after submit returns). */
 typedef struct usbhost_inflight {
-    SemaphoreHandle_t      done_sem;
+    SemaphoreHandle_t      done_sem;   /* NULL for async submits */
     usb_transfer_t        *xfer;
-    volatile int           ref;            /* 2 = caller + IDF */
+    volatile int           ref;        /* 2 = caller + IDF; 1 = IDF only (async) */
     SemaphoreHandle_t      ref_lock;
+    /* Async completion callback. NULL for synchronous submits. */
+    void                 (*user_cb)(void *ctx, int status, size_t in_len);
+    void                  *user_ctx;
+    /* Cached transfer parameters needed by the callback to extract
+     * IN data without re-reading fields from xfer after completion. */
+    bool                   is_in;
+    bool                   is_control;
+    size_t                 payload_len;    /* in_capacity for IN, out_len for OUT */
+    uint8_t               *in_data;       /* pointer into caller's buffer (async) */
+    size_t                 in_capacity;
 } usbhost_inflight_t;
 
 typedef struct {
@@ -607,9 +623,50 @@ static void transfer_done_cb(usb_transfer_t *xfer)
     if (inflight == NULL) {
         return;
     }
-    /* Wake the caller if it is still waiting. If the caller has
-     * already left (rare; close-storm teardown overlap) this give is
-     * harmless: nobody is taking from the sem and inflight_unref
+
+    if (inflight->user_cb != NULL) {
+        /* Async path: extract result, call user callback, free the
+         * inflight. The IDF holds the only reference in the async case
+         * (ref=1 at submit time), so we free directly here rather than
+         * going through inflight_unref's ref-count machinery. */
+        int status = map_transfer_status_to_errno(xfer->status);
+        size_t in_len = 0;
+        if (status == 0 && inflight->is_in && inflight->in_data != NULL
+                && inflight->in_capacity > 0) {
+            if (inflight->is_control) {
+                in_len = (xfer->actual_num_bytes > USB_SETUP_PACKET_SIZE)
+                       ? (size_t)(xfer->actual_num_bytes - USB_SETUP_PACKET_SIZE)
+                       : 0;
+            } else {
+                in_len = (size_t)xfer->actual_num_bytes;
+                if (in_len > inflight->payload_len) {
+                    in_len = inflight->payload_len;
+                }
+            }
+            if (in_len > inflight->in_capacity) {
+                in_len = inflight->in_capacity;
+            }
+            const uint8_t *src = inflight->is_control
+                ? (xfer->data_buffer + USB_SETUP_PACKET_SIZE)
+                : xfer->data_buffer;
+            memcpy(inflight->in_data, src, in_len);
+        }
+        void (*cb)(void *, int, size_t) = inflight->user_cb;
+        void *ctx = inflight->user_ctx;
+        /* Free inflight and xfer before invoking callback so the
+         * responder task can reuse the slot immediately. */
+        if (inflight->ref_lock != NULL) {
+            vSemaphoreDelete(inflight->ref_lock);
+        }
+        usb_host_transfer_free(xfer);
+        free(inflight);
+        cb(ctx, status, in_len);
+        return;
+    }
+
+    /* Synchronous path: wake the caller via done_sem. If the caller
+     * has already left (rare; close-storm teardown overlap) this give
+     * is harmless: nobody is taking from the sem and inflight_unref
      * below will free it. */
     if (inflight->done_sem != NULL) {
         xSemaphoreGive(inflight->done_sem);
@@ -967,6 +1024,179 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
                  busid, ep_addr, status, (unsigned)*in_len);
     }
     return status;
+}
+
+/* Non-blocking submit. The IDF transfer-completion callback (transfer_done_cb)
+ * invokes cb(ctx, status, in_len) when the transfer completes. Returns 0 if
+ * the IDF accepted the submit, negative errno if it rejected it (in which case
+ * the callback will NOT be called). ep_addr high bit = direction (0x8N = IN).
+ *
+ * IMPORTANT: cb runs in the IDF worker context (priority 9). It must be short.
+ * Route all work through a higher-priority responder queue; do NOT do TCP sends
+ * or heavy bookkeeping inside cb. */
+int usbhost_submit_async(const char busid[USBIP_BUSID_SIZE],
+                         uint8_t ep_addr, bool is_control,
+                         const usbip_setup_packet_t *setup,
+                         const uint8_t *out_data, size_t out_len,
+                         uint8_t *in_data, size_t in_capacity,
+                         void (*cb)(void *ctx, int status, size_t in_len),
+                         void *ctx)
+{
+    if (busid == NULL || cb == NULL) {
+        return -EINVAL;
+    }
+
+    const bool is_in = is_control
+        ? (setup != NULL && (setup->bmRequestType & USBIP_REQUEST_DIR_IN) != 0)
+        : (ep_addr & 0x80) != 0;
+    const size_t payload_len = is_in ? in_capacity : out_len;
+    if (payload_len > USBHOST_MAX_TRANSFER) {
+        return -EMSGSIZE;
+    }
+
+    usb_device_handle_t dev_hdl = NULL;
+    size_t xfer_len = is_control
+        ? (USB_SETUP_PACKET_SIZE + payload_len)
+        : payload_len;
+
+    SemaphoreHandle_t ep_submit_mutex = NULL;
+    const uint8_t submit_ep = is_control ? 0x00 : ep_addr;
+
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    int slot = find_slot_by_busid_locked(busid);
+    if (slot >= 0) {
+        if (!is_control && is_in && in_capacity > 0) {
+            uint16_t mps = get_endpoint_mps_locked(slot, ep_addr);
+            if (mps > 0 && (xfer_len % mps) != 0) {
+                xfer_len = ((xfer_len + mps - 1) / mps) * mps;
+            }
+        }
+        dev_hdl = s_state.devices[slot].dev_hdl;
+        ep_submit_mutex = get_ep_submit_mutex_locked(slot, submit_ep);
+    }
+    xSemaphoreGive(s_state.state_mutex);
+
+    if (dev_hdl == NULL) {
+        return -ENODEV;
+    }
+
+    usb_transfer_t *xfer = NULL;
+    esp_err_t err = usb_host_transfer_alloc(xfer_len > 0 ? xfer_len : 1, 0, &xfer);
+    if (err != ESP_OK || xfer == NULL) {
+        return -ENOMEM;
+    }
+
+    if (is_control) {
+        memcpy(xfer->data_buffer, setup, USB_SETUP_PACKET_SIZE);
+        if (!is_in && out_len > 0 && out_data != NULL) {
+            memcpy(xfer->data_buffer + USB_SETUP_PACKET_SIZE, out_data, out_len);
+        }
+    } else if (!is_in && out_len > 0 && out_data != NULL) {
+        memcpy(xfer->data_buffer, out_data, out_len);
+    }
+
+    /* Async inflight: ref=1 (IDF owns it; caller does not block). The IDF
+     * callback will free the record after invoking user_cb. No done_sem. */
+    usbhost_inflight_t *inflight = calloc(1, sizeof(*inflight));
+    if (inflight == NULL) {
+        usb_host_transfer_free(xfer);
+        return -ENOMEM;
+    }
+    inflight->ref_lock    = xSemaphoreCreateMutex();
+    inflight->xfer        = xfer;
+    inflight->ref         = 1; /* IDF only */
+    inflight->user_cb     = cb;
+    inflight->user_ctx    = ctx;
+    inflight->is_in       = is_in;
+    inflight->is_control  = is_control;
+    inflight->payload_len = payload_len;
+    inflight->in_data     = in_data;
+    inflight->in_capacity = in_capacity;
+    /* done_sem stays NULL (async path) */
+    if (inflight->ref_lock == NULL) {
+        free(inflight);
+        usb_host_transfer_free(xfer);
+        return -ENOMEM;
+    }
+
+    xfer->callback         = transfer_done_cb;
+    xfer->context          = inflight;
+    xfer->device_handle    = dev_hdl;
+    xfer->bEndpointAddress = is_control ? 0 : ep_addr;
+    xfer->num_bytes        = (int)xfer_len;
+    xfer->timeout_ms       = is_control ? USBHOST_CONTROL_TIMEOUT_MS : 0;
+
+    /* Per-endpoint submit serialisation: same as submit_xfer. */
+    if (ep_submit_mutex != NULL) {
+        xSemaphoreTake(ep_submit_mutex, portMAX_DELAY);
+    }
+    if (is_control) {
+        err = usb_host_transfer_submit_control(s_state.client_hdl, xfer);
+    } else {
+        err = usb_host_transfer_submit(xfer);
+    }
+    if (ep_submit_mutex != NULL) {
+        xSemaphoreGive(ep_submit_mutex);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "submit_async ep=0x%02x failed: %s", ep_addr, esp_err_to_name(err));
+        /* IDF rejected; callback will never fire. Free inflight + xfer here. */
+        vSemaphoreDelete(inflight->ref_lock);
+        usb_host_transfer_free(xfer);
+        free(inflight);
+        return (err == ESP_ERR_INVALID_STATE) ? -ENODEV : -EIO;
+    }
+    return 0;
+}
+
+/* Synchronous halt+flush+clear on ep_addr. Called from the UNLINK handler
+ * under the per-EP submit mutex to force any in-flight URB on this pipe to
+ * complete with cancelled status. The IDF then calls our callback with
+ * USB_TRANSFER_STATUS_CANCELED. */
+void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr)
+{
+    if (busid == NULL) {
+        return;
+    }
+    usb_device_handle_t dev_hdl = NULL;
+    SemaphoreHandle_t ep_submit_mutex = NULL;
+
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    int slot = find_slot_by_busid_locked(busid);
+    if (slot >= 0) {
+        dev_hdl = s_state.devices[slot].dev_hdl;
+        ep_submit_mutex = get_ep_submit_mutex_locked(slot, ep_addr);
+    }
+    xSemaphoreGive(s_state.state_mutex);
+
+    if (dev_hdl == NULL) {
+        return;
+    }
+    /* Hold per-EP submit mutex around halt/flush/clear to avoid racing
+     * a concurrent submit on the same EP (the IDF EP-command machine
+     * rejects nested commands with INVALID_STATE; see iter4 evidence). */
+    if (ep_submit_mutex != NULL) {
+        xSemaphoreTake(ep_submit_mutex, portMAX_DELAY);
+    }
+    esp_err_t err;
+    err = usb_host_endpoint_halt(dev_hdl, ep_addr);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "cancel_ep: endpoint_halt(0x%02x) failed: %s",
+                 ep_addr, esp_err_to_name(err));
+    }
+    err = usb_host_endpoint_flush(dev_hdl, ep_addr);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "cancel_ep: endpoint_flush(0x%02x) failed: %s",
+                 ep_addr, esp_err_to_name(err));
+    }
+    err = usb_host_endpoint_clear(dev_hdl, ep_addr);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "cancel_ep: endpoint_clear(0x%02x) failed: %s",
+                 ep_addr, esp_err_to_name(err));
+    }
+    if (ep_submit_mutex != NULL) {
+        xSemaphoreGive(ep_submit_mutex);
+    }
 }
 
 int usbhost_control_transfer(const char busid[USBIP_BUSID_SIZE],
