@@ -772,7 +772,10 @@ static uint16_t get_endpoint_mps_locked(int slot, uint8_t ep_addr)
 /* The submit core. Runs entirely in the caller's task. The IDF
  * transfer-completion callback fires inside the worker's
  * usb_host_client_handle_events loop (single-threaded as required by
- * the IDF) and gives our done_sem. */
+ * the IDF) and gives our done_sem.
+ *
+ * The usbhost_submit_order_t parameter is removed in R20 step3.
+ * Per-EP lane tasks serialise submit order by construction. */
 static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
                        uint8_t ep_addr,
                        bool is_control,
@@ -780,8 +783,7 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
                        const uint8_t *out_data, size_t out_len,
                        uint8_t *in_data, size_t in_capacity, size_t *in_len,
                        volatile bool *cancel,
-                       uint32_t timeout_ms,
-                       const usbhost_submit_order_t *order)
+                       uint32_t timeout_ms)
 {
     if (busid == NULL || in_len == NULL) {
         return -EINVAL;
@@ -871,20 +873,12 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
     xfer->num_bytes        = (int)xfer_len;
     xfer->timeout_ms       = timeout_ms;
 
-    /* Per-endpoint submit serialisation. Two layers:
-     *   (1) The optional `order` hook is a ticket-based gate that
-     *       enforces submit order matching USB/IP arrival order. It
-     *       must run BEFORE acquiring the per-EP mutex, otherwise a
-     *       later-ticket worker can grab the mutex first and then spin
-     *       inside wait_fn forever, blocking the earlier-ticket worker
-     *       from ever entering the critical section.
-     *   (2) The per-EP mutex serialises the actual submit call so the
-     *       IDF only sees one outstanding submit at a time on this EP.
-     *       The IDF preserves submit order per pipe, so combining (1)
-     *       and (2) yields a strictly ticket-ordered wire submission. */
-    if (order != NULL && order->wait_fn != NULL) {
-        order->wait_fn(order->ctx);
-    }
+    /* Per-endpoint submit serialisation. The per-EP mutex serialises
+     * the actual submit call so the IDF only sees one outstanding
+     * submit at a time on this EP. With per-EP lane tasks (R20), submit
+     * order matches arrival order by construction, so the former
+     * ticket-based submit-order hook (usbhost_submit_order_t) is no
+     * longer needed and has been removed in R20 step3. */
     if (ep_submit_mutex != NULL) {
         xSemaphoreTake(ep_submit_mutex, portMAX_DELAY);
     }
@@ -892,9 +886,6 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
         err = usb_host_transfer_submit_control(s_state.client_hdl, xfer);
     } else {
         err = usb_host_transfer_submit(xfer);
-    }
-    if (order != NULL && order->advance_fn != NULL) {
-        order->advance_fn(order->ctx);
     }
     if (ep_submit_mutex != NULL) {
         xSemaphoreGive(ep_submit_mutex);
@@ -989,7 +980,7 @@ int usbhost_control_transfer(const char busid[USBIP_BUSID_SIZE],
     }
     return submit_xfer(busid, 0, true, setup,
                        out_data, out_len, in_data, in_capacity, in_len,
-                       cancel, USBHOST_CONTROL_TIMEOUT_MS, NULL);
+                       cancel, USBHOST_CONTROL_TIMEOUT_MS);
 }
 
 int usbhost_bulk_transfer(const char busid[USBIP_BUSID_SIZE],
@@ -1005,22 +996,7 @@ int usbhost_bulk_transfer(const char busid[USBIP_BUSID_SIZE],
      * indefinitely on a starved device until cancellation. */
     return submit_xfer(busid, ep_addr, false, NULL,
                        out_data, out_len, in_data, in_capacity, in_len,
-                       cancel, 0, NULL);
-}
-
-int usbhost_bulk_transfer_ordered(const char busid[USBIP_BUSID_SIZE],
-                                  uint8_t ep_addr,
-                                  const uint8_t *out_data, size_t out_len,
-                                  uint8_t *in_data, size_t in_capacity, size_t *in_len,
-                                  volatile bool *cancel,
-                                  const usbhost_submit_order_t *order)
-{
-    if (ep_addr == 0) {
-        return -EINVAL;
-    }
-    return submit_xfer(busid, ep_addr, false, NULL,
-                       out_data, out_len, in_data, in_capacity, in_len,
-                       cancel, 0, order);
+                       cancel, 0);
 }
 
 int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
@@ -1036,22 +1012,7 @@ int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
      * legitimately pend for seconds waiting for a notification. */
     return submit_xfer(busid, ep_addr, false, NULL,
                        out_data, out_len, in_data, in_capacity, in_len,
-                       cancel, 0, NULL);
-}
-
-int usbhost_interrupt_transfer_ordered(const char busid[USBIP_BUSID_SIZE],
-                                       uint8_t ep_addr,
-                                       const uint8_t *out_data, size_t out_len,
-                                       uint8_t *in_data, size_t in_capacity, size_t *in_len,
-                                       volatile bool *cancel,
-                                       const usbhost_submit_order_t *order)
-{
-    if (ep_addr == 0) {
-        return -EINVAL;
-    }
-    return submit_xfer(busid, ep_addr, false, NULL,
-                       out_data, out_len, in_data, in_capacity, in_len,
-                       cancel, 0, order);
+                       cancel, 0);
 }
 
 bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],
