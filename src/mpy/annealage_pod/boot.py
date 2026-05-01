@@ -79,6 +79,14 @@ def wifi_connect(creds, timeout_s=15):
             pass
     if sta.isconnected():
         print("annealage_pod.boot: Wi-Fi up, ifconfig={}".format(sta.ifconfig()))
+        # R23 step 1: disable Wi-Fi power save so the radio stays active.
+        # PM_NONE = 0 in IDF (WIFI_PS_NONE); confirmed exported as
+        # network.WLAN.PM_NONE in the running esp32 port.
+        try:
+            sta.config(pm=network.WLAN.PM_NONE)
+            print("annealage_pod.boot: Wi-Fi PS disabled (PM_NONE)")
+        except Exception as exc:  # noqa: BLE001
+            print("annealage_pod.boot: Wi-Fi PS disable failed: {!r}".format(exc))
     else:
         print("annealage_pod.boot: Wi-Fi connect timed out")
     return sta

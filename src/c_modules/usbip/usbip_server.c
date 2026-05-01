@@ -81,6 +81,14 @@ static const char *TAG = "usbip";
 #define USBIP_PIPELINE_DEPTH 16
 #endif
 
+/* R23 step 2: max URBs coalesced into one lwip_writev call.
+ * Each URB contributes at most 2 iovec entries (header + payload),
+ * so iov[] is dimensioned at 2*USBIP_BATCH_MAX. lwIP IOV_MAX is
+ * 0xFFFF on ESP-IDF; 32 entries is well within budget. */
+#ifndef USBIP_BATCH_MAX
+#define USBIP_BATCH_MAX 16
+#endif
+
 /* Task stack memory caps. Default xTaskCreatePinnedToCore allocates
  * stacks from internal SRAM (~232 KiB region on the S3, mostly already
  * consumed at boot by IDF / wifi / lwIP). Per-EP lane tasks (up to 32
@@ -943,122 +951,177 @@ static void lane_task(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
-/* R22 responder task. One per connection at USBIP_RESPONDER_TASK_PRIORITY
- * (11 > IDF worker 9). Blocks on conn->responder_queue. When a completed
- * inflight_urb_t* arrives (pushed by lane_completion_cb from the IDF callback
- * context at priority 9), FreeRTOS preempts the worker and runs this task
- * immediately within the same tick.
+/* R23 step 2 responder task. Extends R22 with batched RET_SUBMIT:
+ * after the blocking xQueueReceive, drain additional completed URBs
+ * non-blocking (up to USBIP_BATCH_MAX - 1 more) and emit one
+ * lwip_writev for the entire batch under tx_mutex.
  *
- * Post-R22-step-3: this task handles the RET_SUBMIT/tx_owner logic and gives
- * back the lane's inflight slot. In step 2 the queue is never populated (it
- * is wired up in step 3); the task just waits on the NULL sentinel at teardown.
+ * Per-URB tx_owner arbitration (RET_SUBMIT vs RET_UNLINK) is still
+ * done under inflight_mutex before deciding whether to include the
+ * URB in the iovec array.  URBs that lose to UNLINK are skipped in
+ * the batch (their RET_UNLINK is sent by the read loop).
  *
- * RET_SUBMIT ordering invariant: for any single (ep,dir) pipe, the IDF
- * preserves completion order = submit order. This task is the sole sender
- * of RET_SUBMIT, so no additional ordering gate is needed. Cross-pipe order
- * is irrelevant (the kernel keys URBs by seqnum). If a future change adds
- * parallel responders or parallel TCP sends, this invariant becomes load-
- * bearing again and must be re-gated. */
+ * RET_SUBMIT ordering: the queue is FIFO; arrival order within each
+ * (ep,dir) pipe is preserved by construction (IDF callback fires in
+ * submit order per pipe; the responder drains in queue order; iovec
+ * array is built in drain order).  Cross-pipe order is irrelevant
+ * (vhci-hcd keys URBs by seqnum).
+ *
+ * Stack allocation: USBIP_BATCH_MAX usbip_header_t structs (16*48 =
+ * 768 B) + 2*USBIP_BATCH_MAX iovec entries (16*2*8 = 256 B).  Total
+ * ~1 KiB per responder wakeup on top of the base task stack.
+ * USBIP_RESPONDER_TASK_STACK is 8192 B; this is well within budget. */
 static void responder_task(void *arg)
 {
     conn_state_t *conn = (conn_state_t *)arg;
 
     while (true) {
-        inflight_urb_t *u = NULL;
-        if (xQueueReceive(conn->responder_queue, &u, portMAX_DELAY) != pdTRUE) {
+        /* --- Phase 1: batch drain ---------------------------------------- */
+        inflight_urb_t *batch[USBIP_BATCH_MAX];
+        int batch_n = 0;
+
+        /* Blocking receive for the first URB. */
+        inflight_urb_t *u0 = NULL;
+        if (xQueueReceive(conn->responder_queue, &u0, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        if (u == NULL) {
+        if (u0 == NULL) {
             /* NULL sentinel: teardown. */
             break;
         }
+        batch[batch_n++] = u0;
 
-        const usbip_decoded_header_t *hdr = &u->hdr;
-        int    status = u->comp_status;
-        size_t in_len = u->comp_in_len;
-
-        /* If the URB was cancelled (UNLINK arrived, or teardown signalled),
-         * the kernel expects RET_SUBMIT with status -ECONNRESET. Override
-         * regardless of what the IDF returned. See caveat 5 in r22-plan.md:
-         * cancel is written under inflight_mutex (release semantics) and
-         * read here without the mutex; the race is acceptable because the
-         * tx_owner claim below is the authoritative decision. */
-        bool was_cancelled = u->cancel;
-        if (was_cancelled) {
-            status = -ECONNRESET;
-            in_len = 0;
-        }
-
-        /* Claim RET_SUBMIT ownership atomically under inflight_mutex. The
-         * UNLINK handler races for the same field; whoever loses skips the
-         * giveback so vhci_rx does not see a duplicate seqnum. */
-        bool send_ret_submit = false;
-        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-        if (u->tx_owner == TX_OWNER_NONE) {
-            u->tx_owner = TX_OWNER_RET_SUBMIT;
-            send_ret_submit = true;
-        }
-        xSemaphoreGive(conn->inflight_mutex);
-
-        bool ok = true;
-        if (send_ret_submit) {
-            int64_t t_resp = s_urb_verbose ? esp_timer_get_time() : 0;
-            ok = tx_ret_submit(conn,
-                               hdr->seqnum, hdr->devid, hdr->direction, hdr->ep,
-                               status,
-                               (status == 0 && hdr->direction == USBIP_DIR_IN)
-                                   ? u->in_buf : NULL,
-                               (status == 0 && hdr->direction == USBIP_DIR_IN)
-                                   ? (uint32_t)in_len : 0,
-                               "responder");
-            if (s_urb_verbose) {
-                int64_t t_done = esp_timer_get_time();
-                /* t_submit -> t_cb: USB wire time (IDF async); t_cb -> t_resp:
-                 * responder wakeup latency; t_resp -> t_done: TCP send cost */
-                ESP_LOGI(TAG, "R22 timing seq=%" PRIu32
-                         " t_wire_us=%" PRId64
-                         " t_wakeup_us=%" PRId64
-                         " t_tcp_us=%" PRId64
-                         " q_depth=%u",
-                         hdr->seqnum,
-                         (u->t_cb > 0 && u->t_submit > 0) ? (u->t_cb - u->t_submit) : -1LL,
-                         (u->t_cb > 0) ? (t_resp - u->t_cb) : -1LL,
-                         t_done - t_resp,
-                         (unsigned)uxQueueMessagesWaiting(conn->responder_queue));
-            }
-        }
-
-        /* Give back the lane's pipeline slot so it can submit the next URB. */
-        per_ep_lane_t *lane = &conn->lanes[u->lane_idx];
-        if (lane->inflight_slots != NULL) {
-            xSemaphoreGive(lane->inflight_slots);
-        }
-
-        /* Retire: remove from inflight list, signal cancel waiter if any. */
-        bool free_now = false;
-        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-        inflight_urb_t **p = &conn->inflight_head;
-        while (*p != NULL) {
-            if (*p == u) {
-                *p = u->next;
-                conn->inflight_count--;
-                if (conn->inflight_count == 0 && conn->inflight_drain != NULL) {
-                    xSemaphoreGive(conn->inflight_drain);
-                }
+        /* Non-blocking drain for up to USBIP_BATCH_MAX-1 more. */
+        while (batch_n < USBIP_BATCH_MAX) {
+            inflight_urb_t *un = NULL;
+            if (xQueueReceive(conn->responder_queue, &un, 0) != pdTRUE) {
                 break;
             }
-            p = &(*p)->next;
+            if (un == NULL) {
+                /* NULL sentinel arrived mid-batch: process the current
+                 * batch first, then exit on the next outer loop iteration
+                 * by re-posting the sentinel (queue has room: at least
+                 * one slot freed because we just dequeued it). */
+                xQueueSend(conn->responder_queue, &un, portMAX_DELAY);
+                break;
+            }
+            batch[batch_n++] = un;
         }
-        u->retired = true;
-        if (u->cancel_waiters == 0) {
-            free_now = true;
-        } else if (u->cancel_done_sem != NULL) {
-            xSemaphoreGive(u->cancel_done_sem);
-        }
-        xSemaphoreGive(conn->inflight_mutex);
 
-        if (free_now) {
-            inflight_free(u);
+        /* --- Phase 2: per-URB cancel override + tx_owner claim ----------- */
+        /* Per-URB effective status/in_len after cancel override. */
+        int    eff_status[USBIP_BATCH_MAX];
+        size_t eff_in_len[USBIP_BATCH_MAX];
+        bool   send_rs[USBIP_BATCH_MAX];  /* true if this URB sends RET_SUBMIT */
+
+        for (int i = 0; i < batch_n; i++) {
+            inflight_urb_t *u = batch[i];
+            int    st  = u->comp_status;
+            size_t len = u->comp_in_len;
+            if (u->cancel) {
+                st  = -ECONNRESET;
+                len = 0;
+            }
+            eff_status[i] = st;
+            eff_in_len[i] = len;
+
+            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+            if (u->tx_owner == TX_OWNER_NONE) {
+                u->tx_owner = TX_OWNER_RET_SUBMIT;
+                send_rs[i] = true;
+            } else {
+                send_rs[i] = false;
+            }
+            xSemaphoreGive(conn->inflight_mutex);
+        }
+
+        /* --- Phase 3: build iovec + emit one writev ----------------------- */
+        /* Stack-allocate headers (one per URB that sends RET_SUBMIT) and
+         * iovec array (up to 2 entries per such URB). */
+        usbip_header_t hdrs[USBIP_BATCH_MAX];
+        struct iovec   iov[USBIP_BATCH_MAX * 2];
+        int iov_n = 0;
+
+        for (int i = 0; i < batch_n; i++) {
+            if (!send_rs[i]) {
+                continue;
+            }
+            inflight_urb_t *u = batch[i];
+            const usbip_decoded_header_t *hdr = &u->hdr;
+            int    st  = eff_status[i];
+            size_t len = eff_in_len[i];
+
+            bool has_payload = (st == 0 && hdr->direction == USBIP_DIR_IN
+                                && len > 0 && u->in_buf != NULL);
+            uint32_t wire_len = has_payload ? (uint32_t)len : 0;
+
+            usbip_proto_pack_ret_submit(&hdrs[i], hdr->seqnum, hdr->devid,
+                                        hdr->direction, hdr->ep,
+                                        st, wire_len);
+            iov[iov_n].iov_base = &hdrs[i];
+            iov[iov_n].iov_len  = sizeof(usbip_header_t);
+            iov_n++;
+
+            if (has_payload) {
+                iov[iov_n].iov_base = u->in_buf;
+                iov[iov_n].iov_len  = len;
+                iov_n++;
+            }
+        }
+
+        bool ok = true;
+        if (iov_n > 0) {
+            if (s_urb_verbose) {
+                ESP_LOGI(TAG, "R23 batch send: batch_n=%d iov_n=%d", batch_n, iov_n);
+            }
+            xSemaphoreTake(conn->tx_mutex, portMAX_DELAY);
+            ssize_t sent = lwip_writev(conn->fd, iov, iov_n);
+            xSemaphoreGive(conn->tx_mutex);
+            if (sent < 0) {
+                ok = false;
+            }
+            /* Partial write: the remaining bytes are lost.  A partial
+             * writev on a TCP socket means the connection is closing;
+             * shutdown() below will trigger teardown. */
+        }
+
+        /* --- Phase 4: per-URB slot-release and retire -------------------- */
+        for (int i = 0; i < batch_n; i++) {
+            inflight_urb_t *u = batch[i];
+
+            /* Give back the lane's pipeline slot. */
+            per_ep_lane_t *lane = &conn->lanes[u->lane_idx];
+            if (lane->inflight_slots != NULL) {
+                xSemaphoreGive(lane->inflight_slots);
+            }
+
+            /* Retire: remove from inflight list, signal cancel waiter. */
+            bool free_now = false;
+            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+            inflight_urb_t **p = &conn->inflight_head;
+            while (*p != NULL) {
+                if (*p == u) {
+                    *p = u->next;
+                    conn->inflight_count--;
+                    if (conn->inflight_count == 0 &&
+                        conn->inflight_drain != NULL) {
+                        xSemaphoreGive(conn->inflight_drain);
+                    }
+                    break;
+                }
+                p = &(*p)->next;
+            }
+            u->retired = true;
+            if (u->cancel_waiters == 0) {
+                free_now = true;
+            } else if (u->cancel_done_sem != NULL) {
+                xSemaphoreGive(u->cancel_done_sem);
+            }
+            xSemaphoreGive(conn->inflight_mutex);
+
+            if (free_now) {
+                inflight_free(u);
+            }
         }
 
         if (!ok) {
