@@ -1,6 +1,6 @@
 /* Annealage Pod: USB/IP multiplexer server.
  *
- * Concurrency model (R15 refactor):
+ * Concurrency model (R20 per-EP lane architecture):
  *
  *   The earlier shape ran handle_urb_stream as a strict read-one,
  *   submit-one, complete-one, send-one loop. With one URB in flight
@@ -11,10 +11,10 @@
  *
  *   handle_urb_stream is now a pure read loop. For real-device
  *   URBs it builds an inflight record, links it into the per-
- *   connection seqnum table, and posts it to a worker queue. A
- *   small pool of submit workers per connection pulls records,
- *   calls usbhost_*_transfer (which is now async at the IDF layer
- *   so multiple URBs can be in flight concurrently), then sends
+ *   connection seqnum table, and dispatches it to a per-(ep,dir)
+ *   lane task. Each lane task dequeues URBs in FIFO order, calls
+ *   usbhost_*_transfer (async at the IDF layer so multiple URBs
+ *   can be in flight concurrently across lanes), then sends
  *   RET_SUBMIT under a per-connection tx_mutex.
  *
  *   Synthetic devices (CMSIS-DAP) take a fast path: latency is
@@ -22,9 +22,9 @@
  *   dispatch keeps the regression baseline well-trodden.
  *
  *   CMD_UNLINK is real: the seqnum table is consulted, the cancel
- *   flag is flipped, the worker observes it via usbhost's halt+
+ *   flag is flipped, the lane task observes it via usbhost's halt+
  *   flush+clear path and the URB completes with -ECONNRESET. The
- *   worker sends RET_SUBMIT first; the read loop sends RET_UNLINK
+ *   lane task sends RET_SUBMIT first; the read loop sends RET_UNLINK
  *   immediately on receipt to keep the kernel's unlink ledger
  *   balanced.
  */
@@ -68,10 +68,9 @@ static const char *TAG = "usbip";
 
 /* Task stack memory caps. Default xTaskCreatePinnedToCore allocates
  * stacks from internal SRAM (~232 KiB region on the S3, mostly already
- * consumed at boot by IDF / wifi / lwIP). 24 workers at 8 KiB plus the
- * second connection's client_task overflow that region: the second
- * IMPORT for 2-1 silently fails with errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY.
- * xTaskCreatePinnedToCoreWithCaps lets us allocate stacks from PSRAM
+ * consumed at boot by IDF / wifi / lwIP). Per-EP lane tasks (up to 32
+ * per connection) at 8 KiB plus the client_task overflow that region.
+ * xTaskCreatePinnedToCoreWithCaps allocates stacks from PSRAM
  * (8 MiB free) so two concurrent connections coexist. The TCB itself
  * is still small and stays in internal RAM. */
 #define USBIP_TASK_STACK_CAPS  (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
@@ -86,7 +85,7 @@ static const char *TAG = "usbip";
  * writes + interrupt + control. 32 covers worst case. */
 #define USBIP_INFLIGHT_MAX 32
 
-/* Per-EP lane task stack. Same as the old worker stack. */
+/* Per-EP lane task stack size. One lane per active (ep,dir) pair. */
 #define USBIP_LANE_TASK_STACK  8192
 
 typedef struct {
@@ -377,9 +376,9 @@ typedef struct conn_state {
     volatile int       lanes_alive;    /* count of live lane tasks */
     SemaphoreHandle_t  lanes_done;     /* given when lanes_alive drops to 0 */
     /* Refcount under inflight_mutex. Initial value 1 (read loop). Each
-     * spawned worker takes one. Whoever drops the last reference frees
-     * the struct. Heap-allocated so a wedged worker (e.g. submit_xfer
-     * stuck inside an IDF call that never completes) cannot trigger
+     * spawned lane task takes one reference. Whoever drops the last
+     * reference frees the struct. Heap-allocated so a lane task wedged
+     * inside an IDF call that never completes cannot trigger
      * use-after-free of stack memory once handle_import_request returns. */
     int                refcount;
 } conn_state_t;
@@ -1134,12 +1133,10 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
     }
 
     /* Stand up the per-connection async URB plumbing on the heap. The
-     * struct outlives this function because a wedged worker (one whose
-     * IDF submit never completes) would otherwise dereference freed
-     * stack memory after handle_import_request returns; that corruption
-     * surfaced as the third-attach raw-REPL handshake failing because
-     * shared usbhost endpoint state had been clobbered. Refcount: 1 for
-     * us plus 1 per spawned worker. */
+     * struct outlives this function because a wedged lane task (one
+     * whose IDF submit never completes) would otherwise dereference freed
+     * stack memory after handle_import_request returns. Refcount: 1 for
+     * the read loop plus 1 per spawned lane task. */
     conn_state_t *conn = calloc(1, sizeof(*conn));
     if (conn == NULL) {
         if (vdev && vdev->ops->on_detach) {
@@ -1164,7 +1161,7 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
     }
 
     /* Tear down: signal cancellation for any in-flight URBs so each
-     * worker's submit_xfer returns quickly via halt+flush+clear. */
+     * lane task's submit_xfer returns quickly via halt+flush+clear. */
     conn->shutdown = true;
     xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
     for (inflight_urb_t *u = conn->inflight_head; u != NULL; u = u->next) {
@@ -1174,11 +1171,11 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
 
     /* Release the attachment slot now: the kernel-side connection has
      * dropped, the device is no longer "attached" from any client's
-     * point of view. Holding the slot through the cancel-storm/worker
-     * drain (up to 11 s) blocks a fresh IMPORT for the same busid with
+     * point of view. Holding the slot through the cancel-storm drain
+     * (up to 11 s) blocks a fresh IMPORT for the same busid with
      * "already attached, refusing". The conn_state is heap-allocated
-     * and refcounted, so workers still draining safely keep their own
-     * references; a parallel new IMPORT spawns its own conn_state. */
+     * and refcounted, so lane tasks still draining safely keep their
+     * own references; a parallel new IMPORT spawns its own conn_state. */
     if (slot_held != NULL && *slot_held && slot_idx != NULL) {
         attachment_release(*slot_idx);
         *slot_held = false;
@@ -1190,9 +1187,11 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
     }
 
     /* Drain per-EP lane tasks. Post a NULL sentinel to each alive lane
-     * and wait for all lane tasks to exit (same shape as worker pool
-     * teardown above). Lanes that were never spawned have task==NULL
-     * and alive==false; skip them. */
+     * and wait for all lane tasks to exit. Lanes that were never spawned
+     * have task==NULL and alive==false; skip them. If any lane task is
+     * wedged inside an IDF call the 8 s timeout fires and we drop our
+     * reference; the wedged task still holds one and frees conn
+     * when it eventually exits. */
     int lanes_to_drain = 0;
     for (int i = 0; i < 32; i++) {
         xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
@@ -1228,9 +1227,8 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
 static void conn_state_free(conn_state_t *conn)
 {
     /* Free any straggler inflight records. With refcount-driven destroy
-     * we can only reach here once every worker has dropped its ref, so
-     * the inflight list contains URBs that were never picked up (e.g.
-     * still queued at teardown). */
+     * we can only reach here once every lane task has dropped its ref,
+     * so the inflight list contains URBs not yet dequeued at teardown. */
     inflight_urb_t *u = conn->inflight_head;
     while (u != NULL) {
         inflight_urb_t *next = u->next;
