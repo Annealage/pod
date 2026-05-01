@@ -37,5 +37,14 @@ set(SDKCONFIG_DEFAULTS
 set(MICROPY_HW_USB_HOST 1)
 list(APPEND MICROPY_DEF_BOARD MICROPY_HW_USB_HOST=1)
 
+# Disable TinyUSB class drivers. We don't use machine.USBHost's bundled
+# CDC/MSC/HID class drivers; our usbip backend forwards raw URBs. These
+# defines must reach BOTH the QSTR extractor and the compilation units
+# (machine_usb_host.c, mp_usbh.c) — without them the QSTR extractor
+# sees CFG_TUH_MSC=0 (default in qstr preprocessing context) but the
+# compiler sees CFG_TUH_MSC=2 (TinyUSB default), causing
+# 'MP_QSTR_USBH_MSC undeclared' build errors. R24 work first.
+list(APPEND MICROPY_DEF_BOARD CFG_TUH_CDC=0 CFG_TUH_MSC=0 CFG_TUH_HID=0)
+
 # Freeze the annealage_pod Python package into the firmware image.
 set(MICROPY_FROZEN_MANIFEST ${MICROPY_BOARD_DIR}/manifest.py)
