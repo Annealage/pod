@@ -92,6 +92,9 @@ static const char *TAG = "usbip";
  * writes + interrupt + control. 32 covers worst case. */
 #define USBIP_INFLIGHT_MAX 32
 
+/* Per-EP lane task stack. Same as the old worker stack. */
+#define USBIP_LANE_TASK_STACK  8192
+
 typedef struct {
     bool                in_use;
     char                busid[USBIP_BUSID_SIZE];
@@ -359,6 +362,16 @@ typedef struct inflight_urb {
     struct inflight_urb   *next;
 } inflight_urb_t;
 
+/* Per-EP lane: one task + one queue per active (ep,dir). The lane task
+ * calls run_inflight for each URB it dequeues, serialising all URBs on
+ * one pipe through a single task (no worker-race). NULL sentinel posted
+ * at teardown causes the task to exit. */
+typedef struct {
+    QueueHandle_t  queue;  /* inflight_urb_t* drained by lane task */
+    TaskHandle_t   task;   /* NULL if lane not yet spawned */
+    bool           alive;  /* false after sentinel processed */
+} per_ep_lane_t;
+
 /* Per-EP tx-order state. Indexed by ep_addr folded to 5 bits:
  * (ep_num & 0x0F) | ((direction == IN) ? 0x10 : 0). 32 entries cover
  * the full USB EP address space. issued is the next ticket number to
@@ -393,6 +406,12 @@ typedef struct conn_state {
     volatile int       workers_alive;   /* count of pool tasks still running */
     SemaphoreHandle_t  workers_done;    /* given when workers_alive drops to 0 */
     tx_order_slot_t    tx_order[32];    /* per-(ep,dir) tx-order tickets */
+    /* Per-EP lane dispatch (R20). One lane per active (ep,dir). Indexed
+     * by tx_order_index(ep, dir). Lanes replace the submit_queue pool for
+     * real-host URBs in the final R20 shape; during step-1 both exist. */
+    per_ep_lane_t      lanes[32];
+    volatile int       lanes_alive;    /* count of live lane tasks */
+    SemaphoreHandle_t  lanes_done;     /* given when lanes_alive drops to 0 */
     /* Refcount under inflight_mutex. Initial value 1 (read loop). Each
      * spawned worker takes one. Whoever drops the last reference frees
      * the struct. Heap-allocated so a wedged worker (e.g. submit_xfer
@@ -849,6 +868,113 @@ static void submit_worker_task(void *arg)
     vTaskDeleteWithCaps(NULL);
 }
 
+/* Lane task arg: carries the conn pointer and the lane index so the
+ * task knows which queue to drain and which lanes[] slot to clear. */
+typedef struct {
+    conn_state_t *conn;
+    uint8_t       idx;
+} lane_task_arg_t;
+
+/* Per-EP lane task. Drains lane->queue calling run_inflight for each
+ * URB. Exits on NULL sentinel. One task per active (ep,dir) pair. */
+static void lane_task(void *arg)
+{
+    lane_task_arg_t *la   = (lane_task_arg_t *)arg;
+    conn_state_t    *conn = la->conn;
+    uint8_t          idx  = la->idx;
+    free(la);
+
+    QueueHandle_t q = conn->lanes[idx].queue;
+
+    while (true) {
+        inflight_urb_t *u = NULL;
+        if (xQueueReceive(q, &u, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (u == NULL) {
+            /* NULL sentinel: teardown requested. */
+            break;
+        }
+        run_inflight(u);
+    }
+
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    conn->lanes[idx].alive = false;
+    int remaining = --conn->lanes_alive;
+    xSemaphoreGive(conn->inflight_mutex);
+
+    if (remaining == 0 && conn->lanes_done != NULL) {
+        xSemaphoreGive(conn->lanes_done);
+    }
+    /* Drop the lane's reference to conn. */
+    conn_state_release(conn);
+    vTaskDeleteWithCaps(NULL);
+}
+
+/* Lazy-spawn a lane for (ep,dir) identified by idx, then enqueue u.
+ * Called from intake_submit under no mutex. Returns true on success.
+ * On failure the caller must handle the URB error (inflight_free + error
+ * response). */
+static bool lane_dispatch(conn_state_t *conn, inflight_urb_t *u)
+{
+    uint8_t idx = u->tx_order_idx;
+
+    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+    per_ep_lane_t *lane = &conn->lanes[idx];
+
+    if (lane->task == NULL) {
+        /* First URB on this (ep,dir): create the queue and spawn the task. */
+        lane->queue = xQueueCreate(USBIP_INFLIGHT_MAX, sizeof(inflight_urb_t *));
+        if (lane->queue == NULL) {
+            xSemaphoreGive(conn->inflight_mutex);
+            return false;
+        }
+
+        lane_task_arg_t *la = malloc(sizeof(*la));
+        if (la == NULL) {
+            vQueueDelete(lane->queue);
+            lane->queue = NULL;
+            xSemaphoreGive(conn->inflight_mutex);
+            return false;
+        }
+        la->conn = conn;
+        la->idx  = idx;
+
+        conn->refcount++;
+        lane->alive = true;
+        conn->lanes_alive++;
+
+        char tname[16];
+        snprintf(tname, sizeof(tname), "usbip_l_%02x", (unsigned)idx);
+
+        if (xTaskCreatePinnedToCoreWithCaps(lane_task, tname,
+                USBIP_LANE_TASK_STACK, la,
+                USBIP_WORKER_TASK_PRIORITY, &lane->task,
+                USBIP_TASK_CORE,
+                USBIP_TASK_STACK_CAPS) != pdPASS) {
+            /* Undo the accounting we just did. */
+            conn->refcount--;
+            lane->alive = false;
+            conn->lanes_alive--;
+            vQueueDelete(lane->queue);
+            lane->queue = NULL;
+            free(la);
+            xSemaphoreGive(conn->inflight_mutex);
+            return false;
+        }
+    }
+    xSemaphoreGive(conn->inflight_mutex);
+
+    if (xQueueSend(lane->queue, &u, 0) != pdTRUE) {
+        /* Lane queue full - should not happen with USBIP_INFLIGHT_MAX cap,
+         * but handle gracefully. */
+        ESP_LOGW(TAG, "lane queue[%u] full, seq=%" PRIu32, (unsigned)idx,
+                 u->hdr.seqnum);
+        return false;
+    }
+    return true;
+}
+
 /* Read one URB worth of OUT-stage data into a fresh malloc buffer. */
 static bool read_out_payload(int fd, size_t len, uint8_t **out_buf)
 {
@@ -1007,31 +1133,16 @@ static bool intake_submit(conn_state_t *conn,
         return true;
     }
 
-    /* EP0 control transfers complete in milliseconds and never pend.
-     * Routing them through the worker pool puts them behind pending
-     * bulk-IN reads, which is the deadlock cdc-acm hit before this
-     * fix: SET_CONTROL_LINE_STATE waited behind 16 pending bulk reads
-     * that would only complete once the device saw line state set.
-     *
-     * Bulk/interrupt OUT URBs also run inline. The kernel emits a
-     * write only when it has data ready and expects ACK quickly; the
-     * IDF returns within milliseconds. Inlining prevents head-of-line
-     * blocking when all worker pool slots are occupied by pending IN
-     * URBs (cdc-acm keeps 16 read URBs queued). */
-    if (hdr->ep == 0 || hdr->direction == USBIP_DIR_OUT) {
-        run_inflight(u);
-        return true;
-    }
-
-    if (xQueueSend(conn->submit_queue, &u, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "submit queue saturated, seq=%" PRIu32, hdr->seqnum);
+    /* Real-host URBs (EP0, OUT, and IN all go through per-EP lanes).
+     * Each lane serialises its (ep,dir) pipe by construction: one task
+     * processes URBs in FIFO order, so submit order matches arrival
+     * order without ticket gates (removed in steps 2-3). */
+    if (!lane_dispatch(conn, u)) {
+        ESP_LOGW(TAG, "lane_dispatch failed, seq=%" PRIu32, hdr->seqnum);
         inflight_unlink(conn, u);
-        /* Wait for our turn at the RET_SUBMIT gate so we don't bypass
-         * an earlier URB still in flight, then advance both gates past
-         * us so subsequent URBs aren't stranded. */
         tx_order_wait(conn, u->tx_order_idx, u->tx_ticket, false);
         bool ok2 = tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
-                                 hdr->ep, -EBUSY, NULL, 0, "intake_ebusy_queue");
+                                 hdr->ep, -EBUSY, NULL, 0, "intake_ebusy_lane");
         tx_order_advance(u, true, true);
         inflight_free(u);
         return ok2;
@@ -1194,11 +1305,12 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
     conn->submit_queue    = xQueueCreate(USBIP_INFLIGHT_MAX, sizeof(inflight_urb_t *));
     conn->inflight_drain  = xSemaphoreCreateBinary();
     conn->workers_done    = xSemaphoreCreateBinary();
+    conn->lanes_done      = xSemaphoreCreateBinary();
     conn->refcount        = 1;
 
     bool plumbing_ok = (conn->tx_mutex != NULL && conn->inflight_mutex != NULL &&
                         conn->submit_queue != NULL && conn->inflight_drain != NULL &&
-                        conn->workers_done != NULL);
+                        conn->workers_done != NULL && conn->lanes_done != NULL);
 
     /* Spawn submit workers for the real-host path. Synthetic devices
      * never need them; running inline avoids the queue hop. */
@@ -1273,6 +1385,30 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
         }
     }
 
+    /* Drain per-EP lane tasks. Post a NULL sentinel to each alive lane
+     * and wait for all lane tasks to exit (same shape as worker pool
+     * teardown above). Lanes that were never spawned have task==NULL
+     * and alive==false; skip them. */
+    int lanes_to_drain = 0;
+    for (int i = 0; i < 32; i++) {
+        xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+        bool do_sentinel = conn->lanes[i].alive && conn->lanes[i].queue != NULL;
+        xSemaphoreGive(conn->inflight_mutex);
+        if (do_sentinel) {
+            inflight_urb_t *sentinel = NULL;
+            xQueueSend(conn->lanes[i].queue, &sentinel, portMAX_DELAY);
+            lanes_to_drain++;
+        }
+    }
+    if (lanes_to_drain > 0) {
+        if (xSemaphoreTake(conn->lanes_done, pdMS_TO_TICKS(8000)) != pdTRUE) {
+            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
+            int alive = conn->lanes_alive;
+            xSemaphoreGive(conn->inflight_mutex);
+            ESP_LOGW(TAG, "teardown: lanes_alive=%d after 8s wait", alive);
+        }
+    }
+
     if (vdev && vdev->ops->on_detach) {
         vdev->ops->on_detach(vdev);
     }
@@ -1297,11 +1433,19 @@ static void conn_state_free(conn_state_t *conn)
         inflight_free(u);
         u = next;
     }
+    /* Free any lane queues that were created (tasks already exited). */
+    for (int i = 0; i < 32; i++) {
+        if (conn->lanes[i].queue != NULL) {
+            vQueueDelete(conn->lanes[i].queue);
+            conn->lanes[i].queue = NULL;
+        }
+    }
     if (conn->tx_mutex)       vSemaphoreDelete(conn->tx_mutex);
     if (conn->inflight_mutex) vSemaphoreDelete(conn->inflight_mutex);
     if (conn->submit_queue)   vQueueDelete(conn->submit_queue);
     if (conn->inflight_drain) vSemaphoreDelete(conn->inflight_drain);
     if (conn->workers_done)   vSemaphoreDelete(conn->workers_done);
+    if (conn->lanes_done)     vSemaphoreDelete(conn->lanes_done);
     free(conn);
 }
 
