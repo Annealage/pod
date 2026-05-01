@@ -82,12 +82,6 @@ static const char *TAG = "usbip";
 
 #define USBIP_MAX_CLIENTS 4
 
-/* Per-connection submit-worker pool size. cdc-acm under load keeps up
- * to 16 bulk-IN reads pending plus an interrupt-IN; pool must be at
- * least this large. OUT URBs bypass the pool (run inline from the
- * read loop) so they never block on a long-pending IN. */
-#define USBIP_SUBMIT_POOL_SIZE 24
-
 /* Per-connection inflight URB cap; cdc-acm queues 16 reads + a few
  * writes + interrupt + control. 32 covers worst case. */
 #define USBIP_INFLIGHT_MAX 32
@@ -374,12 +368,9 @@ typedef struct conn_state {
     bool               shutdown;        /* stop workers cleanly on disconnect */
     SemaphoreHandle_t  tx_mutex;        /* serialise writes to the TCP socket */
     SemaphoreHandle_t  inflight_mutex;  /* protects the inflight list */
-    QueueHandle_t      submit_queue;    /* inflight_urb_t* drained by workers (removed step4) */
     inflight_urb_t    *inflight_head;
     int                inflight_count;
     SemaphoreHandle_t  inflight_drain;  /* given when count drops to 0 */
-    volatile int       workers_alive;   /* count of pool tasks still running (removed step4) */
-    SemaphoreHandle_t  workers_done;    /* given when workers_alive drops to 0 (removed step4) */
     /* Per-EP lane dispatch (R20). One lane per active (ep,dir). Indexed
      * by lane_index(ep, dir). */
     per_ep_lane_t      lanes[32];
@@ -731,36 +722,8 @@ static int outstanding_drain_wait(conn_state_t *conn, TickType_t timeout_ticks)
     }
 }
 
-/* Worker: pull inflight URBs from the per-connection queue, run them,
- * exit when shutdown is signalled (queue closed by submit of NULL).
- * The pool only services IN URBs (which may pend long); OUT URBs run
- * inline in intake_submit so they never block behind a pending IN. */
-static void submit_worker_task(void *arg)
-{
-    conn_state_t *conn = (conn_state_t *)arg;
-    while (true) {
-        inflight_urb_t *u = NULL;
-        if (xQueueReceive(conn->submit_queue, &u, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        if (u == NULL) {
-            /* Sentinel: drain time. */
-            break;
-        }
-        run_inflight(u);
-    }
-    xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-    int remaining = --conn->workers_alive;
-    xSemaphoreGive(conn->inflight_mutex);
-    if (remaining == 0 && conn->workers_done != NULL) {
-        xSemaphoreGive(conn->workers_done);
-    }
-    /* Drop the worker's reference. If handle_import_request has already
-     * returned (e.g. it timed out waiting on workers_done) this may be
-     * the final reference; conn_state_release handles the destroy. */
-    conn_state_release(conn);
-    vTaskDeleteWithCaps(NULL);
-}
+/* submit_worker_task removed in R20 step4. All real-host URBs are now
+ * dispatched via per-EP lane tasks (see lane_task below). */
 
 /* Lane task arg: carries the conn pointer and the lane index so the
  * task knows which queue to drain and which lanes[] slot to clear. */
@@ -1188,39 +1151,12 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
     conn->shutdown        = false;
     conn->tx_mutex        = xSemaphoreCreateMutex();
     conn->inflight_mutex  = xSemaphoreCreateMutex();
-    conn->submit_queue    = xQueueCreate(USBIP_INFLIGHT_MAX, sizeof(inflight_urb_t *));
     conn->inflight_drain  = xSemaphoreCreateBinary();
-    conn->workers_done    = xSemaphoreCreateBinary();
     conn->lanes_done      = xSemaphoreCreateBinary();
     conn->refcount        = 1;
 
     bool plumbing_ok = (conn->tx_mutex != NULL && conn->inflight_mutex != NULL &&
-                        conn->submit_queue != NULL && conn->inflight_drain != NULL &&
-                        conn->workers_done != NULL && conn->lanes_done != NULL);
-
-    /* Spawn submit workers for the real-host path. Synthetic devices
-     * never need them; running inline avoids the queue hop. */
-    int workers_started = 0;
-    if (plumbing_ok && vdev == NULL) {
-        for (int i = 0; i < USBIP_SUBMIT_POOL_SIZE; i++) {
-            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-            conn->workers_alive++;
-            conn->refcount++;
-            xSemaphoreGive(conn->inflight_mutex);
-            if (xTaskCreatePinnedToCoreWithCaps(submit_worker_task, "usbip_w",
-                                        USBIP_WORKER_TASK_STACK, conn,
-                                        USBIP_WORKER_TASK_PRIORITY, NULL,
-                                        USBIP_TASK_CORE,
-                                        USBIP_TASK_STACK_CAPS) == pdPASS) {
-                workers_started++;
-            } else {
-                xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-                conn->workers_alive--;
-                conn->refcount--;
-                xSemaphoreGive(conn->inflight_mutex);
-            }
-        }
-    }
+                        conn->inflight_drain != NULL && conn->lanes_done != NULL);
 
     bool ok = false;
     if (plumbing_ok) {
@@ -1251,24 +1187,6 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
     if (outstanding_drain_wait(conn, pdMS_TO_TICKS(3000)) != 0) {
         ESP_LOGW(TAG, "teardown: inflight drain timed out, count=%d",
                  conn->inflight_count);
-    }
-
-    for (int i = 0; i < workers_started; i++) {
-        inflight_urb_t *sentinel = NULL;
-        xQueueSend(conn->submit_queue, &sentinel, portMAX_DELAY);
-    }
-    if (workers_started > 0) {
-        /* Wait for workers to retire. If any worker is wedged inside an
-         * IDF call (rare, but the IDF gives no recovery primitive), the
-         * timeout fires and we drop our reference; the wedged worker
-         * still holds one and will free conn whenever it eventually
-         * exits. Either way our caller is safe. */
-        if (xSemaphoreTake(conn->workers_done, pdMS_TO_TICKS(8000)) != pdTRUE) {
-            xSemaphoreTake(conn->inflight_mutex, portMAX_DELAY);
-            int alive = conn->workers_alive;
-            xSemaphoreGive(conn->inflight_mutex);
-            ESP_LOGW(TAG, "teardown: workers_alive=%d after 8s wait", alive);
-        }
     }
 
     /* Drain per-EP lane tasks. Post a NULL sentinel to each alive lane
@@ -1328,9 +1246,7 @@ static void conn_state_free(conn_state_t *conn)
     }
     if (conn->tx_mutex)       vSemaphoreDelete(conn->tx_mutex);
     if (conn->inflight_mutex) vSemaphoreDelete(conn->inflight_mutex);
-    if (conn->submit_queue)   vQueueDelete(conn->submit_queue);
     if (conn->inflight_drain) vSemaphoreDelete(conn->inflight_drain);
-    if (conn->workers_done)   vSemaphoreDelete(conn->workers_done);
     if (conn->lanes_done)     vSemaphoreDelete(conn->lanes_done);
     free(conn);
 }
