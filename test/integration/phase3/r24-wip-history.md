@@ -1,10 +1,20 @@
 # R24 (TinyUSB host pivot) — work history
 
+> **Pivot rationale confirmed (2026-05-03, per `r23-deep-dive-findings.md`):**
+> µs-resolution IDF timing data collected. Case C confirmed: avg_round=157 ms
+> for bulk-IN (vs 110 µs wire floor). The IDF host stack is the bottleneck.
+> New structural finding: bulk-OUT is fast (271 µs avg), bulk-IN is slow
+> (165 ms avg); this suggests IDF serialises IN tokens per endpoint.
+> Before retrying TinyUSB, check whether TinyUSB also serialises per-ep
+> bulk-IN, since TinyUSB gotcha #2 (`tuh_edpt_xfer` one-in-flight per ep)
+> implies it may have the same limitation. The D-state deadlock is the more
+> urgent blocker. Next task: `r25-fix-fs-cp-deadlock-plan.md`.
+
 This branch holds an attempt to migrate `src/c_modules/usbhost/usbhost.c`
 from the IDF `usb_host_*` API to TinyUSB's host primitives. Triggered
-by the (later-questioned) hypothesis from R23-corrected findings that
-the IDF host stack on DWC2 ESP32-S3 was rate-limiting bulk URB
-processing at ~88/sec.
+by the (later-questioned, now confirmed) hypothesis from R23-corrected
+findings that the IDF host stack on DWC2 ESP32-S3 was rate-limiting bulk
+URB processing at ~88/sec.
 
 The attempt is **parked, not abandoned**. This file documents what was
 tried, what worked, what broke, and the non-obvious facts learned —

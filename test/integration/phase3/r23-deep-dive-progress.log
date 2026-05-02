@@ -1,0 +1,2 @@
+2026-05-03T21:30:00Z step1 commit=0b7f8eb printf_fix=yes build=pass flash=pass bench=11.2KiB/s avg_submit=55us avg_round=157136us min_round=87us max_round=486486us n=900 case=C
+2026-05-03T21:30:00Z step3 commit=0b7f8eb per_dir=yes OUT_avg=271us OUT_n=43 IN_avg=165916us IN_n=857 IN_max=486927us asymmetry_ratio=613x

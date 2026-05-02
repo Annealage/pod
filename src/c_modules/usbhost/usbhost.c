@@ -41,6 +41,7 @@
 #include "usbhost.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -620,30 +621,68 @@ static void transfer_done_cb(usb_transfer_t *xfer)
      *   accept the request (synchronous part of submit).
      * t_idf_round = time from submit-accepted to callback firing
      *   (wire time + IDF event-loop scheduling + DMA handling).
-     * Aggregated over 100 URBs and emitted as a histogram-summary. */
+     * Aggregated over 100 URBs and emitted as a histogram-summary,
+     * with per-direction (IN vs OUT) breakdowns (step 3). */
     if (inflight->user_cb != NULL && inflight->t_submit_pre != 0) {
+        /* Combined (all directions) counters. */
         static uint32_t s_count = 0;
         static int64_t  s_sum_overhead_us = 0;
         static int64_t  s_sum_round_us = 0;
         static int64_t  s_max_round_us = 0;
         static int64_t  s_min_round_us = INT64_MAX;
+        /* Per-direction counters: [0]=OUT, [1]=IN */
+        static uint32_t s_dir_count[2]   = {0, 0};
+        static int64_t  s_dir_sum_us[2]  = {0, 0};
+        static int64_t  s_dir_min_us[2]  = {INT64_MAX, INT64_MAX};
+        static int64_t  s_dir_max_us[2]  = {0, 0};
+
         int64_t t_complete = esp_timer_get_time();
         int64_t t_overhead = inflight->t_submit_post - inflight->t_submit_pre;
         int64_t t_round    = t_complete - inflight->t_submit_post;
+        int     dir_idx    = inflight->is_in ? 1 : 0;
+
         s_count++;
         s_sum_overhead_us += t_overhead;
         s_sum_round_us    += t_round;
         if (t_round > s_max_round_us) s_max_round_us = t_round;
         if (t_round < s_min_round_us) s_min_round_us = t_round;
+
+        s_dir_count[dir_idx]++;
+        s_dir_sum_us[dir_idx] += t_round;
+        if (t_round > s_dir_max_us[dir_idx]) s_dir_max_us[dir_idx] = t_round;
+        if (t_round < s_dir_min_us[dir_idx]) s_dir_min_us[dir_idx] = t_round;
+
         if ((s_count % 100) == 0) {
+            /* newlib-nano on ESP32 does not support 64-bit printf
+             * specifiers. Cast to int32_t; all expected timing values
+             * fit (max_round for a 500 ms URB = 500000 us << INT32_MAX). */
             ESP_LOGI(TAG, "idf_timing: n=%" PRIu32
-                          " avg_submit=%lldus avg_round=%lldus"
-                          " min_round=%lldus max_round=%lldus",
+                          " avg_submit=%" PRId32 "us avg_round=%" PRId32 "us"
+                          " min_round=%" PRId32 "us max_round=%" PRId32 "us",
                      s_count,
-                     (long long)(s_sum_overhead_us / s_count),
-                     (long long)(s_sum_round_us / s_count),
-                     (long long)s_min_round_us,
-                     (long long)s_max_round_us);
+                     (int32_t)(s_sum_overhead_us / (int64_t)s_count),
+                     (int32_t)(s_sum_round_us / (int64_t)s_count),
+                     (int32_t)s_min_round_us,
+                     (int32_t)s_max_round_us);
+            /* Per-direction breakdown: OUT then IN. */
+            if (s_dir_count[0] > 0) {
+                ESP_LOGI(TAG, "idf_timing_dir OUT: n=%" PRIu32
+                              " avg=%" PRId32 "us"
+                              " min=%" PRId32 "us max=%" PRId32 "us",
+                         s_dir_count[0],
+                         (int32_t)(s_dir_sum_us[0] / (int64_t)s_dir_count[0]),
+                         (int32_t)s_dir_min_us[0],
+                         (int32_t)s_dir_max_us[0]);
+            }
+            if (s_dir_count[1] > 0) {
+                ESP_LOGI(TAG, "idf_timing_dir IN:  n=%" PRIu32
+                              " avg=%" PRId32 "us"
+                              " min=%" PRId32 "us max=%" PRId32 "us",
+                         s_dir_count[1],
+                         (int32_t)(s_dir_sum_us[1] / (int64_t)s_dir_count[1]),
+                         (int32_t)s_dir_min_us[1],
+                         (int32_t)s_dir_max_us[1]);
+            }
         }
     }
 
