@@ -850,9 +850,10 @@ static void lane_completion_cb(void *ctx, int status, size_t in_len)
     inflight_urb_t *u = (inflight_urb_t *)ctx;
     u->comp_status = status;
     u->comp_in_len = in_len;
-    if (s_urb_verbose) {
-        u->t_cb = esp_timer_get_time();
-    }
+    /* R25 step 5: always capture t_cb for cb2tx_timing aggregation in
+     * the responder. Was verbose-gated; now unconditional (one
+     * esp_timer_get_time call per URB; negligible cost). */
+    u->t_cb = esp_timer_get_time();
     /* Non-blocking send: responder_queue is sized at USBIP_INFLIGHT_MAX*2
      * so it should never be full if the pipeline depth is respected. */
     BaseType_t sent = xQueueSend(u->conn->responder_queue, &u, 0);
@@ -1074,9 +1075,76 @@ static void responder_task(void *arg)
             if (s_urb_verbose) {
                 ESP_LOGI(TAG, "R23 batch send: batch_n=%d iov_n=%d", batch_n, iov_n);
             }
+            /* R25 step 5: TCP timing instrumentation. Capture t_pre just
+             * before the lwip_writev so cb2tx_timing measures the gap
+             * between IDF callback (u->t_cb) and the actual send. The
+             * tx_mutex take is included in writev cost; for the
+             * single-connection bulk-IN read case there is no contender
+             * so the take is a fast-path. */
+            int64_t t_pre = esp_timer_get_time();
             xSemaphoreTake(conn->tx_mutex, portMAX_DELAY);
             ssize_t sent = lwip_writev(conn->fd, iov, iov_n);
             xSemaphoreGive(conn->tx_mutex);
+            int64_t t_post = esp_timer_get_time();
+
+            /* tcp_timing aggregator: per-writev-call latency. */
+            {
+                static uint32_t s_tcp_count = 0;
+                static int64_t  s_tcp_sum_us = 0;
+                static int64_t  s_tcp_min_us = INT64_MAX;
+                static int64_t  s_tcp_max_us = 0;
+                int64_t dt = t_post - t_pre;
+                s_tcp_count++;
+                s_tcp_sum_us += dt;
+                if (dt < s_tcp_min_us) s_tcp_min_us = dt;
+                if (dt > s_tcp_max_us) s_tcp_max_us = dt;
+                if ((s_tcp_count % 100) == 0) {
+                    ESP_LOGI(TAG, "tcp_timing: n=%" PRIu32
+                                  " avg_writev=%" PRId32 "us"
+                                  " min_writev=%" PRId32 "us"
+                                  " max_writev=%" PRId32 "us",
+                             s_tcp_count,
+                             (int32_t)(s_tcp_sum_us / (int64_t)s_tcp_count),
+                             (int32_t)s_tcp_min_us,
+                             (int32_t)s_tcp_max_us);
+                }
+            }
+
+            /* cb2tx_timing aggregator: per-URB cb -> writev-pre gap.
+             * Counts every URB in this batch that actually sends a
+             * RET_SUBMIT (send_rs[i]==true). Skips URBs with t_cb==0
+             * (synthesised completions never reached lane_completion_cb). */
+            {
+                static uint32_t s_cb2tx_count = 0;
+                static int64_t  s_cb2tx_sum_us = 0;
+                static int64_t  s_cb2tx_min_us = INT64_MAX;
+                static int64_t  s_cb2tx_max_us = 0;
+                for (int i = 0; i < batch_n; i++) {
+                    if (!send_rs[i]) {
+                        continue;
+                    }
+                    inflight_urb_t *u = batch[i];
+                    if (u->t_cb == 0) {
+                        continue;
+                    }
+                    int64_t dt = t_pre - u->t_cb;
+                    s_cb2tx_count++;
+                    s_cb2tx_sum_us += dt;
+                    if (dt < s_cb2tx_min_us) s_cb2tx_min_us = dt;
+                    if (dt > s_cb2tx_max_us) s_cb2tx_max_us = dt;
+                    if ((s_cb2tx_count % 100) == 0) {
+                        ESP_LOGI(TAG, "cb2tx_timing: n=%" PRIu32
+                                      " avg_cb2tx=%" PRId32 "us"
+                                      " min_cb2tx=%" PRId32 "us"
+                                      " max_cb2tx=%" PRId32 "us",
+                                 s_cb2tx_count,
+                                 (int32_t)(s_cb2tx_sum_us / (int64_t)s_cb2tx_count),
+                                 (int32_t)s_cb2tx_min_us,
+                                 (int32_t)s_cb2tx_max_us);
+                    }
+                }
+            }
+
             if (sent < 0) {
                 ok = false;
             }

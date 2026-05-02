@@ -1,14 +1,25 @@
 # R24 (TinyUSB host pivot) — work history
 
-> **Pivot rationale confirmed (2026-05-03, per `r23-deep-dive-findings.md`):**
-> µs-resolution IDF timing data collected. Case C confirmed: avg_round=157 ms
-> for bulk-IN (vs 110 µs wire floor). The IDF host stack is the bottleneck.
-> New structural finding: bulk-OUT is fast (271 µs avg), bulk-IN is slow
-> (165 ms avg); this suggests IDF serialises IN tokens per endpoint.
-> Before retrying TinyUSB, check whether TinyUSB also serialises per-ep
-> bulk-IN, since TinyUSB gotcha #2 (`tuh_edpt_xfer` one-in-flight per ep)
-> implies it may have the same limitation. The D-state deadlock is the more
-> urgent blocker. Next task: `r25-fix-fs-cp-deadlock-plan.md`.
+> **Status update (2026-05-03):** µs-resolution IDF timing measured
+> bulk-IN avg_round=165 ms vs OUT 271 µs (R23 deep-dive); R25 stage B
+> narrowed the gap to 11 ms wall-clock between consecutive bulk-IN
+> ISR fires (`r25-isr-instrumentation.md`). The cause is not yet
+> established. Linux EHCI achieves 677 KiB/s through the same
+> Pico-class device on the same FS bus
+> (`r25-direct-usb-baseline.md`), so the gap is not a silicon limit.
+>
+> An earlier draft of this banner asserted "TinyUSB has the same
+> per-pipe serialisation IDF appears to have, the pivot does not lift
+> the IN ceiling either" based on TinyUSB gotcha #2 below. That
+> extrapolated from a TinyUSB user-API constraint to DWC2 hardware
+> behaviour and is unsupported. TinyUSB-host throughput on the same
+> DWC2 silicon has not been measured; comparing TinyUSB-host vs
+> IDF-host on this silicon is now an open R25 next step.
+>
+> The R24 fs-cp D-state hang is a TinyUSB-only failure mode (R23 IDF
+> main runs the same workflows cleanly), so it is not a blocker for
+> the main branch. R25 stays on IDF and tunes the host stack:
+> `r25-tune-idf-bulk-in-plan.md`.
 
 This branch holds an attempt to migrate `src/c_modules/usbhost/usbhost.c`
 from the IDF `usb_host_*` API to TinyUSB's host primitives. Triggered
