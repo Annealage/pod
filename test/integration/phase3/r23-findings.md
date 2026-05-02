@@ -239,6 +239,17 @@ The ceiling is the kernel vhci-hcd single-URB pipeline. Options per R22:
 
 ## CORRECTION (2026-05-01): the kernel does pipeline; IDF host stack is the bottleneck
 
+> **Caveat from R24 retro:** the "IDF host stack is the bottleneck"
+> conclusion below was reached without microsecond-resolution timing on
+> the IDF submit-to-callback path. R22's instrumentation used
+> `xTaskGetTickCount()` (10 ms ticks at `CONFIG_FREERTOS_HZ=100`), which
+> cannot localise per-URB latency. The R24 TinyUSB pivot was triggered
+> by this conclusion and hit a kernel-deadlock wall (see
+> `r24-wip-history.md`). Before any further architectural pivot,
+> instrument the IDF path with `esp_timer_get_time()` (µs-resolution)
+> to verify whether IDF is actually the bottleneck or whether per-URB
+> cost is downstream of IDF entirely.
+
 The conclusion above blamed the kernel vhci-hcd. Subsequent web research
 (`drivers/usb/usbip/vhci_tx.c` `vhci_send_cmd_submit`) confirmed
 vhci-hcd does NOT serialize CMD_SUBMITs: `vhci_tx_loop` drains
