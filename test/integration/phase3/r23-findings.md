@@ -239,6 +239,17 @@ The ceiling is the kernel vhci-hcd single-URB pipeline. Options per R22:
 
 ## CORRECTION (2026-05-01): the kernel does pipeline; IDF host stack is the bottleneck
 
+> **Verified (2026-05-03, per `r23-deep-dive-findings.md`):**
+> µs-resolution timing on the IDF submit-to-callback path confirms
+> Case C: avg_round = 157 ms at steady state, min_round = 87-110 µs
+> (wire-time floor). The IDF host stack IS the bottleneck for bulk-IN.
+> Per-direction breakdown: bulk-OUT avg 271 µs (wire speed), bulk-IN
+> avg 165,916 µs (165 ms). The asymmetry is the key new finding.
+> The R24 TinyUSB pivot rationale is confirmed; see
+> `r23-deep-dive-findings.md` for full numbers and the new structural
+> finding about IN/OUT asymmetry, and `r24-wip-history.md` for the
+> open D-state deadlock issue that must be fixed before retrying TinyUSB.
+
 The conclusion above blamed the kernel vhci-hcd. Subsequent web research
 (`drivers/usb/usbip/vhci_tx.c` `vhci_send_cmd_submit`) confirmed
 vhci-hcd does NOT serialize CMD_SUBMITs: `vhci_tx_loop` drains
