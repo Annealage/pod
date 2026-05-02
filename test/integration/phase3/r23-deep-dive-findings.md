@@ -180,10 +180,33 @@ matching perfectly.
 
 ## Next direction
 
-Case C -> fix the R24 fs-cp kernel-D-state deadlock, then retry TinyUSB.
-But before committing to TinyUSB, verify whether TinyUSB can pipeline
-multiple bulk-IN tokens concurrently on one endpoint (the serialisation
-question above). If it cannot, the pivot gains nothing on throughput and
-the D-state hazard is the more urgent issue to fix first regardless.
+The R24 fs-cp D-state deadlock is a TinyUSB/r24-wip issue, not an R23/IDF
+issue. R23 IDF main is rock-solid for streaming workflows: this bench
+just put 900 IN URBs through it cleanly with no kernel hangs, and per
+`r24-bug-findings.md` / `r24-wip-history.md` R23 main also runs
+`mpremote fs cp` cleanly. So the deadlock is not the right Case C
+followup.
 
-Follow-up task: `r25-fix-fs-cp-deadlock-plan.md`.
+Linux as a USB host pipelines URBs at the QH/qTD hardware level
+(EHCI/xHCI walks queue heads itself; software gets completion
+interrupts) and runs the same Pico DUT at wire speed in both
+directions. DWC2 has 8 host channels and queue-mode descriptor lists;
+nothing in USB protocol or DWC2 silicon forces serial bulk-IN. Our
+min_round at the wire-time floor proves the hardware can deliver IN
+data at full speed when the queue is empty. The 165 ms average shape
+is consistent with IDF running bulk URBs serially per pipe inside
+its event-loop.
+
+TinyUSB gotcha #2 (`tuh_edpt_xfer` one-in-flight per (dev, ep)) is a
+TinyUSB user-API constraint that would still bite our raw-URB-forwarding
+USB/IP use case. So a TinyUSB pivot does not lift the IN ceiling
+either; the pivot's only remaining argument is upstream-MicroPython
+alignment, not bandwidth.
+
+Real Case C followup: investigate IDF bulk-IN serialisation and whether
+it is tunable. Knobs to try, in cheapest-first order: HW_BUFFER_BIAS_IN
+kconfig, IDF host-task priority, `CONFIG_FREERTOS_HZ=1000`, then descent
+to the lower `hcd_*` API. Stay on R23 IDF main; do not branch to
+TinyUSB.
+
+Follow-up task: `r25-tune-idf-bulk-in-plan.md`.

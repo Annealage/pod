@@ -244,11 +244,14 @@ The ceiling is the kernel vhci-hcd single-URB pipeline. Options per R22:
 > Case C: avg_round = 157 ms at steady state, min_round = 87-110 µs
 > (wire-time floor). The IDF host stack IS the bottleneck for bulk-IN.
 > Per-direction breakdown: bulk-OUT avg 271 µs (wire speed), bulk-IN
-> avg 165,916 µs (165 ms). The asymmetry is the key new finding.
-> The R24 TinyUSB pivot rationale is confirmed; see
-> `r23-deep-dive-findings.md` for full numbers and the new structural
-> finding about IN/OUT asymmetry, and `r24-wip-history.md` for the
-> open D-state deadlock issue that must be fixed before retrying TinyUSB.
+> avg 165,916 µs (165 ms). The asymmetry is the key new finding;
+> min_round at the wire floor proves the hardware can deliver IN at
+> wire speed when the queue is empty. The 165 ms shape is consistent
+> with IDF serialising bulk URBs per pipe in its event loop, not a
+> hardware constraint. R24 TinyUSB pivot is NOT the followup: TinyUSB
+> gotcha #2 implies the same per-ep serialisation, so the pivot does
+> not lift the IN ceiling. R25 stays on IDF and tunes the host stack;
+> see `r25-tune-idf-bulk-in-plan.md`.
 
 The conclusion above blamed the kernel vhci-hcd. Subsequent web research
 (`drivers/usb/usbip/vhci_tx.c` `vhci_send_cmd_submit`) confirmed
