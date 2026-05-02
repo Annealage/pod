@@ -1,0 +1,6 @@
+step1 commit=c89947d smoke=pass mpremote_60=pass
+2026-05-01T19:39:48+10:00 step1 commit=c89947d smoke=pass mpremote_60=pass throughput=N/A
+2026-05-01T19:49:06+10:00 step2 commit=0041f38 smoke=pass mpremote_60=pass throughput=N/A
+2026-05-01T20:30:00+10:00 step3 commit=d07100a smoke=5/0 mpremote_60=60/60 r18_probe=pass throughput_256=10.7KiB/s baseline=11.1KiB/s delta=-3.6%
+2026-05-01T21:15:00+10:00 step4 commit=2ce7e64 smoke=5/0 mpremote_60=60/60 r18_probe=pass throughput_256=11.3KiB/s baseline=11.1KiB/s delta=+1.8% tcp_rtt_ms=12.8
+2026-05-01T21:45:00+10:00 step5 commit=3a343f3 smoke=5/0 mpremote_30=30/30
