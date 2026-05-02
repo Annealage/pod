@@ -53,6 +53,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "usb/usb_host.h"
 #include "usb/usb_helpers.h"
@@ -148,6 +149,12 @@ typedef struct usbhost_inflight {
     size_t                 payload_len;    /* in_capacity for IN, out_len for OUT */
     uint8_t               *in_data;       /* pointer into caller's buffer (async) */
     size_t                 in_capacity;
+    /* R23 deep-dive instrumentation: microsecond timing of the IDF
+     * submit -> callback path. Always captured when async; cost is
+     * one esp_timer_get_time() call per URB. */
+    int64_t                t_submit_pre;   /* before usb_host_transfer_submit */
+    int64_t                t_submit_post;  /* after usb_host_transfer_submit returns */
+    uint8_t                ep_for_log;     /* ep_addr for log line */
 } usbhost_inflight_t;
 
 typedef struct {
@@ -606,6 +613,38 @@ static void transfer_done_cb(usb_transfer_t *xfer)
     usbhost_inflight_t *inflight = (usbhost_inflight_t *)xfer->context;
     if (inflight == NULL) {
         return;
+    }
+
+    /* R23 deep-dive timing: capture us-resolution per-URB IDF latency.
+     * t_submit_overhead = how long usb_host_transfer_submit took to
+     *   accept the request (synchronous part of submit).
+     * t_idf_round = time from submit-accepted to callback firing
+     *   (wire time + IDF event-loop scheduling + DMA handling).
+     * Aggregated over 100 URBs and emitted as a histogram-summary. */
+    if (inflight->user_cb != NULL && inflight->t_submit_pre != 0) {
+        static uint32_t s_count = 0;
+        static int64_t  s_sum_overhead_us = 0;
+        static int64_t  s_sum_round_us = 0;
+        static int64_t  s_max_round_us = 0;
+        static int64_t  s_min_round_us = INT64_MAX;
+        int64_t t_complete = esp_timer_get_time();
+        int64_t t_overhead = inflight->t_submit_post - inflight->t_submit_pre;
+        int64_t t_round    = t_complete - inflight->t_submit_post;
+        s_count++;
+        s_sum_overhead_us += t_overhead;
+        s_sum_round_us    += t_round;
+        if (t_round > s_max_round_us) s_max_round_us = t_round;
+        if (t_round < s_min_round_us) s_min_round_us = t_round;
+        if ((s_count % 100) == 0) {
+            ESP_LOGI(TAG, "idf_timing: n=%" PRIu32
+                          " avg_submit=%lldus avg_round=%lldus"
+                          " min_round=%lldus max_round=%lldus",
+                     s_count,
+                     (long long)(s_sum_overhead_us / s_count),
+                     (long long)(s_sum_round_us / s_count),
+                     (long long)s_min_round_us,
+                     (long long)s_max_round_us);
+        }
     }
 
     if (inflight->user_cb != NULL) {
@@ -1081,6 +1120,7 @@ int usbhost_submit_async(const char busid[USBIP_BUSID_SIZE],
     inflight->payload_len = payload_len;
     inflight->in_data     = in_data;
     inflight->in_capacity = in_capacity;
+    inflight->ep_for_log  = ep_addr;
 
     xfer->callback         = transfer_done_cb;
     xfer->context          = inflight;
@@ -1093,11 +1133,13 @@ int usbhost_submit_async(const char busid[USBIP_BUSID_SIZE],
     if (ep_submit_mutex != NULL) {
         xSemaphoreTake(ep_submit_mutex, portMAX_DELAY);
     }
+    inflight->t_submit_pre = esp_timer_get_time();
     if (is_control) {
         err = usb_host_transfer_submit_control(s_state.client_hdl, xfer);
     } else {
         err = usb_host_transfer_submit(xfer);
     }
+    inflight->t_submit_post = esp_timer_get_time();
     if (ep_submit_mutex != NULL) {
         xSemaphoreGive(ep_submit_mutex);
     }
