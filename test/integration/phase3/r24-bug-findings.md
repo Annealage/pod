@@ -1,5 +1,10 @@
 # R24 residual bug investigation findings
 
+> **Superseded by `r24-wip-history.md`** in this same directory, which
+> captures the full picture (seven TinyUSB-on-DWC2 gotchas, why the R24
+> pivot rationale itself is unverified, how to resume). Read that one
+> first; this file is a snapshot from one earlier debugging step.
+
 Following `r24-bug-plan.md`. Step 1 (instrument), step 2 (skipped, H1
 refuted), step 3 (close+open EP), and additional CLEAR_FEATURE
 landed. r24-wip HEAD `3285e6c`.
