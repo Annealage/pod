@@ -87,7 +87,15 @@
 #define USBHOST_DAEMON_TASK_PRIORITY 10
 #endif
 #ifndef USBHOST_WORKER_TASK_PRIORITY
-#define USBHOST_WORKER_TASK_PRIORITY 9
+/* R25 step 3: bumped from 9 to 20. The worker calls
+ * usb_host_client_handle_events which dispatches transfer_done_cb in
+ * task context. R23 deep-dive measured avg_round=165 ms which the
+ * R25 refill-path trace traced to user-task wakeup latency, NOT HCD
+ * pipeline gap. At 9 the worker sat below responder (11) and lwIP
+ * (18) on core 1 (APP_CPU); under read-heavy bench load it could
+ * stay ready for tens of ms per burst. 20 puts it above both,
+ * still below Wi-Fi (23). */
+#define USBHOST_WORKER_TASK_PRIORITY 20
 #endif
 #ifndef USBHOST_DAEMON_TASK_STACK
 #define USBHOST_DAEMON_TASK_STACK 4096

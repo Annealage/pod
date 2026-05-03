@@ -124,6 +124,80 @@ completions, each yield costs at least one tick. 16 URBs * 10 ms tick =
 hypothesis.** Bumping host task priority and/or raising
 `CONFIG_FREERTOS_HZ` to 1000 should both reduce this.
 
+#### Result (2026-05-03): hypothesis refuted
+
+Bumped `USBHOST_WORKER_TASK_PRIORITY` in our `usbhost.c` from 9 to
+20 (above responder=11 and lwIP=18, below Wi-Fi=23). The worker is
+the task running `usb_host_client_handle_events` which dispatches
+`transfer_done_cb`.
+
+Numbers at n=900 steady-state:
+
+| Metric | Prio 9 (HZ=1000 baseline) | Prio 20 | Delta |
+|---|---|---|---|
+| avg_round (combined) | 160,360 us | 154,515 us | -4% |
+| min_round | 108 us | 106 us | ~0 |
+| OUT avg | 259 us | 265 us | +2% |
+| IN avg | 167,685 us | 162,254 us | -3% |
+| Throughput bufsize=256 | 11.2 KiB/s | 11.2 KiB/s | 0 |
+
+avg_round and IN-avg moved by single-digit percent only, well within
+run-to-run noise. Throughput unchanged at 11.2 KiB/s.
+
+**The 165 ms is NOT user-task wakeup latency.** Even with the worker
+at the second-highest priority on core 1, callback delivery did not
+shorten. The R25 refill-path-trace inference that "task-wakeup is
+slow" was wrong. The 165 ms must be inside the IDF host stack
+between `usb_host_transfer_submit` accepting the URB and IDF
+firing the pipe callback into our worker.
+
+Re-reading the source: when the HCD ISR runs (`_intr_hdlr_chan` at
+`hcd_dwc.c:841`) and signals `event_sem` via `_unblock_client(in_isr=true)`
+(`usb_host.c:197`), the IDF DOES pipeline URB N+1 in-ISR. So the HW
+pipeline is full. But `t_complete` (entry to our `transfer_done_cb`)
+is not the wire-completion timestamp; it's the user-task time when
+`_handle_pending_ep` finally runs. If THAT timestamp is in fact close
+to ISR-fire time at prio=20, then the 165 ms must be between HW wire
+completion and ISR fire - which means DWC2 itself or the HCD path
+between ISR-decode and `_intr_hdlr_chan` is sitting on completions.
+
+Side effects worth flagging:
+
+- `avg_cb2tx` grew from 121 us (n=300) to 730 us (n=900) at prio 20.
+  At equal priority class with the responder, the worker now
+  preempts the responder more often, so the responder's run between
+  `lane_completion_cb` (worker context) and the writev is lengthened.
+- `avg_writev` grew from 482 us to 611 us - same competition story.
+- min_cb2tx and min_writev are unchanged (98 us, 336 us), so the
+  fast path is intact; only the variance grew.
+- These responder/writev shifts do NOT explain the throughput
+  ceiling - they're still well below the 11.4 ms inter-URB envelope.
+
+Verdict: priority is not the lever. Three remaining hypotheses for
+the 165 ms:
+
+1. The DWC2 channel-halt-to-reactivate cycle takes ~10 ms per URB
+   in hardware. Possible if DWC2 SCHED_INFO or some DMA-FIFO
+   scheduling restricts re-arm rate. Would need IDF-source
+   instrumentation inside `_intr_hdlr_chan` to measure
+   ISR-fire-to-ISR-fire on consecutive completions.
+2. The IDF main interrupt handler is being preempted before
+   `_intr_hdlr_chan` runs. Check `intr_flags` passed to
+   `esp_intr_alloc` (`hcd_dwc.c:1064`) and the IRQ priority level.
+3. Something in the pipe callback chain (`epN_pipe_callback` ->
+   `endpoint_callback` -> `_unblock_client`) takes ~10 ms per URB.
+   Unlikely - the chain is just list manipulation and a sem give.
+
+Next test: option 1, ISR-side instrumentation. But that requires
+patching the IDF source to add an `esp_timer_get_time()` log inside
+`_intr_hdlr_chan`. Either vendor that file or symlink-patch the
+IDF tree.
+
+The R25 step 3 priority change is left in place at 20: it does not
+help, it does not regress bufsize=256 throughput, and the higher
+priority is more consistent with how the worker is supposed to
+operate (above network/IO tasks).
+
 ### Step 4: try `CONFIG_FREERTOS_HZ=1000`
 
 Independent of priority: at 100 Hz, even a high-priority task yields
