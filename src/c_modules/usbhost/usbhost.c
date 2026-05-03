@@ -740,6 +740,112 @@ static void transfer_done_cb(usb_transfer_t *xfer)
 /* Tasks                                                                    */
 /* ------------------------------------------------------------------------ */
 
+/* R25 stage B: ISR-side timing drainer. Pulls entries from the ring
+ * buffer maintained by the patched IDF hcd_dwc.c _intr_hdlr_chan and
+ * emits a per-channel summary every 100 ISR fires. The trace-entry type
+ * MUST match the layout in our IDF patch in
+ * components/usb/hcd_dwc.c. See test/integration/phase3/r25-isr-instrumentation.md
+ * for the full diff. */
+typedef struct {
+    int64_t t_entry;
+    int64_t t_exit;
+    uint8_t chan_idx;
+    uint8_t ep_addr;
+    uint8_t xfer_type;
+    uint8_t event;
+} __dbg_dwc_isr_trace_entry_t;
+
+extern size_t   __dbg_dwc_isr_trace_drain(__dbg_dwc_isr_trace_entry_t *out, size_t max_n);
+extern uint32_t __dbg_dwc_isr_trace_lost_count(void);
+
+#define DWC_TRACE_BATCH 64       /* drain up to this many per wake */
+#define DWC_NUM_CHANNELS 8       /* ESP32-S3 DWC2 has 8 host channels */
+#define DWC_TRACE_LOG_EVERY 100  /* emit summary every N ISR fires per channel */
+
+typedef struct {
+    uint32_t count;
+    int64_t  sum_proc_us;
+    int64_t  min_proc_us;
+    int64_t  max_proc_us;
+    int64_t  sum_gap_us;     /* gap = entry[N] - exit[N-1], same channel */
+    int64_t  min_gap_us;
+    int64_t  max_gap_us;
+    int64_t  last_t_exit;    /* 0 if no prior */
+    uint8_t  last_ep;        /* track ep_addr/xfer_type for the latest entry */
+    uint8_t  last_xfer_type;
+} dwc_chan_stats_t;
+
+static void dwc_isr_trace_drainer_task(void *arg)
+{
+    (void)arg;
+    static dwc_chan_stats_t stats[DWC_NUM_CHANNELS];
+    /* zero-init via static storage */
+
+    __dbg_dwc_isr_trace_entry_t batch[DWC_TRACE_BATCH];
+
+    while (true) {
+        size_t n = __dbg_dwc_isr_trace_drain(batch, DWC_TRACE_BATCH);
+        for (size_t i = 0; i < n; i++) {
+            __dbg_dwc_isr_trace_entry_t *e = &batch[i];
+            if (e->chan_idx >= DWC_NUM_CHANNELS) {
+                continue;
+            }
+            dwc_chan_stats_t *s = &stats[e->chan_idx];
+            int64_t proc = e->t_exit - e->t_entry;
+            s->count++;
+            s->sum_proc_us += proc;
+            if (s->count == 1) {
+                s->min_proc_us = proc;
+                s->max_proc_us = proc;
+            } else {
+                if (proc < s->min_proc_us) s->min_proc_us = proc;
+                if (proc > s->max_proc_us) s->max_proc_us = proc;
+            }
+            if (s->last_t_exit != 0) {
+                int64_t gap = e->t_entry - s->last_t_exit;
+                s->sum_gap_us += gap;
+                if (s->count == 2 || gap < s->min_gap_us) s->min_gap_us = gap;
+                if (gap > s->max_gap_us) s->max_gap_us = gap;
+            }
+            s->last_t_exit     = e->t_exit;
+            s->last_ep         = e->ep_addr;
+            s->last_xfer_type  = e->xfer_type;
+
+            if ((s->count % DWC_TRACE_LOG_EVERY) == 0) {
+                /* avg_gap denominator is count-1 because the first entry
+                 * has no prior to compare against. Casts to int32_t to
+                 * stay within newlib-nano printf support. */
+                uint32_t gap_n = s->count - 1u;
+                int32_t avg_proc = (int32_t)(s->sum_proc_us / (int64_t)s->count);
+                int32_t avg_gap  = gap_n ? (int32_t)(s->sum_gap_us / (int64_t)gap_n) : 0;
+                ESP_LOGI(TAG,
+                         "dwc_isr: ch=%u type=%u ep=0x%02x n=%" PRIu32
+                         " avg_proc=%" PRId32 "us"
+                         " avg_gap=%" PRId32 "us"
+                         " min_gap=%" PRId32 "us"
+                         " max_gap=%" PRId32 "us"
+                         " min_proc=%" PRId32 "us"
+                         " max_proc=%" PRId32 "us"
+                         " lost=%" PRIu32,
+                         (unsigned)e->chan_idx,
+                         (unsigned)s->last_xfer_type,
+                         (unsigned)s->last_ep,
+                         s->count,
+                         avg_proc,
+                         avg_gap,
+                         (int32_t)s->min_gap_us,
+                         (int32_t)s->max_gap_us,
+                         (int32_t)s->min_proc_us,
+                         (int32_t)s->max_proc_us,
+                         __dbg_dwc_isr_trace_lost_count());
+            }
+        }
+        if (n < DWC_TRACE_BATCH) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+}
+
 static void usb_host_daemon_task(void *arg)
 {
     (void)arg;
@@ -837,6 +943,19 @@ int usbhost_start(void)
         USBHOST_TASK_CORE);
     if (rc != pdPASS) {
         return -ENOMEM;
+    }
+    /* R25 stage B: low-priority drainer for the IDF ISR trace ring.
+     * Priority 2 keeps it out of the way of every functional task; the
+     * trace ring overflows silently if we starve it (drop counter logged).
+     * 8 KB stack: the local trace-batch array is 64 * 24 = 1.5 KB, plus
+     * ESP_LOGI's printf scratch + FreeRTOS overhead easily exceeds 4 KB. */
+    rc = xTaskCreatePinnedToCore(
+        dwc_isr_trace_drainer_task, "dwc_isr_trace",
+        8192, NULL,
+        2, NULL,
+        USBHOST_TASK_CORE);
+    if (rc != pdPASS) {
+        ESP_LOGW(TAG, "dwc_isr_trace drainer spawn failed; trace disabled");
     }
     s_state.started = true;
     return 0;
