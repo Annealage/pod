@@ -1,15 +1,30 @@
 # R25 stage B: ISR-side timing instrumentation
 
-## Verdict
+## Correction (2026-05-03)
 
-**HW re-arm latency case confirmed.** The DWC2 channel for bulk-IN
-takes ~11 ms wall-clock between consecutive completion ISR fires.
-ISR processing is ~13-16 us and not the gate. The hardware sits idle
-between URB completions and re-arms; this is the source of the
-~165 ms `avg_round` observed since R23.
+This document originally led with "HW re-arm latency case confirmed"
+and elaborated a NAK-retry-pacing causal story as if it had been
+proven. That overstates what the data actually shows. The measured
+finding is just that **`avg_gap` between consecutive bulk-IN
+completion ISR fires is ~11 ms while ISR processing is ~14 us**;
+the cause is not established. NAK retry pacing is one plausible
+hypothesis among several; the never-NAK experiment intended to
+test it (`r25-nonak-attempt.md`) crashed before producing clean
+data. Linux EHCI hosts achieve 677 KiB/s through the same Pico-class
+device on the same FS protocol, which proves the gap is a software
+or configuration difference somewhere; it is not a silicon
+limitation. The "implications" and "next concrete experiments"
+sections below have been rewritten to reflect this.
 
-The 165 ms / pipeline-depth-16 ~= 10.3 ms per URB matches the directly-
-measured `avg_gap` of 11 ms almost exactly.
+## Verdict (corrected)
+
+**Measured: ~11 ms wall-clock between consecutive bulk-IN ISR fires
+on the DWC2 channel; ISR processing itself is ~14 us.** The 165 ms
+`avg_round` observed since R23 is consistent with this gap once
+multiplied by the 16-deep pipeline (16 * 10.3 ms ~= 165 ms). The
+gap therefore lives between URB N completing on the wire and URB
+N+1's XFERCOMPL being raised by the DWC2 IP. **Why it sits at
+~11 ms is not yet established.**
 
 ## Headline numbers (bulk-IN ch=3 ep=0x82 type=2)
 
@@ -30,105 +45,88 @@ R25 bench).
 
 ## Interpretation
 
-ISR processing is fast (~15 us avg, 60 us max). Nothing in the IDF
-ISR code path is sitting on URBs.
+ISR processing is fast (~14 us avg, 60 us max). Nothing inside the
+IDF ISR sub-routines (`_buffer_done`, `_buffer_exec`, `_buffer_parse`,
+`_buffer_fill`) is sitting on URBs at the per-call timescale we
+sampled.
 
-The 11 ms gap between consecutive ISR fires is **the DWC2 channel
-itself** between completing one URB and reporting the next. With the
-ISR refilling the next slot in-ISR (per R25 refill-path-trace), this
-is the time from `usb_dwc_hal_chan_activate` (CHENA write) to the
-next XFERCOMPL interrupt firing.
+The 11 ms gap between consecutive ISR fires is the wall-clock time
+between URB N completing on the wire and DWC2 raising URB N+1's
+XFERCOMPL interrupt. With the ISR refilling the next slot in-ISR
+(per R25 refill-path-trace), this gap is `usb_dwc_hal_chan_activate`
+(CHENA write) to next-XFERCOMPL.
 
-Note the bimodality: `min_gap = 19 us` (some URBs complete back-to-
-back at wire speed) versus `avg_gap = 11000 us` (most URBs see a
-~11 ms gap before the next one fires). This rules out a uniform
-hardware delay; it is more consistent with **NAK retry pacing**.
+The bimodality `min_gap=19 us` vs `avg_gap=11000 us` rules out a
+uniform delay floor and instead suggests "channel completes
+quickly when the conditions are right, sits idle ~11 ms when they
+are not." Several mechanisms could produce that shape; we have
+not yet measured which one applies.
 
-### NAK retry hypothesis (most likely)
+### Why the 11 ms ceiling is not silicon-bound
 
-DWC2 hardware retries NAK'd IN tokens internally without raising a
-CPU interrupt (R25 source-reading findings, NAK not in
-`CHAN_INTRS_EN_MSK`). For a Pico CDC IN endpoint:
+Linux EHCI/OHCI hosts running USB-FS achieve hundreds of KiB/s on
+this same class of Pico CDC device. The R25 direct-USB baseline
+(`r25-direct-usb-baseline.md`) measured **677 KiB/s** through a
+direct USB connection on the same Linux host. The wire is FS,
+the device firmware is MicroPython CDC, the framing is identical.
+60x more data goes through the same wire-speed link.
 
-- When the Pico has data ready, it ACKs the IN token and DWC2
-  reports XFERCOMPL within ~110 us (matches `min_gap`).
-- When the Pico does not have data ready, it NAKs. DWC2 retries on
-  some hardware-defined interval. The observed ~11 ms average
-  suggests DWC2's NAK-retry interval for FS bulk is on the order of
-  10 ms.
+So whatever causes the 11 ms gap, it is not a property of FS bulk
+IN per se, nor of the USB protocol, nor of the Pico-class device.
+It is a property of the IDF host stack or the DWC2 register-level
+configuration as set up by IDF, and Linux's host driver does
+something different that gets ~60x more throughput. The DWC2
+IP block itself (Synopsys USB OTG) is widely deployed in Linux
+embedded systems running USB-FS host at full wire speed.
 
-The MicroPython CDC stack on the Pico fills its IN endpoint buffer
-on every `tud_task` call. The task runs at the asyncio loop tick rate
-which on RP2040 with a `busy_loop`-style fill cadence is around
-~1 ms, but the fill itself drains the device-side ringbuffer in
-chunks gated by USB-IRQ pacing. If the ring is empty when DWC2 polls,
-NAK retry waits ~10 ms before the next IN token, even if the Pico
-filled the buffer ~100 us after the first NAK.
+### Hypotheses for the 11 ms gap (NONE measured-confirmed)
 
-### Why does Linux as host reach 677 KiB/s on the same Pico?
+In rough order of plausibility from the data we have, but all
+unconfirmed:
 
-Linux EHCI/xHCI uses a different IN-token scheduling strategy. Specifically,
-the EHCI Periodic Schedule (also used opportunistically for bulk on
-some controllers) and xHCI's hardware ring scheduler issue IN tokens
-at a much tighter cadence than the DWC2 NAK-retry interval. EHCI's
-"async list" walks queue heads continuously without an internal
-NAK-retry timer; if a NAK comes back, the host immediately moves on
-to the next QH and revisits this one in the next async traversal,
-which is fast. So the same Pico that delivers 677 KiB/s under EHCI
-falls to 11 KiB/s under DWC2's NAK-retry-paced bulk IN.
+- **NAK retry pacing.** DWC2 hardware retries NAK'd IN tokens on
+  some hardware-defined interval. If the device's IN-endpoint
+  buffer is empty at poll time, NAK; channel sits ~10 ms before
+  re-issuing. Linux EHCI's async-list traversal would not have
+  this same pacing because it walks all queue heads before
+  re-visiting this one, naturally yielding shorter retry intervals.
+  Test attempted in `r25-nonak-attempt.md`; firmware crashed
+  before producing clean data.
+- **Frame-aligned bulk scheduling.** Even though bulk does not have
+  to be frame-aligned, IDF's hcd_dwc could be configured (via
+  `SCHED_INFO=0xFF` set defensively per the IDF source comment)
+  to align bulk on microframe boundaries, which on FS gives ~125 us
+  granularity but possibly stacks under FIFO pressure to longer
+  intervals.
+- **AHB FIFO contention with Wi-Fi.** ESP32-S3 shares AHB with
+  Wi-Fi DMA. If the USB-DWC block's RX FIFO drain depends on AHB
+  bandwidth and Wi-Fi is using it heavily, the channel stalls
+  waiting for AHB. Untested. Could explain bimodality.
+- **Scatter-gather descriptor-list end policy.** For bulk IDF
+  uses a 1-QTD (sometimes 2) list per URB with HOC. After HOC
+  the channel halts and must be reactivated. The 11 ms could be
+  the channel's halt-to-reactivate hardware interval, not NAK.
+  Linux EHCI does not use this pattern.
+- **HCFG / HFIR / HPRT register difference.** Some host-config
+  bit set differently between IDF and Linux that paces the
+  channel.
 
-This matches the asymmetry observed in R23 deep-dive: bulk-OUT was
-fast (271 us avg) because OUT does not NAK in our case (Pico is
-always ready to consume bytes), but bulk-IN takes ~165 ms because
-the Pico cannot always have data ready and the NAK retry interval
-is ~10 ms per attempt.
-
-### Why the bimodal gap
-
-Steady stream of fast IN responses → `min_gap=19 us`. Most of the
-time, NAK then ~10 ms wait then ACK → `avg_gap=11 ms`. Tail of bench
-inactivity → `max_gap` up to seconds. The distribution is not a
-single peak; it is a fast head plus a 10 ms-quantised tail.
+These are hypotheses for the next investigation. None has been
+proven or disproven by measurement so far.
 
 ## Implications
 
-The throughput ceiling at 11.2 KiB/s is a property of the **DWC2
-hardware NAK-retry interval interacting with the device's data-fill
-rate**. Software changes on either the host or device side are unlikely
-to lift it without addressing one of:
+We measured an 11 ms gap that accounts for the 11.2 KiB/s
+throughput. We have not established what causes the gap.
 
-1. The device's USB stack so it never NAKs (i.e., always has data
-   ready when polled). Possible for some devices, not for the general
-   case where the device application code sets the data rate.
-2. The host's NAK-retry interval. The DWC2 OTG IP exposes some control
-   over PING and NAK-retry counters via HCCHARi/HCSPLT/HCINTMSK
-   (depending on the speed and endpoint type), but the retry
-   *interval* for FS bulk IN does not appear to be software-tunable
-   in a portable way - the IP block decides when to issue the next
-   IN token after a NAK.
-3. A different host stack that can pre-pipeline IN tokens at a
-   tighter cadence: EHCI/xHCI on Linux, P4 HighSpeed USB phy +
-   SuperSpeed scheduler if applicable, or a hand-rolled scheduler
-   that issues "phantom" IN attempts via a frame-list timer rather
-   than waiting for NAK retry.
+The gap is **not** a silicon limit: Linux EHCI hosts the same
+class of Pico device at 677 KiB/s on the same FS bus. The 60x
+slowdown is a software difference somewhere in the IDF host stack
+or its DWC2 register configuration.
 
-For our use case (USB/IP forwarding from a Pico DUT for POD test
-support), the practical pivot points are:
-
-- Accept the 11.2 KiB/s ceiling. CDC at this rate is usable for raw-
-  REPL command transport (where a 30/30 mpremote run completes in
-  9 seconds even at the floor), but breaks down for `mpremote fs
-  cp` of larger files. We have a 60x throughput budget gap to fill.
-- Move to ESP32-P4 with HighSpeed USB phy (480 Mbps wire, plus
-  EHCI-style scheduler in the P4's UTMI controller). Eliminates the
-  FS NAK-retry pacing entirely.
-- Run the IDF host stack at a different polling cadence by manually
-  driving the channel from a high-priority task instead of waiting
-  for hardware NAK retry. This would require a custom HCD driver
-  built on top of `hal/usb_dwc_hal.h` that re-arms the channel
-  proactively on a frame-list-based schedule. Significant code
-  effort, uncertain payoff because the underlying NAK behavior is
-  spec'd by USB.
+This investigation is **not concluded**. The next round needs to
+identify the actual mechanism (or rule out the listed hypotheses
+one at a time) before a fix can be designed.
 
 ## Files modified
 
@@ -288,25 +286,71 @@ bufsize=8192   rate=7638    kib_s=7.5
 bufsize=16384  rate=7340    kib_s=7.2
 ```
 
-## Next concrete experiments
+## Next concrete experiments (none proves "accept the ceiling")
 
-1. **Confirm NAK pacing hypothesis with a never-NAK device.** Run
-   the same bench against a Pico firmware that pre-fills the IN
-   endpoint with a buffered stream so it never has to NAK. If
-   `avg_gap` drops to <1 ms, NAK pacing is confirmed and the
-   Pico-side fix is the lever; if it does not, the gap is
-   intrinsic to DWC2 even on always-ready devices.
+The investigation is open. Proposed steps in approximate priority
+order; the first unconfirmed-hypothesis to rule in or out should
+go first:
 
-2. **Read DWC2 OTG documentation for FS bulk-IN NAK retry interval.**
-   The Synopsys DWC OTG databook may document a software-tunable
-   NAK-retry interval (HCCHARi.MC, HCFG, etc.). Worth a focused
-   review session.
+1. **Compare Linux's EHCI/DWC2 host driver to IDF's `hcd_dwc.c`.**
+   Linux is open source. The DWC2 IP is the same family used in
+   `drivers/usb/dwc2/` (host mode) on the kernel side. Walking the
+   schedule semantics in `dwc2_hsotg_irq` and the URB queue
+   management in `dwc2_handle_chan_done` against IDF's
+   `_intr_hdlr_chan` and `_buffer_*` functions should expose any
+   register-config or scheduler-walking difference. EHCI hosts
+   (`drivers/usb/host/ehci-q.c`) are also worth comparing for the
+   broader async-list pattern.
 
-3. **If NAK pacing is confirmed and not tunable, accept the ceiling.**
-   Document the conclusion and pivot scope to ESP32-P4 (HS USB,
-   different host stack lineage) for any future throughput
-   requirement.
+2. **Add intermediate timestamps inside the ISR sub-routines.**
+   Stage B measured the whole-ISR span. Splitting the timestamp
+   between `_buffer_done`, `_buffer_exec` (channel activation),
+   `_buffer_parse`, `_buffer_fill` would confirm where time goes
+   inside the ISR. Probably negligible (already saw 14 us total)
+   but cheap to do.
 
-4. **Stage B trace remains in place.** The patch is small (76 lines)
-   and isolated to two files. Useful infrastructure to leave on for
-   ongoing comparison as we test alternatives. To revert see above.
+3. **Add register dumps at gap boundaries.** Snapshot HCCHARn,
+   HCINTn, HCTSIZn, HFNUM, HPRT, HFIR, HCFG into the trace ring
+   on entry to `_intr_hdlr_chan`. During the 11 ms idle gap the
+   channel state should reveal whether the channel is halted-
+   waiting-for-reactivate, active-waiting-for-NAK-retry, or
+   active-but-suspended. Each register state implies a different
+   underlying mechanism.
+
+4. **Try `CONFIG_USB_HOST_HW_BUFFER_BIAS_IN`.** This kconfig knob
+   was listed in the original plan (step 2) but never run. Bias
+   gives the IN FIFO 600 bytes vs 408 in the balanced default.
+   If FIFO pressure is gating the channel, this should help.
+
+5. **Search Espressif issue tracker / IDF git log for FS bulk-IN
+   throughput reports.** Filed bugs and fix attempts on this
+   exact problem upstream are direct prior art. Possible repository
+   keywords: "USB host throughput", "bulk-IN NAK", "FS host
+   slow", "DWC2 host bulk".
+
+6. **Read the ESP32-S3 TRM USB-OTG host section** for any host-
+   config register where the IDF default may be conservative
+   (HCFG.PerSchedEna, HFIR, HPTXSTS, HNPTXSTS).
+
+7. **Compare to TinyUSB-host on the same ESP32-S3.** The
+   `andrewleech/micropython#7` `USBHOST` variant uses TinyUSB host
+   on the same DWC2 silicon. If TinyUSB also reaches ~11 KiB/s
+   bulk-IN, the issue is the silicon-or-the-shared-DWC2-config.
+   If TinyUSB reaches Linux-class throughput, the issue is in IDF
+   `hcd_dwc.c` specifically and the comparison localises the
+   difference.
+
+8. **USB protocol analyzer trace** during the bench, if a hardware
+   analyzer is available, to see what is on the wire during the
+   11 ms gap. NAKs? SOFs? Idle? This is the most direct way to
+   distinguish "device NAKs and host waits" from "host issues no
+   token at all".
+
+The stage B ring-buffer infrastructure can be reused for steps 2,
+3 without further IDF changes beyond inserting more timestamps.
+
+## Stage B trace status
+
+The patch is small (76 lines) and isolated to two files. Useful
+as infrastructure for steps 2 and 3 above. Revert command in the
+"Files modified" section.

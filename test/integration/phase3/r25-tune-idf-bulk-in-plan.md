@@ -1,5 +1,35 @@
 # R25 plan: tune IDF bulk-IN throughput on R23 main
 
+## Correction (2026-05-03)
+
+Across the multiple "Result" subsections below the framing crept
+toward "the 165 ms is internal to the IDF host stack and the
+remaining hypotheses are X, Y, Z" with the implicit endpoint that
+once one ruled in, the answer would be silicon. Stage B
+(`r25-isr-instrumentation.md`) measured the inter-ISR-fire gap
+directly at 11 ms with ISR processing 14 us, and the followup
+docs began describing the cause as "HW re-arm latency confirmed"
+or "DWC2 NAK-retry pacing most likely". None of those mechanisms
+has been measurement-confirmed. The never-NAK experiment that
+would have tested NAK-retry crashed before producing clean data
+(`r25-nonak-attempt.md`).
+
+The hard data we have:
+
+- 11 ms gap between consecutive bulk-IN ISR fires on the DWC2
+  channel.
+- ISR processing 14 us; not the gate.
+- min_gap 19 us; the channel CAN fire back-to-back.
+- Linux EHCI achieves 677 KiB/s through the same Pico-class device
+  on the same FS bus (`r25-direct-usb-baseline.md`).
+
+That last point rules out "silicon-limited"; the gap is a software
+or DWC2-config difference somewhere. R25 is NOT concluded. The
+TinyUSB-on-same-DWC2 throughput is also unmeasured, so the
+"pivot does not lift the IN ceiling" framing in the original
+"Out of scope" section is unsupported and has been corrected
+below.
+
 ## Context
 
 R23 deep-dive (`r23-deep-dive-findings.md`) confirmed Case C: IDF host
@@ -147,19 +177,13 @@ run-to-run noise. Throughput unchanged at 11.2 KiB/s.
 **The 165 ms is NOT user-task wakeup latency.** Even with the worker
 at the second-highest priority on core 1, callback delivery did not
 shorten. The R25 refill-path-trace inference that "task-wakeup is
-slow" was wrong. The 165 ms must be inside the IDF host stack
-between `usb_host_transfer_submit` accepting the URB and IDF
-firing the pipe callback into our worker.
-
-Re-reading the source: when the HCD ISR runs (`_intr_hdlr_chan` at
-`hcd_dwc.c:841`) and signals `event_sem` via `_unblock_client(in_isr=true)`
-(`usb_host.c:197`), the IDF DOES pipeline URB N+1 in-ISR. So the HW
-pipeline is full. But `t_complete` (entry to our `transfer_done_cb`)
-is not the wire-completion timestamp; it's the user-task time when
-`_handle_pending_ep` finally runs. If THAT timestamp is in fact close
-to ISR-fire time at prio=20, then the 165 ms must be between HW wire
-completion and ISR fire - which means DWC2 itself or the HCD path
-between ISR-decode and `_intr_hdlr_chan` is sitting on completions.
+slow" was wrong. The 165 ms is therefore either upstream of the ISR
+(between URB N completing on the wire and DWC2 raising URB N+1's
+XFERCOMPL interrupt) or somewhere else in the IDF chain not yet
+measured. Stage B (`r25-isr-instrumentation.md`) measured the
+inter-ISR-fire gap directly and confirmed it sits at ~11 ms,
+narrowing the gap location to "between wire completion and ISR
+fire" but leaving the cause unestablished.
 
 Side effects worth flagging:
 
@@ -327,25 +351,118 @@ if the lower API delivers meaningful pipelining win.
 
 Custom HAL-level driver atop `hal/usbh_hal.h` with direct DWC2 channel
 programming. Spec says DWC2 has 8 host channels; using them directly
-gives full pipelining control. This is a significant effort and only
-warranted if the IDF stack truly cannot pipeline at any of its layers.
+gives full pipelining control. Significant effort and only
+warranted if the IDF stack proves it cannot be tuned via lower-effort
+levers above.
+
+## Stage B (ISR-side timing): result
+
+See `r25-isr-instrumentation.md` for the full doc. Headline:
+
+- avg_proc (ISR processing): 14 us (not the gate)
+- avg_gap (between consecutive bulk-IN ISR fires): 11 ms
+- min_gap: 19 us (channel CAN fire back-to-back)
+- ISR refill is in-ISR per `r25-refill-path-trace.md`, so the gap
+  is wall-clock between URB N completing on the wire and DWC2
+  raising URB N+1's XFERCOMPL interrupt.
+
+The original Stage B writeup framed this as "HW re-arm latency
+case confirmed" with a NAK-retry causal story. That overstated
+what the data showed. The 11 ms gap is measured; its mechanism is
+not. The corrected writeup lists five plausible mechanisms (NAK
+retry pacing, frame-aligned scheduling, AHB FIFO contention with
+Wi-Fi, scatter-gather descriptor end policy, HCFG/HFIR/HPRT
+register difference vs Linux), none of which has been measurement-
+confirmed.
+
+## Never-NAK experiment: result
+
+See `r25-nonak-attempt.md`. Continuous-fill bench crashed the ESP32
+firmware with a `LoadProhibited` panic in `pbuf_free` from the lwIP
+TCP recv path called via our `usbip_server.c read_exact`, after
+~5 seconds. Three partial dwc_isr summary windows landed before
+the crash, contaminated by a 415 ms raw-REPL handshake outlier;
+not enough to confirm or refute the NAK-retry hypothesis. The
+firmware crash is a separate latent bug filed as R26.
 
 ## Out of scope
 
-- The R24 fs-cp deadlock. That is a TinyUSB-only failure mode on the
-  r24-wip branch; R23 IDF main runs fs cp and cdc_throughput.py
-  cleanly (the R23 deep-dive bench just put 900 IN URBs through R23
-  without incident). The R24 deadlock only matters if we ever resume
-  the TinyUSB pivot, which is now weakly motivated since TinyUSB
-  gotcha #2 (`tuh_edpt_xfer` one-in-flight per (dev, ep)) implies
-  TinyUSB has the same per-pipe serialisation IDF appears to have. The
-  pivot's only remaining argument is upstream-MicroPython alignment,
-  not bandwidth.
-- Any TinyUSB pivot work.
+- The R24 fs-cp deadlock. That is a TinyUSB-only failure mode on
+  the r24-wip branch; R23 IDF main runs fs cp and cdc_throughput.py
+  cleanly. The R24 deadlock only matters if we ever resume the
+  TinyUSB pivot.
+- TinyUSB throughput as a separate question. Note: the original
+  draft of this section asserted "TinyUSB has the same per-pipe
+  serialisation IDF appears to have, the pivot does not lift the
+  IN ceiling either". That assertion is unsupported. TinyUSB host
+  on this same DWC2 silicon has not been benched; the
+  `andrewleech/micropython#7` USBHOST variant is a candidate for
+  comparison (see step 7 in "Open next steps" below). What is
+  known is that the TinyUSB user-space API constraint
+  (`tuh_edpt_xfer` one-in-flight per (dev, ep)) is at the
+  application-API layer and would also need application-level
+  workarounds, but the underlying hardware-level pipelining
+  characteristic of TinyUSB-as-host is unmeasured.
 - Architectural code changes on `src/c_modules/usbip/` or
-  `src/c_modules/usbhost/usbhost.c` before the kconfig + priority +
-  tick experiments are exhausted. Step 6 (hcd_* API) is the first
-  step that justifies code changes.
+  `src/c_modules/usbhost/usbhost.c` before the kconfig + register
+  comparison + ISR-internal-timing experiments below are
+  exhausted.
+
+## Open next steps (post-stage-B)
+
+The investigation is open. Listed in approximate priority order:
+
+1. **Compare Linux's DWC2 host driver vs IDF's `hcd_dwc.c` for the
+   schedule-walking semantics.** Linux's `drivers/usb/dwc2/` host
+   mode runs the same Synopsys USB OTG IP block at FS wire speed
+   with diverse devices. Direct comparison of `dwc2_handle_chan_done`
+   and channel re-arm against IDF's `_intr_hdlr_chan` should
+   surface any register-config or scheduler-walking difference.
+   Pure source-reading task; no hardware needed. EHCI's
+   `drivers/usb/host/ehci-q.c` async-list traversal is also useful
+   prior art.
+
+2. **Add intermediate timestamps inside the ISR sub-routines.**
+   Stage B measured the whole-ISR span. Splitting timestamps
+   between `_buffer_done`, `_buffer_exec`, `_buffer_parse`,
+   `_buffer_fill` would confirm where time goes inside the ISR.
+   Reuses the stage B ring-buffer infrastructure with no further
+   IDF surface added.
+
+3. **Add register snapshots at gap boundaries.** Capture HCCHARn,
+   HCINTn, HCTSIZn, HFNUM, HPRT, HFIR, HCFG into the trace ring
+   on entry to `_intr_hdlr_chan`. The channel state during the
+   11 ms idle should distinguish halted-waiting-for-reactivate
+   from active-waiting-for-NAK-retry from active-but-suspended.
+
+4. **Try `CONFIG_USB_HOST_HW_BUFFER_BIAS_IN`.** Listed in step 2
+   of this plan but never run. Bias gives the IN FIFO 600 bytes
+   vs 408 in the balanced default. If FIFO pressure is gating
+   the channel, this should help.
+
+5. **Search Espressif issue tracker / IDF git log for FS bulk-IN
+   throughput reports.** Filed bugs and fix attempts on this exact
+   problem upstream are direct prior art. Keywords: "USB host
+   throughput", "bulk-IN NAK", "FS host slow", "DWC2 host bulk".
+
+6. **Read the ESP32-S3 TRM USB-OTG host section** for any host-
+   config register where the IDF default may be conservative
+   (HCFG.PerSchedEna, HFIR, HPTXSTS, HNPTXSTS).
+
+7. **Compare to TinyUSB-host on the same ESP32-S3.** The
+   `andrewleech/micropython#7` USBHOST variant uses TinyUSB host
+   on the same DWC2 silicon. If TinyUSB also reaches ~11 KiB/s
+   bulk-IN, the issue is shared-DWC2-config (and probably also
+   present in a TinyUSB pivot). If TinyUSB reaches Linux-class
+   throughput, the issue is in IDF `hcd_dwc.c` specifically and
+   the comparison localises the difference. This bench would also
+   resolve the open question about whether the R24 pivot has any
+   throughput merit.
+
+8. **USB protocol analyzer trace** during the bench, if a hardware
+   analyzer is available, to see what is on the wire during the
+   11 ms gap. NAKs? SOFs? Idle? Most direct way to distinguish
+   "device NAKs and host waits" from "host issues no token at all".
 
 ## Exit criteria
 

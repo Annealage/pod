@@ -1,5 +1,20 @@
 # R25 refill-path trace: where the ISR refills `pending_urb_tailq` slots
 
+## Correction (2026-05-03)
+
+The "Implication for the 165 ms" section near the bottom proposes
+that the 165 ms `avg_round` is user-task wakeup latency. That
+hypothesis was tested in R25 step 3 by bumping
+`USBHOST_WORKER_TASK_PRIORITY` from 9 to 20 and **refuted**:
+`avg_round` did not move materially (`r25-tune-idf-bulk-in-plan.md`
+step 3 result, commit `4519860`). The HW pipeline-fullness finding
+in this doc's main body remains correct, but the speculative
+implication at the bottom is contradicted by the subsequent
+measurement and should not be taken as a finding. Stage B
+(`r25-isr-instrumentation.md`) then narrowed the gap to 11 ms
+between consecutive bulk-IN ISR fires; the cause is not yet
+established.
+
 ## Verdict
 
 **Task-wake hypothesis REFUTED. The refill is in-ISR, synchronous, and

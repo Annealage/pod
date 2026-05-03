@@ -1,5 +1,18 @@
 # R25 direct-USB baseline: 677 KiB/s
 
+## Correction (2026-05-03)
+
+The "Leading hypothesis and next instrumentation" section near the
+bottom of this doc was the next step planned at the time of writing
+(TCP `lwip_writev` per-URB cost). That hypothesis was tested in
+`r25-progress.log` (tcp_timing entry, commit `a2e413f`) and **ruled
+out**: `avg_writev = 482 us`, `avg_cb2tx = 121 us`, both well below
+the 11 ms inter-URB envelope. The TCP/responder path is not the
+gate. The investigation has continued past that step. See
+`r25-isr-instrumentation.md` for the current state. The 60x gap
+documented in this baseline is not yet causally explained; the
+investigation is open.
+
 ## Result
 
 `cdc_throughput.py read_test` against a directly-connected MicroPython

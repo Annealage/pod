@@ -1,5 +1,20 @@
 # R25 NAK-retry hypothesis test: ESP32 firmware crashed under continuous load
 
+## Correction (2026-05-03)
+
+Suggestion 4 of the original "Suggested next steps" section
+proposed "accept the stage B verdict as final ... throughput
+ceiling is intrinsic to FS bulk-IN under DWC2 on S3, and any
+future throughput requirement needs a board change". That
+overstates what is known. The 11 ms gap is measured but its cause
+is not. Linux EHCI hosts the same Pico-class device at 677 KiB/s
+on the same FS bus per `r25-direct-usb-baseline.md`, which proves
+the throughput is not a silicon limit; the IDF host stack or its
+DWC2 register configuration differs from Linux's in a way that
+costs 60x. The "accept as final" step is removed below; the
+investigation is open and the next concrete steps are listed in
+`r25-isr-instrumentation.md` (corrected version).
+
 ## Verdict
 
 **Inconclusive on the NAK question due to firmware crash.** The
@@ -259,14 +274,14 @@ UART log: `/tmp/r25-nonak-uart.log`
    tunable, the experiment can be run by lowering the retry interval
    on the host side instead of trying to make the device never NAK.
 
-4. **Accept the stage B verdict as final.** The 11 ms `avg_gap` is
-   real, ISR processing isn't the gate, and the 60x slowdown vs
-   direct-USB is well-measured. Whether the underlying mechanism
-   is exactly NAK retry or some other DWC2-as-host scheduling
-   peculiarity, the practical implication is the same: throughput
-   ceiling is intrinsic to FS bulk-IN under DWC2 on S3, and any
-   future throughput requirement needs a board change (P4 HS or
-   similar).
+4. **Continue the investigation.** Stage B measured `avg_gap=11 ms`
+   between bulk-IN ISR fires; what causes the gap is not yet
+   established. The "accept as final" framing in an earlier draft
+   was wrong: Linux EHCI achieves 677 KiB/s through this same
+   Pico-class device on the same FS bus, so the gap is a software
+   or DWC2-config difference, not silicon. See
+   `r25-isr-instrumentation.md` for the prioritised list of next
+   experiments.
 
 ## Project status after this experiment
 
