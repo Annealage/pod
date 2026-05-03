@@ -133,6 +133,46 @@ tick was the culprit.
 
 Cost: more tick interrupts; minor CPU overhead. Worth trying.
 
+#### Result (2026-05-03): hypothesis refuted
+
+`CONFIG_FREERTOS_HZ=1000` set in
+`src/boards/ESP32_S3_ANNEALAGE_POD/sdkconfig.board`. Build clean, no errors
+from any subsystem requiring 100 Hz. Boot was clean.
+
+`cdc_throughput.py` numbers virtually unchanged from R23 baseline.
+Comparison at n=800 (steady-state window before run-to-run anomaly):
+
+| Metric | HZ=100 baseline | HZ=1000 | Delta |
+|---|---|---|---|
+| avg_submit | 54 us | 50 us | -7% |
+| avg_round (combined) | 157,064 us | 160,360 us | +2% |
+| min_round | 108 us | 108 us | 0% |
+| max_round | 389,101 us | 505,014 us | +30% (noise) |
+| OUT avg | 273 us | 259 us | -5% |
+| IN avg | 164,786 us | 167,685 us | +2% |
+
+Throughput at bufsize=256: 11.2 KiB/s -> 11.2 KiB/s. Identical.
+Larger bufsizes regressed slightly (8192: 8.2 -> 7.2 KiB/s, 16384:
+8.0 -> 6.5 KiB/s) but the 256-byte case is what matters for the
+URB-rate ceiling and that is unchanged.
+
+The tick rate is NOT the IDF host-stack bulk-IN serialiser. The
+16-URBs × 10 ms tick = 160 ms ~ observed 165 ms coincidence was just
+that, a coincidence. The IDF host task either does not yield to the
+scheduler between URB completions, or yields to a non-tick-aligned
+event (semaphore give, interrupt, queue post) so tick rate does not
+gate it.
+
+`CONFIG_FREERTOS_HZ=1000` retained on main as a conservative default
+for latency-sensitive code; the cost (more tick interrupts) is small
+and the change does not regress throughput on the 256-byte case.
+
+Next hypothesis to test: step 3 (host task priority). If the host
+task is at default priority (~5) and competing with TCP/lwIP/Wi-Fi
+tasks at higher priority, the wake-to-run latency between URB
+completion and the next `_buffer_fill` could be the limiter. Bump
+the host-client task priority to 18-20.
+
 ### Step 5: pin the IDF host task to a less contended core
 
 Our `usbhost.c` runs on which core? The IDF host task runs on which

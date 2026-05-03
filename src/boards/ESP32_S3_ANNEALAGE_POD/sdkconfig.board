@@ -54,3 +54,9 @@ CONFIG_ESP_WIFI_TASK_CORE_ID=0
 # Enable mDNS responder component (used by annealage_pod.boot in later phases).
 # The component itself is only linked when MicroPython references it; we
 # do not need a Kconfig flag here.
+
+# R25 step 1: bump FreeRTOS tick to 1 kHz to test the hypothesis that
+# IDF host-stack bulk-IN latency is tick-bound (16-deep pipeline x 10 ms
+# tick at HZ=100 ~ 160 ms ~ observed 165 ms avg_round). At HZ=1000 the
+# per-yield delay floor drops from 10 ms to 1 ms.
+CONFIG_FREERTOS_HZ=1000

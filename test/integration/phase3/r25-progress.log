@@ -1,0 +1,1 @@
+2026-05-03T00:01:30Z step1 commit=pending hz=1000 build=pass flash=pass throughput_256=11.2KiB/s avg_submit=50us avg_round=160360us min_round=108us max_round=505014us IN_avg=167685us OUT_avg=259us n=800 verdict=hypothesis_refuted next=step3_host_task_priority
