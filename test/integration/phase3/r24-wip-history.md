@@ -1,17 +1,24 @@
 # R24 (TinyUSB host pivot) — work history
 
-> **Pivot rationale weakened (2026-05-03, per `r23-deep-dive-findings.md`):**
-> µs-resolution IDF timing confirmed Case C: avg_round=165 ms for bulk-IN
-> vs 271 µs for bulk-OUT, with min_round at the 110 µs wire floor. IDF is
-> the bottleneck for bulk-IN. BUT - TinyUSB gotcha #2 below
-> (`tuh_edpt_xfer` one-in-flight per (dev, ep)) is exactly the same
-> serialisation constraint. So the TinyUSB pivot does not lift the IN
-> ceiling either; bandwidth is no longer a reason to pivot. Pivot's only
-> remaining argument is upstream-MicroPython alignment.
+> **Status update (2026-05-03):** µs-resolution IDF timing measured
+> bulk-IN avg_round=165 ms vs OUT 271 µs (R23 deep-dive); R25 stage B
+> narrowed the gap to 11 ms wall-clock between consecutive bulk-IN
+> ISR fires (`r25-isr-instrumentation.md`). The cause is not yet
+> established. Linux EHCI achieves 677 KiB/s through the same
+> Pico-class device on the same FS bus
+> (`r25-direct-usb-baseline.md`), so the gap is not a silicon limit.
 >
-> The R24 fs-cp D-state hang is a TinyUSB-only failure mode (R23 IDF main
-> runs the same workflows cleanly), so it is not a blocker for the main
-> branch. R25 stays on IDF and tunes the host stack: see
+> An earlier draft of this banner asserted "TinyUSB has the same
+> per-pipe serialisation IDF appears to have, the pivot does not lift
+> the IN ceiling either" based on TinyUSB gotcha #2 below. That
+> extrapolated from a TinyUSB user-API constraint to DWC2 hardware
+> behaviour and is unsupported. TinyUSB-host throughput on the same
+> DWC2 silicon has not been measured; comparing TinyUSB-host vs
+> IDF-host on this silicon is now an open R25 next step.
+>
+> The R24 fs-cp D-state hang is a TinyUSB-only failure mode (R23 IDF
+> main runs the same workflows cleanly), so it is not a blocker for
+> the main branch. R25 stays on IDF and tunes the host stack:
 > `r25-tune-idf-bulk-in-plan.md`.
 
 This branch holds an attempt to migrate `src/c_modules/usbhost/usbhost.c`
