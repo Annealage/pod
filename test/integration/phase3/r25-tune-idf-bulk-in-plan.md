@@ -173,6 +173,63 @@ tasks at higher priority, the wake-to-run latency between URB
 completion and the next `_buffer_fill` could be the limiter. Bump
 the host-client task priority to 18-20.
 
+### Side investigation: TCP RET_SUBMIT path timing
+
+Triggered by the direct-USB baseline (`r25-direct-usb-baseline.md`)
+which showed 677 KiB/s direct vs 11.2 KiB/s via ESP32 (60x). Per-URB
+instrumentation in `responder_task` measured both:
+
+- `avg_writev` = wallclock time spent in `lwip_writev` (per writev call).
+- `avg_cb2tx` = gap between `lane_completion_cb` (`u->t_cb`) and the
+  pre-writev timestamp (per URB that sends RET_SUBMIT).
+
+Both the verbose-gated `t_cb` capture in `lane_completion_cb` was
+made unconditional (one extra `esp_timer_get_time()` per URB; cost
+negligible).
+
+#### Result (2026-05-03): both gates well under 1 ms
+
+Steady-state at n=300 (clean window before bench bufsize transition):
+
+| Metric | avg | min | max |
+|---|---|---|---|
+| writev (per call) | 482 us | 388 us | 1000 us |
+| cb2tx (per URB)   | 121 us | 83 us  | 813 us  |
+
+Total ESP32-side work between IDF callback and bytes-on-wire is
+~600 us per URB. Throughput at 11.2 KiB/s = 88 URB/s implies
+inter-URB time of 11.4 ms. So the URBs are NOT arriving back-to-back
+at the responder; they arrive in bursts with ~10 ms gaps in between.
+
+Verdict: branch C of the original interpretation - **the gate is
+NOT the responder or TCP send**. Combined with R23 deep-dive
+finding (`avg_round = 165 ms` IDF submit-to-callback for bulk-IN),
+the 10 ms-per-URB cost lives **inside the IDF host stack between
+`usb_host_transfer_submit` accepting the URB and the IDF firing
+our completion callback**. This is consistent with the R25 source-
+reading findings (`r25-idf-source-findings.md`): either DWC2
+per-URB channel-halt-to-reactivate, or task-wakeup latency between
+the HCD ISR (which gives `event_sem`) and `_handle_pending_ep`
+running in our task context.
+
+Critically: this measurement does NOT disambiguate between those
+two sub-causes. It only confirms that everything from
+`lane_completion_cb` onward is fast. To split the IDF-internal
+gap requires patching the IDF source (or using a lower API like
+`hcd_*` to bypass `usb_host_*` and measure separately).
+
+Implications for the followup steps:
+
+- Step 3 (bump host task priority) remains the cheapest test.
+  If the 165 ms drops, task-wakeup is the IDF-internal gate.
+- Step 6 (descend to `hcd_*` API) is justified if step 3 fails.
+- Step 7 (custom HAL driver) only if 6 also fails.
+
+The instrumentation in `usbip_server.c` is left in place. It is
+unconditional (not gated on `s_urb_verbose`) so it logs during
+every bench. Cost: 4 `esp_timer_get_time()` calls per URB and one
+ESP_LOGI per 100 URBs.
+
 ### Step 5: pin the IDF host task to a less contended core
 
 Our `usbhost.c` runs on which core? The IDF host task runs on which
