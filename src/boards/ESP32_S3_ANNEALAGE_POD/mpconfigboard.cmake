@@ -23,28 +23,46 @@ set(SDKCONFIG_DEFAULTS
 #       tusb_config.h (commit c6d91f044).
 #   (2) mp_usbh.h forward-decl ordering of machine_usbh_*_obj_t
 #       typedefs (commit acb3c4645).
-# The previously suspected blocker (3), where usbhost.c was reported
-# to fail its second (micropython.elf) compile because
-# traceISR_EXIT_TO_SCHEDULER was not visible at osal_semaphore_post
-# parse time, did not reproduce against this submodule pin in P3.9.
-# Both compiles of usbhost.c (one into __idf_main, one into
-# micropython.elf) now build clean and the firmware boots, enumerates
-# the Pico DUT and pyocd reset --target rp2040 completes via the
-# attached synthetic CMSIS-DAP. If the macro-scope bug recurs (e.g.
-# after an IDF or TinyUSB submodule bump), the slaveio.c precedent at
-# src/c_modules/slaveio/slaveio.c lines 48-59 documents the pre-define
-# workaround.
+# R27: under TinyUSB host (replacing IDF host on this branch) the
+# traceISR_EXIT_TO_SCHEDULER macro-visibility bug DOES reproduce in
+# the micropython.elf secondary build (which omits -DESP_PLATFORM):
+# osal_freertos.h's osal_semaphore_post() expands portYIELD_FROM_ISR()
+# into traceISR_EXIT_TO_SCHEDULER() at parse time. usbhost.c
+# pre-defines the macro to a no-op before any FreeRTOS include; see
+# src/c_modules/slaveio/slaveio.c lines 48-59 for the same pattern.
+# (On main with the IDF host backend the bug did not surface because
+# usbhost.c did not include any TinyUSB headers; on this branch the
+# inclusion of host/usbh.h pulls osal_freertos.h transitively.)
 set(MICROPY_HW_USB_HOST 1)
 list(APPEND MICROPY_DEF_BOARD MICROPY_HW_USB_HOST=1)
 
-# Disable TinyUSB class drivers. We don't use machine.USBHost's bundled
-# CDC/MSC/HID class drivers; our usbip backend forwards raw URBs. These
-# defines must reach BOTH the QSTR extractor and the compilation units
-# (machine_usb_host.c, mp_usbh.c) — without them the QSTR extractor
-# sees CFG_TUH_MSC=0 (default in qstr preprocessing context) but the
-# compiler sees CFG_TUH_MSC=2 (TinyUSB default), causing
-# 'MP_QSTR_USBH_MSC undeclared' build errors. R24 work first.
+# Disable TinyUSB class drivers so they don't claim DUT interfaces.
+# We forward raw URBs via usbhost.c; the class drivers (CDC/MSC/HID)
+# are not used.  These definitions must reach ALL compilation units
+# including machine_usb_host.c (extmod) and mp_usbh.c (shared/tinyusb),
+# not just usbhost.c.  MICROPY_DEF_BOARD is passed to
+# target_compile_definitions(${MICROPY_TARGET} PUBLIC ...) in
+# esp32_common.cmake which covers the __idf_main component that
+# compiles those files. Without these the QSTR extractor sees
+# CFG_TUH_MSC=0 but the compiler sees CFG_TUH_MSC=2 (TinyUSB default),
+# causing 'MP_QSTR_USBH_MSC undeclared' build errors.
 list(APPEND MICROPY_DEF_BOARD CFG_TUH_CDC=0 CFG_TUH_MSC=0 CFG_TUH_HID=0)
+
+# Enable the generic endpoint-transfer API (tuh_edpt_open / tuh_edpt_xfer).
+# Without this, usbh_edpt_xfer_with_callback (usbh.c:1015 in this TinyUSB
+# pin) silently drops the user's complete_cb (lines 1017-1018:
+# `(void) complete_cb;`), so bulk/interrupt transfers complete in
+# TinyUSB but never call back to our responder. URBs sit in our
+# inflight list, kernel times out, cdc-acm cancels everything with
+# -ECONNRESET, TTY is removed by kernel.
+# This is gotcha #1 from r24-wip-history.md - non-negotiable for raw-URB
+# forwarding via tuh_edpt_xfer.
+list(APPEND MICROPY_DEF_BOARD CFG_TUH_API_EDPT_XFER=1)
+
+# R27 fs-cp deadlock trace (Phase 1 step 3). Enables the per-URB
+# sub:/cb:/synth:/watchdog: log lines in usbhost.c. Default off in
+# production; uncomment the next line to enable the trace overhead.
+# list(APPEND MICROPY_DEF_BOARD R27_DEADLOCK_TRACE=1)
 
 # Freeze the annealage_pod Python package into the firmware image.
 set(MICROPY_FROZEN_MANIFEST ${MICROPY_BOARD_DIR}/manifest.py)

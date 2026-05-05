@@ -75,10 +75,19 @@ static const char *TAG = "usbip";
 #define USBIP_RESPONDER_TASK_PRIORITY 11
 
 /* Pipeline depth per (ep,dir) lane: max URBs in flight concurrently.
- * Step 3 sets depth=1 (bisect-safe; functionally equivalent to current).
- * Step 4 opens to 16 for the throughput gain. */
+ * R27: depth=1 is required when usbhost.c is the TinyUSB backend
+ * (gotcha #2 from r24-wip-history.md: tuh_edpt_xfer allows only one
+ * transfer in flight per (dev,ep); subsequent submits while busy
+ * return false. Pipeline depth at the lane layer must be 1 to avoid
+ * a flood of `tuh_edpt_xfer rejected` returns under load). On main
+ * with the IDF host backend depth was 16 (chosen for throughput);
+ * the R23 deep-dive measurement of avg_depth=13-15 confirmed the
+ * lane queue did fill at depth=16. With TinyUSB the floor is 1
+ * regardless of throughput goals; multi-URB pipelining must be
+ * achieved by other means (multiple EPs, hardware-side scheduling
+ * tweaks, or eventually a class-driver-based forwarder). */
 #ifndef USBIP_PIPELINE_DEPTH
-#define USBIP_PIPELINE_DEPTH 16
+#define USBIP_PIPELINE_DEPTH 1
 #endif
 
 /* R23 step 2: max URBs coalesced into one lwip_writev call.

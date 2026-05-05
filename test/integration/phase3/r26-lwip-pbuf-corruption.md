@@ -252,3 +252,171 @@ this bug; the crash is in IDF lwIP code, not in the patched
 Open. Backlog. R25 throughput investigation continues independently
 on the assumption that this bug does not perturb the chunked-bench
 numbers.
+
+## Origin diagnosis (2026-05-05)
+
+The R27 TinyUSB-pivot plan needs to know whether this bug
+disappears with the IDF host stack (treat as IDF-induced; defer
+to a frozen `r25-idf-backend` branch) or persists across host
+stacks (treat as stack-agnostic; needs a parallel fix track).
+Static reading of the relevant code paths and the panic context
+gives the following picture.
+
+### Address analysis
+
+ESP32-S3 internal-DRAM heap (per the boot log captured in
+`/tmp/r25-nonak-uart.log`):
+
+```
+At 3FCB1C20 len 00037AF0 (222 KiB): RAM
+At 3FCE9710 len 00005724 (21 KiB):  RAM
+At 3FCF0000 len 00008000 (32 KiB):  DRAM
+At 600FE038 len 00001FA0 (7 KiB):   RTCRAM
+PSRAM pool added at 0x3D800000 len 0x800000 (8 MiB)
+```
+
+The crash addresses:
+
+- `A2  = 0x02692135` — register held the base pointer.
+- `EXCVADDR = 0x02692169` — address that was loaded.
+
+Both are in `0x0269_XXXX`, an unmapped region. They are 0x34 (52)
+bytes apart. Pattern: CPU loaded a base ptr `A2` and accessed
+`A2 + 0x34`. This is a corrupted struct-field pointer.
+
+The Pico-to-host stream sent bytes cycling `0..255`. A pointer
+made of consecutive cycle bytes would look like `0x6c 0x6b 0x6a
+0x69` (little-endian for a pointer at stream offset 0x69). The
+actual bytes in the corrupted pointer (`0x02692169` little-endian
+= bytes `0x69 0x21 0x69 0x02`) do NOT match consecutive cycle
+bytes. So the corruption is NOT directly a USB DMA writing the
+streaming payload onto pbuf metadata.
+
+### Crash chain re-read
+
+The two `pbuf.c` frames at lines 770 and 733 are:
+
+- Line 770 (older frame, called first): inside `pbuf_free`, the
+  `pc->custom_free_function(p)` call. `p` is the head pbuf with
+  `PBUF_FLAG_IS_CUSTOM` set.
+- Line 733 (newer frame, called second): the `pbuf_free` entry
+  for a pbuf in the inner chain, called recursively by
+  `esp_pbuf_free` (lwIP custom-pbuf wrapper).
+
+So the chain is:
+
+```
+lwip_recv_tcp(p1)
+  pbuf_free(p1)                                 <- pbuf.c:770
+    p1 is custom; calls esp_pbuf_free(p1)
+      esp_pbuf_free decrements the inner ref-pbuf
+        if zero, calls pbuf_free(p2_inner)      <- pbuf.c:733
+          p2_inner has driver-side custom_free
+          calls esp_netif_free_rx_buffer        <- esp_netif_lwip.c:1320
+            calls esp_netif->driver_free_rx_buffer(handle, buffer)
+              ** load from corrupted pointer faults **
+```
+
+The pbuf being freed at `esp_netif_lwip.c:1320` is a Wi-Fi RX
+pbuf (inbound TCP segment from the kernel-side vhci_hcd). The
+corrupted field is either `esp_netif->driver_free_rx_buffer`,
+`esp_netif->driver_handle`, or the inbound `buffer` pointer.
+
+### What our code did NOT do
+
+- Our `read_exact` (`src/c_modules/usbip/usbip_server.c:209-222`)
+  is a vanilla recv loop. No pbuf lifetime management, no
+  multi-thread access on the same fd (per `client_task` being
+  the only owner). Not implicated.
+- Our `usbhost.c:716-718` (IDF backend) clamps the IN-data
+  `memcpy` length to `inflight->in_capacity` before copying into
+  `u->in_buf`. No overflow path from a long IDF transfer into
+  adjacent heap.
+- Our usbip-server `u->in_buf` allocation
+  (`usbip_server.c:1404`) uses plain `malloc()` which goes to
+  `MALLOC_CAP_DEFAULT`. On this build (`SPIRAM_TRY_ALLOCATE_WIFI_LWIP
+  is not set`) this is internal DRAM, the same heap as lwIP
+  pbufs and Wi-Fi driver pbufs. Co-tenancy in the same heap
+  matters for adjacency.
+
+### Where corruption could come from
+
+Three plausible sources, none directly proven:
+
+1. **Wi-Fi driver pbuf-pool reuse race / IDF v5.5.1 lwIP-side
+   bug.** Sustained inbound TCP traffic on Wi-Fi pressures the
+   Wi-Fi-driver pbuf pool. A double-recycle or use-after-free
+   inside the Wi-Fi driver or `esp_netif`'s pbuf wrapper would
+   produce exactly this crash. Independent of USB host stack.
+
+2. **Heap exhaustion / OOM-recovery path corruption.** The
+   never-NAK harness fed sustained ~9 KiB/s into the usbip TCP
+   socket, plus the kernel's continuous CMD_SUBMIT stream into
+   our read_exact path, plus the bulk URB completion stream.
+   If internal-DRAM heap got tight and an allocation-failure
+   recovery path scribbled corrupted metadata, the next pbuf
+   free would crash here. Independent of USB host stack at the
+   structural level (TinyUSB also allocates from internal
+   DRAM, just differently).
+
+3. **USB DMA buffer overrun OR our usbhost.c writing past a
+   buffer.** Less likely from the static analysis: IDF DMA
+   buffers are cache-aligned and DMA-sized; our memcpy is
+   length-clamped. But cannot be ruled out without runtime
+   testing. If the corruption is in a heap region adjacent to
+   one of our `u->in_buf` allocations, a USB-DMA stride bug
+   could explain it. TinyUSB migration changes the DMA buffer
+   allocation pattern (HCD operates on caller-provided
+   buffers) but the caller is still our usbhost.c, so this
+   sub-cause might persist OR shift.
+
+### Verdict
+
+**Cannot determine from static reading alone.** The static
+analysis points at a Wi-Fi-driver / esp_netif / lwIP issue
+(candidate 1) more strongly than a USB-DMA-overrun issue
+(candidate 3), because the corrupted pointer is in a struct
+freed by `esp_netif_free_rx_buffer` for a Wi-Fi-side pbuf, the
+crash address pattern doesn't match the USB streaming data,
+and our memcpy is length-clamped. But "more strongly" is not
+"proven"; runtime disambiguation is needed.
+
+### Disambiguating experiment
+
+The cheapest disambiguation is **the R27 Phase 2 chunked-bench
+on TinyUSB migrated firmware**, plus running the never-NAK
+harness against that same firmware. Two outcomes:
+
+- **TinyUSB firmware crashes the same way under sustained
+  load**: R26 is stack-agnostic. Open a parallel fix track. The
+  candidate-1 path (Wi-Fi/lwIP bug) is most likely; investigate
+  via heap-poisoning rebuild, IDF issue tracker search, and
+  the steps listed earlier in this doc.
+
+- **TinyUSB firmware does NOT crash under sustained load**: R26
+  is IDF-induced via candidate 3 (USB DMA / IDF host buffer
+  ownership). Defer R26: move this doc to the
+  `r25-idf-backend` frozen branch; remove the active R26 row
+  from `plan/overview.md`. The bug becomes a documented quirk
+  of the IDF backend, not an active risk on the TinyUSB main
+  branch.
+
+This experiment is one bench cycle and aligns with R27 Phase 2
+naturally. Recommend running both the chunked bench AND the
+never-NAK harness on TinyUSB firmware, in that order; the
+chunked bench validates throughput first (the primary R27
+question), then the never-NAK harness validates whether R26
+travels with the host stack.
+
+### Recommendation for R27 plan
+
+Do not defer R26 on the assumption it's IDF-induced; the
+evidence does not support that strongly enough. Instead, treat
+R27 Phase 2 as the disambiguating test. Update `r27-tinyusb-resume-plan.md`
+Phase 3 (R26 ordering) to reflect: "run R27 Phase 2 chunked
+bench AND never-NAK harness; defer/keep R26 based on outcome".
+
+If the user wants to be optimistic and assume the bug WILL
+travel (defer R26 to a fix track immediately, file to backlog),
+that's defensible from the evidence — candidate 1 is the most
+plausible static-analysis pick. But it's a judgement call.
