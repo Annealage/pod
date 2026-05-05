@@ -67,9 +67,9 @@ the fs-cp deadlock left off. Phase 1 below is exactly that.
 | Phase | Goal | Depends on | Exit criterion |
 |---|---|---|---|
 | 1 | Stabilise `r24-wip` against the fs-cp deadlock | nothing | `mpremote fs cp` of a 4 KB file completes 5/5 times without kernel D-state |
-| 2 | Measure TinyUSB throughput against the same Pico CDC device | Phase 1 | `cdc_throughput.py read_test` runs to completion at all bufsizes; per-bufsize KiB/s recorded |
-| 3 | Decide R26 ordering and (if first) fix R26 | Phase 2 measurement | sustained-streaming bench runs without ESP32 panic |
-| 4 | Migration finalisation: merge `r24-wip` to main | Phases 1-3 | branch tracking complete; main is on TinyUSB; IDF backend either removed or behind a build flag |
+| 2 | Measure TinyUSB throughput against the same Pico CDC device + R26 disambiguation | Phase 1 | `cdc_throughput.py read_test` runs to completion at all bufsizes; per-bufsize KiB/s recorded; never-NAK harness either crashes (R26 stack-agnostic) or runs clean for 30 s (R26 IDF-induced) |
+| 3 | Pick R26 path based on Phase 2 step 2.5 outcome: parallel fix track if stack-agnostic, deferral to `r25-idf-backend` branch if IDF-induced | Phase 2 step 2.5 | R26 row in `plan/overview.md` either updated with parallel-track plan or removed |
+| 4 | Migration finalisation: rebase `r24-wip` onto main with manual conflict resolution | Phases 1-3 | branch tracking complete; main is on TinyUSB; IDF backend on `r25-idf-backend` frozen branch |
 | 5 | If TinyUSB hits the same 11 ms wall: continue throughput investigation in TinyUSB code | Phase 2 measurement (negative) | open; depends on what the TinyUSB-side instrumentation finds |
 
 ## Phase 1: stabilise r24-wip (the fs-cp deadlock)
@@ -335,15 +335,39 @@ Goal: confirm whether the 11 ms gap is identical between IDF and
 TinyUSB or whether it's slightly different (which would localise
 which layer the gap lives in).
 
+### Step 2.5: run the never-NAK harness for R26 disambiguation
+
+After step 2.2's chunked bench completes successfully, run the
+`/tmp/r25-nonak-harness.py` continuous-fill harness against the
+same TinyUSB-migrated firmware (full reproduction steps in
+`r26-lwip-pbuf-corruption.md`). Two outcomes:
+
+- **Crash recurs (LoadProhibited in `pbuf_free` from
+  `lwip_recv_tcp`)**: R26 is stack-agnostic. Phase 3 picks the
+  parallel-fix-track route; R26 stays an active risk on main.
+- **No crash for >30 s of continuous streaming**: R26 was
+  IDF-induced. Phase 3 picks the deferral route; the R26 doc
+  moves to the `r25-idf-backend` frozen branch and the active
+  R26 row in `plan/overview.md` is removed.
+
+This step is the disambiguation that the R26 origin diagnosis
+(2026-05-05) flagged as needed. Adds maybe 15 minutes to Phase
+2 wall-clock; outcome decides Phase 3 plan.
+
 ## Phase 3: R26 (lwIP pbuf corruption) ordering decision
 
 R26 is a latent lwIP heap-corruption bug surfaced by sustained
-bulk-IN streaming (`r26-lwip-pbuf-corruption.md`). It is independent
-of which USB host stack is in use; the crash is in
-`pbuf_free` called from `lwip_recv_tcp` called from
-`usbip_server.c read_exact`. A throughput bench that streams
-without iteration gaps will trigger it on TinyUSB just as it did
-on IDF.
+bulk-IN streaming (`r26-lwip-pbuf-corruption.md`). The crash is
+in `pbuf_free` called from `lwip_recv_tcp` called from
+`usbip_server.c read_exact`. The 2026-05-05 origin diagnosis at
+the bottom of `r26-lwip-pbuf-corruption.md` could not determine
+from static reading alone whether the bug is IDF-induced
+(disappears on TinyUSB) or stack-agnostic (persists on TinyUSB).
+Static analysis points more strongly at the stack-agnostic
+candidate (Wi-Fi-driver / esp_netif / lwIP issue), but the
+USB-DMA candidate cannot be ruled out without runtime testing.
+The disambiguating experiment is R27 Phase 2 itself: run the
+never-NAK harness on TinyUSB-migrated firmware and observe.
 
 ### Two orderings
 
@@ -455,19 +479,12 @@ These need a call before Phase 4 executes:
    shape in a backlog doc so it can be re-applied if any
    future IDF-backend bench is needed.
 
-4. **Upstream `machine.USBHost()` API alignment.** r24-wip uses
-   `tuh_edpt_xfer` directly because USB/IP forwarding is
-   URB-level, not class-level (per `r24-wip-history.md`
-   "Architectural decision the migration didn't anticipate").
-   The upstream `andrewleech/micropython#7` `machine.USBHost()`
-   uses class drivers for typed devices. Our usbip backend
-   stays on the raw `tuh_*` path; we don't gain anything from
-   moving to class drivers since the kernel-side cdc-acm is
-   already doing the class-level demux.
-
-   Decision: stay on raw `tuh_*` API. Document explicitly in
-   the migration commit so the next reader doesn't try to
-   "improve" by switching to class drivers.
+4. **Upstream `machine.USBHost()` API alignment.** Locked in
+   2026-05-05: stay on raw `tuh_edpt_xfer`. See "Decisions
+   locked in" section for context. r24-wip already uses this
+   path; the migration commit must document this explicitly so
+   the next reader doesn't try to "improve" by switching to
+   class drivers.
 
 5. **`src/VERSIONS` updates.** Once the migration lands, bump
    the MicroPython entry to reflect any submodule changes the
@@ -559,20 +576,140 @@ the chosen path.
 | The cherry-pick onto current main hits massive conflicts in usbhost.c | Phase 4 step 4.1 trial cherry-pick | Fall back to merge commit (option a) and do a separate cleanup commit later |
 | Phase 1 step 1.1 verbose instrumentation perturbs the timing enough to mask the bug | Phase 1 captures clean URB chain logs but the deadlock doesn't reproduce with verbose on | Trace via lower-overhead mechanism (counters incremented in callback, dumped on demand) instead of per-URB ESP_LOGI |
 
-## Open decisions (for user before starting)
+## Decisions locked in (2026-05-05)
 
-1. **R26 ordering** (Phase 3): default plan is to defer R26 until
-   after Phase 2 chunked bench. User can override if production
-   safety is more urgent than throughput data.
+User decisions made before R27 starts:
 
-2. **Phase 4 branch strategy** (option a/b/c): default plan is
-   option c (cherry-pick onto current main). User can override.
+1. **API alignment: raw `tuh_edpt_xfer`.** `r24-wip` already uses
+   the raw URB-forwarding path, not class drivers. Confirmed:
+   stay on raw `tuh_*` API. usbip forwards URBs at sub-class
+   level; the kernel-side cdc-acm is already doing class-level
+   demux, so wrapping in TinyUSB CDC class driver gains nothing
+   and would require a major rewrite of `usbip_server.c` URB
+   dispatch. Phase 4 step 4 (originally listed as an open
+   decision) is closed: stay on the raw API.
 
-3. **Phase 4 IDF backend retention**: default plan is "branch
+2. **Branch strategy: rebase, not cherry-pick.** Rebase test run
+   2026-05-05 (see "Rebase test outcome" below) showed the
+   rebase is not clean — substantive conflicts in `usbhost.c`
+   and `mpconfigboard.cmake` on the very first commit
+   (`d9f192f`). Proceed with rebase + manual conflict
+   resolution as Phase 4 step 4.1 below; cherry-pick remains a
+   fallback if rebase becomes too painful in practice.
+
+3. **R26 ordering: depends on origin.** If R26 is IDF-induced
+   it goes away on TinyUSB; document on `r25-idf-backend`
+   branch and remove the active row. If R26 is stack-agnostic
+   it persists on TinyUSB and needs a parallel fix track.
+   Origin diagnosis appended to `r26-lwip-pbuf-corruption.md`
+   (Origin diagnosis 2026-05-05) reads "cannot determine from
+   static reading alone; static analysis points more strongly
+   at Wi-Fi-driver / esp_netif / lwIP candidate (stack-agnostic)
+   than USB DMA candidate (IDF-induced), but cannot rule out
+   the latter without runtime testing." The disambiguating
+   experiment is R27 Phase 2 itself: run the never-NAK harness
+   on TinyUSB-migrated firmware. Decision is therefore
+   delegated to Phase 2 outcome rather than chosen now.
+
+## Rebase test outcome (2026-05-05)
+
+Sandbox rebase of `r24-wip` (tip `79ee842`) onto current main
+(`79c65e8`):
+
+```
+git checkout -B test-rebase-r24 r24-wip
+git rebase main
+```
+
+First commit (`d9f192f` "R24 step1: rewrite usbhost.c on
+TinyUSB host primitives") fails to apply with conflicts in:
+
+- `src/c_modules/usbhost/usbhost.c`: 5 conflict regions
+  spanning approximately lines 85-99, 123-155, 692-943, 983-999,
+  and 1041-1463 in the conflicted file. The two large regions
+  (250 and 420 lines) cover the main body of the IDF backend
+  vs the TinyUSB rewrite; substantive content conflict, not
+  trivial. Includes the R23 µs instrumentation
+  (`transfer_done_cb` timing block, R23 deep-dive commit
+  `d4f1e3b`) and the R25 step 3 worker-priority comment
+  (`USBHOST_WORKER_TASK_PRIORITY=20`, commit `4519860`) on
+  the main side, against the `tuh_*` rewrite of every callback
+  and inflight allocator on the r24-wip side.
+- `src/boards/ESP32_S3_ANNEALAGE_POD/mpconfigboard.cmake`: 1
+  conflict region. Both branches modified the comment near the
+  TinyUSB CFG_TUH_* defines block; r24-wip added
+  `CFG_TUH_API_EDPT_XFER=1` and changed the surrounding
+  comment. The conflict is small but both branches care.
+- `src/c_modules/usbhost/micropython.cmake`: shown as
+  `M` (auto-merged), so cleanly resolved.
+
+Sandbox cleanup performed:
+
+```
+git rebase --abort
+git checkout main
+git branch -D test-rebase-r24
+```
+
+After cleanup, working tree on main is clean; no leftover
+artifacts.
+
+### Implication
+
+Rebase is workable but not free. The main `usbhost.c` conflict
+will require manual integration of three things:
+
+1. The base TinyUSB rewrite from r24-wip (the `tuh_*` API
+   plumbing, inflight allocator changes, cancel-storm
+   handling).
+2. The R23 µs instrumentation from main (port the
+   `transfer_done_cb` timing block onto r24-wip's
+   `xfer_complete_cb` equivalent — already listed in R27
+   Phase 2 step 2.1).
+3. The R25 worker-priority change from main
+   (`USBHOST_WORKER_TASK_PRIORITY=20`).
+
+The R24 cancel-storm handling on r24-wip and the R23/R25
+instrumentation on main are not architecturally
+incompatible; they touch overlapping code regions but are
+logically additive. The rebase resolution is "take r24-wip's
+shape, port main's instrumentation onto it" rather than "pick
+one or the other".
+
+The 11-commit rebase will likely need 5-10 manual conflict
+resolutions across the early commits as each touches files
+that main also modified. The later commits (cancel-storm
+fixes `75f2b35` through `3285e6c`) probably go cleanly since
+they only touch r24-wip-specific code paths. The history doc
+commit `79ee842` is doc-only and may conflict only on the
+`r24-wip-history.md` banner that main has since updated
+(small, easy).
+
+Recommended rebase flow for Phase 4 step 4.1:
+
+1. Resolve `d9f192f` conflicts: take r24-wip's `usbhost.c`
+   wholesale, then integrate the R23 timing block and R25
+   priority change as separate-but-fixup commits during the
+   rebase.
+2. Continue through `f1de4b3` ... `1130bbc` ...
+   `75f2b35` etc.; each is a small fix on r24-wip's own code.
+3. `79ee842` (the history-doc commit) needs its banner
+   reconciled with the corrected version on main
+   (`r24-wip-history.md` was rewritten 2026-05-03).
+
+If conflict resolution exceeds ~3 hours wall-clock, fall back
+to cherry-pick: cherry-pick `d9f192f` onto main with manual
+resolution, then squash subsequent r24-wip fixes into that
+single migration commit. Loses commit-by-commit attribution
+but is faster.
+
+## Other open decisions (for user before starting)
+
+1. **Phase 4 IDF backend retention**: default plan is "branch
    fallback" (drop from main, keep on r25-idf-backend frozen
    branch). User can override to dual-build or full delete.
 
-4. **Phase 5 trigger criterion**: default is "if Phase 2 chunked
+2. **Phase 5 trigger criterion**: default is "if Phase 2 chunked
    bench bufsize=256 < 50 KiB/s". Anything above that is treated
    as a partial win and Phase 5 budget is reduced. User can
    override the threshold.
