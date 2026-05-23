@@ -863,6 +863,31 @@ static void lane_completion_cb(void *ctx, int status, size_t in_len)
      * the responder. Was verbose-gated; now unconditional (one
      * esp_timer_get_time call per URB; negligible cost). */
     u->t_cb = esp_timer_get_time();
+    /* R27 DMA mode: release the lane's pipeline slot AT CB TIME, not
+     * at TCP-RET_SUBMIT-send time. The slot represents "URB is at
+     * TinyUSB level" (gotcha #2: only one tuh_edpt_xfer per (dev,ep)
+     * at a time). When the cb fires, TinyUSB has fully freed the EP;
+     * the next URB on the lane queue can be submitted immediately
+     * without waiting for the responder's TCP send.
+     *
+     * Pipelining benefit: TCP send for URB1 (in the responder)
+     * overlaps with URB2's submission and TinyUSB-level processing.
+     * Under DMA mode the lane stall between URB1's cb and URB2's
+     * submit was about TCP RTT; this change closes that gap. The
+     * slot count effectively now caps "URBs in flight at TinyUSB"
+     * which is naturally 1 per EP (gotcha #2), so depth=1 still
+     * correctly serialises submission. Depth>1 is now safe but
+     * pointless because TinyUSB will reject the second tuh_edpt_xfer
+     * with -EIO; we keep depth=1 for that reason.
+     *
+     * The responder no longer releases the slot (this happens here
+     * instead). See usbip_server.c responder_task line 1172 region
+     * where the xSemaphoreGive call has been removed. */
+    conn_state_t *conn = u->conn;
+    per_ep_lane_t *lane = &conn->lanes[u->lane_idx];
+    if (lane->inflight_slots != NULL) {
+        xSemaphoreGive(lane->inflight_slots);
+    }
     /* Non-blocking send: responder_queue is sized at USBIP_INFLIGHT_MAX*2
      * so it should never be full if the pipeline depth is respected. */
     BaseType_t sent = xQueueSend(u->conn->responder_queue, &u, 0);
@@ -905,10 +930,14 @@ static void lane_task(void *arg)
 
         /* If cancelled before we even submitted (UNLINK arrived while
          * URB was queued), synthesise a completion rather than submitting.
-         * This avoids a submit+immediate-cancel round-trip. */
+         * This avoids a submit+immediate-cancel round-trip.
+         *
+         * R27 DMA mode: release the slot here too. The URB never
+         * reached TinyUSB so lane_completion_cb won't fire. */
         if (u->cancel) {
             u->comp_status = -ECONNRESET;
             u->comp_in_len = 0;
+            xSemaphoreGive(slots);
             xQueueSend(conn->responder_queue, &u, portMAX_DELAY);
             continue;
         }
@@ -937,13 +966,18 @@ static void lane_task(void *arg)
 
         if (err < 0) {
             /* IDF rejected submit: synthesise completion so the responder
-             * can send RET_SUBMIT and free the slot. The IDF will NOT
-             * call the callback in this case. */
+             * can send RET_SUBMIT. The IDF will NOT call the callback
+             * in this case. We must release the lane slot here because
+             * the cb path (which would normally release it under R27
+             * cb-time-release semantics) won't run. */
             u->comp_status = err;
             u->comp_in_len = 0;
+            xSemaphoreGive(slots);
             if (xQueueSend(conn->responder_queue, &u, portMAX_DELAY) != pdTRUE) {
-                /* Responder queue full (should not happen). Return slot. */
-                xSemaphoreGive(slots);
+                /* Responder queue full - URB will leak if responder is
+                 * gone. Slot already released above. */
+                ESP_LOGW(TAG, "responder queue full on submit-fail, "
+                              "seq=%" PRIu32, u->hdr.seqnum);
             }
         }
     }
@@ -1162,15 +1196,14 @@ static void responder_task(void *arg)
              * shutdown() below will trigger teardown. */
         }
 
-        /* --- Phase 4: per-URB slot-release and retire -------------------- */
+        /* --- Phase 4: per-URB retire ------------------------------------ */
+        /* R27 DMA mode: the lane pipeline slot is released by
+         * lane_completion_cb (cb-time) rather than here (TCP-send
+         * time). This pipelines TinyUSB submission of URB N+1 with
+         * TCP send of URB N. Slot release was previously done here
+         * (xSemaphoreGive on lane->inflight_slots); removed. */
         for (int i = 0; i < batch_n; i++) {
             inflight_urb_t *u = batch[i];
-
-            /* Give back the lane's pipeline slot. */
-            per_ep_lane_t *lane = &conn->lanes[u->lane_idx];
-            if (lane->inflight_slots != NULL) {
-                xSemaphoreGive(lane->inflight_slots);
-            }
 
             /* Retire: remove from inflight list, signal cancel waiter. */
             bool free_now = false;

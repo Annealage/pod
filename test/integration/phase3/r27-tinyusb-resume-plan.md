@@ -156,6 +156,19 @@ main waits until Phase 4.
 
 ## Phase 1: stabilise r24-wip (the fs-cp deadlock)
 
+**Status (2026-05-06): closed.** Root cause and fix landed.
+TinyUSB DMA-mode IN handler in `hcd_dwc2.c` was missing the
+post-transfer `edpt->next_pid = hctsiz.pid` save that the
+slave-mode handler does. On a short-packet completion the
+projected `next_pid` from `channel_xfer_start` was stale, causing
+DATATOGGLE_ERR on the next IN URB and silently dropping the
+device's first packet. Fix: one-line save in
+`handle_channel_in_dma` mirroring the slave-mode behaviour.
+Submodule commit `6b0f49b06` on `r27-fix-txfifo-recheck`. See
+`r27-dma-fix-findings.md` "Result (2026-05-06)" section for the
+full diagnosis, fix shape, and verification numbers. Upstream PR
+draft text in `r27-upstream-pr-draft.md`.
+
 ### Phase 1 progress so far (2026-05-05)
 
 Steps 1-3 of the dispatched Phase 1 procedure are complete (sonnet

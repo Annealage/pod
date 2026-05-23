@@ -62,7 +62,7 @@ list(APPEND MICROPY_DEF_BOARD CFG_TUH_API_EDPT_XFER=1)
 # R27 fs-cp deadlock trace (Phase 1 step 3). Enables the per-URB
 # sub:/cb:/synth:/watchdog: log lines in usbhost.c. Default off in
 # production; uncomment the next line to enable the trace overhead.
-# list(APPEND MICROPY_DEF_BOARD R27_DEADLOCK_TRACE=1)
+list(APPEND MICROPY_DEF_BOARD R27_DEADLOCK_TRACE=1)
 
 # Freeze the annealage_pod Python package into the firmware image.
 set(MICROPY_FROZEN_MANIFEST ${MICROPY_BOARD_DIR}/manifest.py)
