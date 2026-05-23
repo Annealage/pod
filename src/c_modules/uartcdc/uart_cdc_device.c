@@ -51,6 +51,7 @@
 #include "freertos/FreeRTOS.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "soc/gpio_reg.h"
 #define CDC_TAG "uartcdc"
 #define CDC_LOGI(fmt, ...) \
     do { if (s_verbose) { ESP_LOGI(CDC_TAG, fmt, ##__VA_ARGS__); } } while (0)
@@ -551,48 +552,67 @@ int uart_cdc_attach(int uart_num, int tx_pin, int rx_pin, int baud)
 
     s_uart_num = uart_num;
 
+    /* Fully reinitialise line coding to 8N1 at caller's baud rate.
+     * Resetting bytes 4-6 prevents a prior SET_LINE_CODING from a previous
+     * attach session from persisting across detach/re-attach. */
     uint32_t b = (uint32_t)baud;
     memcpy(s_line_coding, &b, 4u);
+    s_line_coding[4] = 0x00u; /* 1 stop bit */
+    s_line_coding[5] = 0x00u; /* no parity */
+    s_line_coding[6] = 0x08u; /* 8 data bits */
 
-    uart_config_t cfg = {
-        .baud_rate           = baud,
-        .data_bits           = UART_DATA_8_BITS,
-        .parity              = UART_PARITY_DISABLE,
-        .stop_bits           = UART_STOP_BITS_1,
-        .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 0,
-        .source_clk          = UART_SCLK_DEFAULT,
-    };
-    esp_err_t err = uart_driver_install((uart_port_t)uart_num, 2048, 2048, 0, NULL, 0);
+#define UART_CDC_BUF_SIZE 2048
+    esp_err_t err = uart_driver_install((uart_port_t)uart_num,
+                                        UART_CDC_BUF_SIZE, UART_CDC_BUF_SIZE,
+                                        0, NULL, 0);
     if (err != ESP_OK) { return -EIO; }
-    uart_param_config((uart_port_t)uart_num, &cfg);
+    apply_line_coding();
     if (tx_pin != UART_PIN_NO_CHANGE || rx_pin != UART_PIN_NO_CHANGE) {
         uart_set_pin((uart_port_t)uart_num,
                      tx_pin, rx_pin,
                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     }
+    if (tx_pin != UART_PIN_NO_CHANGE) {
+        /* IDF uart_set_pin() routes the signal through the GPIO matrix but
+         * does not set GPIO_ENABLE for matrix-routed pins; do it explicitly. */
+        REG_WRITE(GPIO_ENABLE_W1TS_REG, 1u << (unsigned)tx_pin);
+    }
 
     int rc = usbip_server_register_virtual_device(&s_device);
-    if (rc == 0) {
+    /* EEXIST means the virtual device is already registered (re-attach after
+     * detach/reboot).  The UART driver was just reinstalled above, so treat
+     * this as success. */
+    if (rc == 0 || rc == -EEXIST) {
         s_attached = true;
+        rc = 0;
     }
     return rc;
 }
 
 int uart_cdc_detach(void)
 {
-    if (!s_attached) { return 0; }
+    /* Guard on s_uart_num, not s_attached: a failed re-attach (EEXIST on
+     * registration) leaves s_attached=false but the UART driver installed.
+     * Guarding on s_uart_num ensures the driver is always cleaned up. */
+    if (s_uart_num < 0) { return 0; }
     s_attached = false;
-    if (s_uart_num >= 0) {
-        uart_driver_delete((uart_port_t)s_uart_num);
-        s_uart_num = -1;
-    }
+    uart_driver_delete((uart_port_t)s_uart_num);
+    s_uart_num = -1;
     return 0;
 }
 
 bool uart_cdc_is_attached(void)  { return s_attached; }
 void uart_cdc_set_verbose(bool e){ s_verbose = e; }
 bool uart_cdc_is_verbose(void)   { return s_verbose; }
+
+void uart_cdc_flush_rx(void)
+{
+    /* Flush the UART RX FIFO and software buffer.  Call this after a DUT
+     * reset to clear any break/framing-error bytes that the UART hardware
+     * latched when the DUT TX line went through its reset transient. */
+    if (s_uart_num < 0) { return; }
+    uart_flush_input((uart_port_t)s_uart_num);
+}
 
 const uint8_t *uart_cdc_get_device_desc(size_t *out_len)
 {

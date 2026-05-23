@@ -200,8 +200,8 @@ def attach_uartcdc():
     except ImportError:
         return start_uartbridge()
     try:
-        # UART2, GPIO15=DUT_UART_TX, GPIO16=DUT_UART_RX per Appendix A pinmap.
-        uartcdc.attach(2, 15, 16, 115200)
+        from . import _pinmap
+        uartcdc.attach(_pinmap.DUT_UART_NUM, _pinmap.DUT_UART_TX, _pinmap.DUT_UART_RX, 115200)
         return True
     except Exception as exc:  # noqa: BLE001
         print("annealage_pod.boot: uartcdc.attach failed: {!r}".format(exc))

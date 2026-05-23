@@ -62,6 +62,10 @@ bool uart_cdc_is_attached(void);
 void uart_cdc_set_verbose(bool enable);
 bool uart_cdc_is_verbose(void);
 
+/* Flush the UART RX FIFO and software buffer.  Call after a DUT reset to
+ * clear break/framing-error bytes latched during the DUT TX reset transient. */
+void uart_cdc_flush_rx(void);
+
 /* Test hooks: raw descriptor blobs. */
 const uint8_t *uart_cdc_get_device_desc(size_t *out_len);
 const uint8_t *uart_cdc_get_config_desc(size_t *out_len);

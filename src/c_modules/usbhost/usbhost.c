@@ -638,7 +638,7 @@ static void xfer_complete_cb(tuh_xfer_t *xfer)
                  xfer->ep_addr, inflight, (int)xfer->result,
                  (unsigned)xfer->actual_len);
     }
-    if ((s_natural_wins + s_natural_lost) % 5 == 0) {
+    if (s_urb_verbose && (s_natural_wins + s_natural_lost) % 50 == 0) {
         ESP_LOGI(TAG, "completion_summary: natural_wins=%" PRIu32
                       " natural_lost=%" PRIu32,
                  s_natural_wins, s_natural_lost);
@@ -1091,12 +1091,11 @@ bool tuh_enum_descriptor_configuration_cb(uint8_t daddr, uint8_t cfg_index,
 void tuh_mount_hook(uint8_t dev_addr)
 {
     /* Post to the deferred queue; pump task drains it outside tuh_task_ext()
-     * so synchronous descriptor fetches in enumerate_device can complete. */
+     * so synchronous descriptor fetches in enumerate_device can complete.
+     * If called before usbhost_start() (enum_queue == NULL), the device is
+     * re-queued by the seeding loop in usbhost_start(). */
     if (s_state.enum_queue) {
         xQueueSend(s_state.enum_queue, &dev_addr, 0);
-    } else {
-        /* Queue not ready (called before usbhost_start): enumerate inline. */
-        enumerate_device(dev_addr);
     }
 }
 
@@ -1133,7 +1132,7 @@ static void usbhost_pump_task(void *arg)
          * enumerate_device (which does synchronous descriptor fetches) runs
          * outside the tuh_task_ext() callback where TinyUSB re-entrance
          * protection would otherwise deadlock the sync transfers. */
-        if (s_state.enum_queue) {
+        {
             uint8_t dev_addr;
             while (xQueueReceive(s_state.enum_queue, &dev_addr, 0) == pdTRUE) {
                 enumerate_device(dev_addr);

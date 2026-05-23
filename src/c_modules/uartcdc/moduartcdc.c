@@ -59,6 +59,13 @@ static mp_obj_t mod_uartcdc_is_verbose(void)
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_uartcdc_is_verbose_obj, mod_uartcdc_is_verbose);
 
+static mp_obj_t mod_uartcdc_flush_rx(void)
+{
+    uart_cdc_flush_rx();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_uartcdc_flush_rx_obj, mod_uartcdc_flush_rx);
+
 static const mp_rom_map_elem_t mod_uartcdc_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),    MP_ROM_QSTR(MP_QSTR_uartcdc)           },
     { MP_ROM_QSTR(MP_QSTR_attach),      MP_ROM_PTR(&mod_uartcdc_attach_obj)    },
@@ -66,6 +73,7 @@ static const mp_rom_map_elem_t mod_uartcdc_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_is_attached), MP_ROM_PTR(&mod_uartcdc_is_attached_obj) },
     { MP_ROM_QSTR(MP_QSTR_set_verbose), MP_ROM_PTR(&mod_uartcdc_set_verbose_obj) },
     { MP_ROM_QSTR(MP_QSTR_is_verbose),  MP_ROM_PTR(&mod_uartcdc_is_verbose_obj)  },
+    { MP_ROM_QSTR(MP_QSTR_flush_rx),    MP_ROM_PTR(&mod_uartcdc_flush_rx_obj)    },
 };
 static MP_DEFINE_CONST_DICT(mod_uartcdc_globals, mod_uartcdc_globals_table);
 
