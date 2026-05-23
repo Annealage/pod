@@ -6,6 +6,7 @@
 include(${CMAKE_CURRENT_LIST_DIR}/usbip/micropython.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/usbhost/micropython.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/dapprobe/micropython.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/hub_device/micropython.cmake)
 
 # UART backend: usbip (default) exposes a synthetic CDC ACM device via USB/IP;
 # tcp falls back to the raw TCP socket bridge (port 2000).
