@@ -40,6 +40,30 @@ bool usbhost_get_device_by_busid(const char busid[USBIP_BUSID_SIZE],
     return false;
 }
 
+bool usbhost_get_cached_device_desc(const char busid[USBIP_BUSID_SIZE],
+                                    uint8_t *out, size_t cap, size_t *out_len)
+{
+    (void)busid;
+    (void)out;
+    (void)cap;
+    if (out_len) {
+        *out_len = 0;
+    }
+    return false;
+}
+
+bool usbhost_get_cached_config_desc(const char busid[USBIP_BUSID_SIZE],
+                                    uint8_t *out, size_t cap, size_t *out_len)
+{
+    (void)busid;
+    (void)out;
+    (void)cap;
+    if (out_len) {
+        *out_len = 0;
+    }
+    return false;
+}
+
 int usbhost_control_transfer(const char busid[USBIP_BUSID_SIZE],
                              const usbip_setup_packet_t *setup,
                              const uint8_t *out_data, size_t out_len,

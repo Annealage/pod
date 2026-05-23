@@ -1429,6 +1429,68 @@ static bool intake_submit(conn_state_t *conn,
             return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
                                  hdr->ep, -EPIPE, NULL, 0, "intake_set_address");
         }
+
+        /* EP0 descriptor cache intercept (real devices only). Some DUT
+         * firmware STALLs the STATUS phase of a repeat GET_DESCRIPTOR
+         * after the device has already been enumerated once - TinyUSB
+         * does its own boot-time enumeration, so by the time the kernel
+         * (via vhci_hcd) re-walks the device over USB/IP, the dabao-class
+         * quirks fire on every descriptor read.
+         *
+         * mpy-pod already keeps a full copy of the device + config
+         * descriptors in usbhost_desc_cache_t from initial enumeration.
+         * Serving those locally for the standard GET_DESCRIPTOR(DEVICE)
+         * and GET_DESCRIPTOR(CONFIGURATION) requests gives the kernel
+         * identical bytes without going back to the device.
+         *
+         * SET_CONFIGURATION is NOT intercepted: TinyUSB's host hook in
+         * usbhost.c (tuh_enum_descriptor_configuration_cb) deliberately
+         * returns false to skip SET_CONFIGURATION at boot, leaving the
+         * device in Address state. The kernel's SET_CONFIGURATION over
+         * USB/IP must reach the device for it to transition to Configured
+         * and activate its bulk / interrupt endpoints.
+         *
+         * Strings, SET_CONFIGURATION, SET_INTERFACE, CLEAR_FEATURE,
+         * vendor / class requests all pass through unchanged. The
+         * intercept is scoped to standard read-only requests that we
+         * have authoritative cached answers for. Virtual devices are
+         * excluded because they own their descriptors via the
+         * virtual_device_t ops table. */
+        if (!is_virtual && is_standard && hdr->direction == USBIP_DIR_IN &&
+            bRequest == 0x06u /* GET_DESCRIPTOR */) {
+            const uint8_t desc_type = hdr->setup[3];  /* wValue high byte */
+            /* DEVICE descriptor is 18 bytes; CONFIG descriptor is
+             * bounded by usbhost.c's USBHOST_CFG_DESC_MAX_LEN (512 B).
+             * 1024 on stack covers both with headroom and avoids a
+             * heap allocation on the hot intake path. */
+            uint8_t cache_buf[1024];
+            size_t  cache_len = 0;
+            bool    served = false;
+            if (desc_type == 0x01 /* DEVICE */) {
+                served = usbhost_get_cached_device_desc(
+                    busid, cache_buf, sizeof(cache_buf), &cache_len);
+            } else if (desc_type == 0x02 /* CONFIGURATION */) {
+                served = usbhost_get_cached_config_desc(
+                    busid, cache_buf, sizeof(cache_buf), &cache_len);
+            }
+            if (served) {
+                /* Trim to the kernel's requested length (transfer_buffer_length
+                 * is the URB allocation, authoritative over wire wLength). */
+                size_t cap = (hdr->transfer_buffer_length > 0)
+                    ? (size_t)hdr->transfer_buffer_length : 0u;
+                if (cap < cache_len) {
+                    cache_len = cap;
+                }
+                if (s_urb_verbose) {
+                    ESP_LOGI(TAG, "  -> EP0 cache-served type=0x%02x len=%u (seq=%" PRIu32 ")",
+                             desc_type, (unsigned)cache_len, hdr->seqnum);
+                }
+                return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                                     hdr->ep, 0,
+                                     cache_buf, (uint32_t)cache_len,
+                                     "intake_ep0_cache_desc");
+            }
+        }
     }
 
     inflight_urb_t *u = calloc(1, sizeof(*u));

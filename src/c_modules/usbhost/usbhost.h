@@ -45,6 +45,26 @@ size_t usbhost_get_devices(usbip_dev_record_t *out, size_t max);
 bool usbhost_get_device_by_busid(const char busid[USBIP_BUSID_SIZE],
                                  usbip_dev_record_t *out);
 
+/* Copy the cached raw device descriptor (18 bytes, USB-spec layout)
+ * for the device at `busid` into `out` (capacity `cap`). Sets `*out_len`
+ * to the bytes written (min(cap, 18)). Returns true if the cache had a
+ * descriptor; false if busid unknown or no cache entry yet.
+ *
+ * Used by the USB/IP server to serve EP0 GET_DESCRIPTOR(DEVICE) replies
+ * locally instead of round-tripping to the device. Devices whose
+ * firmware STALLs repeat GET_DESCRIPTOR after TinyUSB's own boot-time
+ * enumeration (e.g. the dabao DUT) need this to enumerate cleanly
+ * over USB/IP. */
+bool usbhost_get_cached_device_desc(const char busid[USBIP_BUSID_SIZE],
+                                    uint8_t *out, size_t cap, size_t *out_len);
+
+/* Copy the cached raw configuration descriptor (variable length, USB-
+ * spec layout) for the device at `busid` into `out`. Sets `*out_len`
+ * to the bytes written (min(cap, cached cfg_len)). Returns true if the
+ * cache had a descriptor. Companion to usbhost_get_cached_device_desc. */
+bool usbhost_get_cached_config_desc(const char busid[USBIP_BUSID_SIZE],
+                                    uint8_t *out, size_t cap, size_t *out_len);
+
 /* Submit a control transfer (EP0). The setup packet's direction
  * determines whether the data stage is OUT (out_data/out_len) or IN
  * (in_data/in_capacity, *in_len). Returns 0 on success, negative
