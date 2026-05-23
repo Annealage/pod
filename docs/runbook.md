@@ -159,7 +159,56 @@ arm-none-eabi-gdb my_dut.elf -ex 'target extended-remote :3333'
 
 For SWO: `pyocd commander --target rp2040 -O swv=1` (configures the trace pipeline; trace data flows back through the Annealage Pod's SWO ring and out the synthetic device's EP3 Bulk-IN).
 
-## 8. Tear down
+## 8. Auto-reconnect across DUT resets: `pod-connect`
+
+When the DUT resets (firmware reload, bootloader entry, brownout) its USB device disappears and the local vhci port drops with no automatic recovery. `src/tools/pod-connect.py` is a small daemon that re-attaches the DUT whenever it (re)appears.
+
+```bash
+python3 src/tools/pod-connect.py
+```
+
+Defaults: watches `c251:f00b` (the annealage_pod's uartcdc bridge) on `annealage_pod-dabao.local` (override with `--host` or `ANNEALAGE_POD_HOST`). Detaches the vhci port on Ctrl-C / SIGTERM.
+
+Bootloader recovery (the DUT enumerates with a different VID:PID in BOOTSEL): pass the comma-separated list so the daemon re-attaches either state.
+
+```bash
+python3 src/tools/pod-connect.py --vidpid c251:f00b,2e8a:0003,2e8a:000f
+```
+
+Options:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--host` | `ANNEALAGE_POD_HOST` env / `annealage_pod-dabao.local` | annealage_pod hostname; falls back to `USBIPD_IP` env if mDNS fails |
+| `--vidpid` | `c251:f00b` | comma-separated DUT VID:PIDs to watch |
+| `--mode {auto,hub,poll}` | `auto` | event source - see below |
+| `--hub-vidpid` | `c251:f00c` | notification beacon VID:PID |
+| `--poll-waiting MS` | 150 | poll interval while waiting for the DUT |
+| `--poll-attached MS` | 1000 | poll interval while attached |
+| `--once` | off | attach once and exit (leaves the device attached) |
+
+### Modes
+
+- `poll`: the legacy path. Polls `usbip list -r HOST` every 150 ms while waiting, `usbip port` every 1 s while attached. Reconnect latency ~150-300 ms.
+- `hub`: requires `python3-libusb1` and a udev rule (see below). Attaches the annealage_pod's notification device (`c251:f00c`, busid `2-2`) over usbip and reads its interrupt-IN endpoint for DUT mount/umount edges directly. Reconnect latency ~50 ms. Exits non-zero if libusb1 is not installed.
+- `auto` (default): try hub mode first, fall back to polling on any failure. The fallback is announced at WARNING level.
+
+### Hub mode prerequisites
+
+```bash
+pip install --user libusb1                                  # or: apt install python3-libusb1
+sudo cp src/tools/99-annealage-pod-hub.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+```
+
+The udev rule grants access to anyone in `plugdev` and to the logged-in console user (`TAG+="uaccess"`). On Fedora/Arch/NixOS the `plugdev` group may not exist; the `uaccess` tag covers those.
+
+Notes:
+- In hub mode, Ctrl-C may take up to 2 seconds to take effect (libusb is blocked on the interrupt read). The daemon still detaches the DUT cleanly before exiting.
+- Hub mode does not eliminate `usbip attach` - the DUT is still a separate busid; the hub only signals when to re-attach.
+- The daemon does NOT detach `hub_device` (busid 2-2) on exit so the next run reopens it immediately.
+
+## 9. Tear down
 
 ```bash
 usbip detach -p 0
@@ -168,7 +217,7 @@ mpremote connect "tcp://<host>:8266" exec 'machine.reset()'   # optional
 
 The cleanup hook runs on REPL disconnect: rails go off, level translators tristate, queues drain. The next session starts from a known idle state.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
