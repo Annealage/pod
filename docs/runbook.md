@@ -48,21 +48,34 @@ mpremote connect "$(mpy-dev tty esp32-s3)" resume cp /tmp/credentials.json :cred
 
 ## 4. Wire the DUT
 
-Refer to `docs/spec-appendix-A-pinmap.md` §A.5.1 for the canonical S3 GPIO assignments. For the dev-kit-on-perfboard configuration in Phase 3:
+The canonical source of truth is `src/mpy/annealage_pod/_pinmap.py`. Summary of current assignments:
 
-| DUT signal | S3 GPIO | Translator | Notes |
+| GPIO | `_pinmap.py` constant | Function | Notes |
 |---|---|---|---|
-| USB D- (DUT) | GPIO19 | none | direct, 3v3 USB FullSpeed |
-| USB D+ (DUT) | GPIO20 | none | direct |
-| SWCLK (DUT) | GPIO10 | 74LVC1T45 (DIR low, A->B fixed-out) | SPI2 SCLK via IO_MUX |
-| SWDIO (DUT) | GPIO11 | 74LVC1T45 (DIR controlled by GPIO12) | SPI2 D, half-duplex 3-wire |
-| nRST (DUT) | (TBD per board) | OD translator | optional, falls back to SWD AIRCR |
-| UART_TX (S3 -> DUT) | GPIO15 | 74LVC1T45 fixed B<-A | UART2 TX |
-| UART_RX (DUT -> S3) | GPIO16 | 74LVC1T45 fixed A<-B | UART2 RX |
-| SWO (DUT -> S3) | GPIO13 | 74LVC1T45 fixed A<-B | UART1 RX, UHCI |
-| 5V VBUS to DUT | (FET-gated) | n/a | gated by annealage_pod.power.dut_usb |
-| 3v3 VTARGET | (FET-gated) | n/a | gated by annealage_pod.power.vtarget |
-| GND | shared | n/a | star at annealage_pod |
+| 1-7 | `RELAY_GPIO[1..7]` | Relay drives | opto-coupler low-side switches |
+| 8 | `LOCAL_I2C_SDA` | Local I2C SDA | INA228 monitors, carrier EEPROM |
+| 9 | `LOCAL_I2C_SCL` | Local I2C SCL | |
+| 10 | `SWCLK` | SWD clock | SPI2 SCLK via IO_MUX |
+| 11 | `SWDIO` | SWD data | SPI2 D, half-duplex 3-wire |
+| 12 | `SWDIO_DIR` | SWD direction | controls SWDIO translator |
+| 13 | `SWO` | SWO / trace | UART1 RX, UHCI |
+| 14 | `NRST` | DUT nRST | open-drain |
+| 17 | `DUT_UART_TX` / `DUT_I2C_SDA_OR_SPI_MOSI` | DUT UART2 TX / I2C SDA / SPI MOSI | UART2 TX; IDF requires explicit GPIO_ENABLE_W1TS after uart_set_pin |
+| 18 | `DUT_UART_RX` / `DUT_I2C_SCL_OR_SPI_SCK` | DUT UART2 RX / I2C SCL / SPI SCK | UART2 RX |
+| 19 | `DUT_USB_DP` | DUT USB D+ | direct, 3v3 USB FullSpeed |
+| 20 | `DUT_USB_DM` | DUT USB D- | direct |
+| 21 | `DUT_I2C_SDA_DIR` | I2C SDA translator direction | |
+| 38 | `DUT_SPI_MISO` | SPI MISO | |
+| 39 | `DUT_SPI_CS` | SPI CS | |
+| 40 | `VTARGET_EN` | VTARGET rail enable | TPS2595 EN/UVLO |
+| 41 | `DUT_USB_VBUS_EN` | DUT USB VBUS enable | TPS2595 EN/UVLO |
+| 42 | `VBUS_SENSE` | VBUS analog sense | reserved; VBUS read via INA228 in practice |
+| 43 | `UART0_TX` | Console UART0 TX | CH340N onboard bridge |
+| 44 | `UART0_RX` | Console UART0 RX | |
+| 45 | `LED_STATUS_1` | Status LED 1 | |
+| 46 | `LED_STATUS_2` | Status LED 2 | |
+| 47 | `GPD0` | General purpose DUT IO 0 | carrier v0.7 GPD0; used as DUT RUN/RESET on dabao carrier |
+| 48 | `GPD1` | General purpose DUT IO 1 | carrier v0.7 GPD1; used as DUT PROG on dabao carrier |
 
 For Phase 3 P3.1 a minimal subset suffices: USB D+/D-, GND, and 5V VBUS. SWD and UART can be deferred.
 
