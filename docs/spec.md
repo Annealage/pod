@@ -233,6 +233,14 @@ Services start at boot and run forever. There is no explicit session state machi
 
 USB/IP detach is independent of REPL connection state; either may disconnect without affecting the other.
 
+### 5.5 Trust model
+
+The USB/IP server does not authenticate the TCP/3240 client. Anyone reachable at L2/L3 can issue `OP_REQ_IMPORT` and drive arbitrary `CMD_SUBMIT` (control + bulk + interrupt) on the bridged DUT, full URB-level access. This is the same model as the Linux kernel's `usbip-host`; mpy-pod inherits it.
+
+Over Wi-Fi the attacker surface is wider than the Ethernet case the upstream kernel module assumes: any device on the same SSID can reach the annealage_pod unless network-level isolation is in place. For production deployments, restrict to a trusted lab VLAN, an isolated AP, or tunnel via SSH / WireGuard. The wire parser refuses `SET_ADDRESS` proxied from a remote (would silently desync TinyUSB's view of the DUT's bus address) and bounds-checks `ep`/`direction`/`blen` on every CMD_SUBMIT, but otherwise treats the client as trusted.
+
+The TCP log socket and the MP REPL TCP socket share the same trust model. Telemetry exposure (current/voltage readings, SWO trace) is similarly unauthenticated.
+
 ## 6. Logging, watchdog, time
 
 ### 6.1 Logging

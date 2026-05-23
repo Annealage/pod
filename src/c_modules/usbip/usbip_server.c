@@ -1409,6 +1409,26 @@ static bool intake_submit(conn_state_t *conn,
             return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
                                  hdr->ep, -EINVAL, NULL, 0, "intake_setup_dir");
         }
+        /* Refuse SET_ADDRESS proxied from the wire. The kernel's
+         * vhci_hcd manages its own bus addressing and never legitimately
+         * issues SET_ADDRESS over USB/IP; a remote-attacker SET_ADDRESS
+         * would silently desync TinyUSB's view of the DUT's bus address
+         * and wedge subsequent traffic. Reject standard-request
+         * SET_ADDRESS with -EPIPE. */
+        const uint8_t bmRequestType = hdr->setup[0];
+        const uint8_t bRequest      = hdr->setup[1];
+        const bool is_standard = ((bmRequestType & 0x60u) == 0x00u);
+        if (is_standard && bRequest == 0x05u /* SET_ADDRESS */) {
+            ESP_LOGW(TAG, "  -> refusing SET_ADDRESS from wire (seq=%" PRIu32 ")",
+                     hdr->seqnum);
+            if (hdr->direction == USBIP_DIR_OUT && hdr->transfer_buffer_length > 0) {
+                if (!discard_exact(conn->fd, (size_t)hdr->transfer_buffer_length)) {
+                    return false;
+                }
+            }
+            return tx_ret_submit(conn, hdr->seqnum, hdr->devid, hdr->direction,
+                                 hdr->ep, -EPIPE, NULL, 0, "intake_set_address");
+        }
     }
 
     inflight_urb_t *u = calloc(1, sizeof(*u));
