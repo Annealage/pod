@@ -179,6 +179,23 @@ def attach_dapprobe():
     return True
 
 
+def attach_hub_device():
+    """Register the notification beacon device into usbip. Returns True if attached."""
+    try:
+        import hub_device  # type: ignore
+    except ImportError:
+        return False
+    attach = getattr(hub_device, "attach", None)
+    if attach is None:
+        return False
+    try:
+        attach()
+    except Exception as exc:
+        print("annealage_pod.boot: hub_device.attach failed: {!r}".format(exc))
+        return False
+    return True
+
+
 def start_uartbridge():
     """Start the C uartbridge TCP forwarder on the configured port. Returns True if started."""
     try:
@@ -334,6 +351,7 @@ def up(creds_path=_CREDS_PATH, repl_port=8266, mark_ota_valid=True):
         "dut_usb": False,
         "usbip": False,
         "dapprobe": False,
+        "hub_device": False,
         "uartcdc": False,
         "repl_listener": False,
         "repl_loop": False,
@@ -362,6 +380,7 @@ def up(creds_path=_CREDS_PATH, repl_port=8266, mark_ota_valid=True):
         status["vtarget"] = False
     status["usbip"] = start_usbip()
     status["dapprobe"] = attach_dapprobe()
+    status["hub_device"] = attach_hub_device()
     status["uartcdc"] = attach_uartcdc()
     listener = start_repl_socket(repl_port)
     status["repl_listener"] = listener is not None

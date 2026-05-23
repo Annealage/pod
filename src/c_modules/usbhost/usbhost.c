@@ -100,6 +100,7 @@
 
 
 #include "usbhost.h"
+#include "../hub_device/hub_device.h"
 
 /* Workaround: FreeRTOS.h defines traceISR_EXIT_TO_SCHEDULER() as a no-op
  * only inside the #ifdef ESP_PLATFORM block (line 1488).  The micropython.elf
@@ -1097,6 +1098,7 @@ void tuh_mount_hook(uint8_t dev_addr)
     if (s_state.enum_queue) {
         xQueueSend(s_state.enum_queue, &dev_addr, 0);
     }
+    hub_device_notify(true);
 }
 
 void tuh_umount_hook(uint8_t dev_addr)
@@ -1115,6 +1117,7 @@ void tuh_umount_hook(uint8_t dev_addr)
     if (slot >= 0) {
         ESP_LOGI(TAG, "device disconnected: %.32s", busid);
     }
+    hub_device_notify(false);
 }
 
 /* -------------------------------------------------------------------------

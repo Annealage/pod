@@ -1,0 +1,8 @@
+# Grant userspace access to the mpy-pod annealage_pod hub_device.
+# Install with: sudo cp src/tools/99-annealage-pod-hub.rules /etc/udev/rules.d/
+# Then: sudo udevadm control --reload && sudo udevadm trigger
+#
+# MODE+GROUP covers traditional setups (Debian/Ubuntu); TAG+="uaccess" is
+# the modern systemd approach that grants access to the logged-in console
+# user via ACL (Fedora/Arch/NixOS where "plugdev" may not exist by default).
+SUBSYSTEM=="usb", ATTR{idVendor}=="c251", ATTR{idProduct}=="f00c", MODE="0660", GROUP="plugdev", TAG+="uaccess"
