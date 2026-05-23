@@ -139,6 +139,16 @@ def start_usbip():
     start = getattr(usbip, "start", None)
     if start is None:
         return False
+    # Activate the Python-level USB host before usbip.start() calls
+    # usbhost_start() in C.  Without this, usbhost_start() would call
+    # mp_usbh_init_tuh() while machine.USBHost.active is False; a later
+    # machine.USBHost().active(True) call would then re-init the USB PHY
+    # and drop any already-connected device.
+    try:
+        import machine as _machine
+        _machine.USBHost().active(True)
+    except (ImportError, AttributeError):
+        pass
     start()
     return True
 
@@ -177,6 +187,25 @@ def start_uartbridge():
         return False
     start()
     return True
+
+
+def attach_uartcdc():
+    """Register the synthetic CDC UART device with the usbip server. Returns True if attached.
+
+    Falls back to uartbridge (TCP) if the uartcdc C module is not present,
+    i.e. when built with ANNEALAGE_POD_UART_BACKEND=tcp.
+    """
+    try:
+        import uartcdc  # type: ignore
+    except ImportError:
+        return start_uartbridge()
+    try:
+        from . import _pinmap
+        uartcdc.attach(_pinmap.DUT_UART_NUM, _pinmap.DUT_UART_TX, _pinmap.DUT_UART_RX, 115200)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print("annealage_pod.boot: uartcdc.attach failed: {!r}".format(exc))
+        return False
 
 
 # --- REPL dup -------------------------------------------------------------
@@ -302,7 +331,7 @@ def up(creds_path=_CREDS_PATH, repl_port=8266, mark_ota_valid=True):
         "dut_usb": False,
         "usbip": False,
         "dapprobe": False,
-        "uartbridge": False,
+        "uartcdc": False,
         "repl_listener": False,
         "repl_loop": False,
         "version": _version.__version__,
@@ -330,7 +359,7 @@ def up(creds_path=_CREDS_PATH, repl_port=8266, mark_ota_valid=True):
         status["vtarget"] = False
     status["usbip"] = start_usbip()
     status["dapprobe"] = attach_dapprobe()
-    status["uartbridge"] = start_uartbridge()
+    status["uartcdc"] = attach_uartcdc()
     listener = start_repl_socket(repl_port)
     status["repl_listener"] = listener is not None
     status["repl_loop"] = start_repl_thread(listener) is not None

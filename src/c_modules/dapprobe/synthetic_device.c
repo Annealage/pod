@@ -41,6 +41,7 @@
 
 #include "../usbip/virtual_device.h"
 #include "../usbip/usbip_server.h"
+#include "../usbip/usb_string_desc.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -211,24 +212,6 @@ static uint8_t s_str1[MAX_STRING_BUF];
 static uint8_t s_str2[MAX_STRING_BUF];
 static uint8_t s_str3[MAX_STRING_BUF];
 static uint8_t s_str4[MAX_STRING_BUF];
-
-/* Encode a NUL-terminated ASCII string as a USB string descriptor
- * (bLength + bDescriptorType + UTF-16LE chars). buf must be large
- * enough; returns the descriptor length (or 0 on overflow). */
-static size_t encode_string_desc(uint8_t *buf, size_t buf_size, const char *s) {
-    size_t in_len = 0;
-    while (s[in_len] != '\0') { in_len++; }
-    if (in_len > 30) { in_len = 30; }   /* cap to fit MAX_STRING_BUF */
-    size_t total = 2U + in_len * 2U;
-    if (total > buf_size) { return 0; }
-    buf[0] = (uint8_t)total;
-    buf[1] = USB_DESC_STRING;
-    for (size_t i = 0; i < in_len; i++) {
-        buf[2 + i * 2]     = (uint8_t)s[i];
-        buf[2 + i * 2 + 1] = 0x00;
-    }
-    return total;
-}
 
 static size_t s_str1_len, s_str2_len, s_str3_len, s_str4_len;
 

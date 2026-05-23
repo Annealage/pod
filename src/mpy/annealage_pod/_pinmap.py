@@ -31,9 +31,10 @@ SWO = 13
 # DUT reset (open-drain, through fixed-direction translator).
 NRST = 14
 
-# DUT UART (forwarded by C `uartbridge`).
-DUT_UART_TX = 15
-DUT_UART_RX = 16
+# DUT UART (forwarded by C `uartbridge` / `uartcdc`).
+DUT_UART_NUM = 2
+DUT_UART_TX = 17
+DUT_UART_RX = 18
 
 # DUT slave I2C / SPI (mutually exclusive, owned by C `slaveio`).
 DUT_I2C_SDA_OR_SPI_MOSI = 17
