@@ -6,7 +6,17 @@
 include(${CMAKE_CURRENT_LIST_DIR}/usbip/micropython.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/usbhost/micropython.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/dapprobe/micropython.cmake)
-include(${CMAKE_CURRENT_LIST_DIR}/uartbridge/micropython.cmake)
+
+# UART backend: usbip (default) exposes a synthetic CDC ACM device via USB/IP;
+# tcp falls back to the raw TCP socket bridge (port 2000).
+if(NOT DEFINED ANNEALAGE_POD_UART_BACKEND)
+    set(ANNEALAGE_POD_UART_BACKEND "usbip")
+endif()
+if(ANNEALAGE_POD_UART_BACKEND STREQUAL "tcp")
+    include(${CMAKE_CURRENT_LIST_DIR}/uartbridge/micropython.cmake)
+else()
+    include(${CMAKE_CURRENT_LIST_DIR}/uartcdc/micropython.cmake)
+endif()
 include(${CMAKE_CURRENT_LIST_DIR}/slaveio/micropython.cmake)
 # ops_ota C shim deferred for rev1: it depends on esp_https_ota and
 # esp_http_client, which are not in MicroPython esp32 port's default

@@ -120,6 +120,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -129,57 +130,7 @@
 
 #include "host/usbh.h"
 #include "mp_usbh.h"
-
-/* The managed component espressif__tinyusb declares tuh_descriptor_get_*_sync
- * as non-inline external functions and wins the include path race ahead of
- * lib/tinyusb/src where they are TU_ATTR_ALWAYS_INLINE static inlines.
- * The managed component's libespressif__tinyusb.a is device-only and does not
- * provide host-side _sync implementations, so the linker fails when
- * micropython.elf picks up the managed component header.
- *
- * Work around by providing local wrappers that call the underlying async
- * tuh_descriptor_get_*() functions with NULL callback (which blocks until
- * complete).  These are available in libmain.a via mp_usbh.c compilation. */
-static xfer_result_t local_get_device_desc(uint8_t dev_addr, tusb_desc_device_t *buf) {
-    xfer_result_t result = XFER_RESULT_INVALID;
-    if (!tuh_descriptor_get_device(dev_addr, buf, sizeof(*buf), NULL,
-            (uintptr_t)&result)) {
-        return XFER_RESULT_TIMEOUT;
-    }
-    return result;
-}
-
-static xfer_result_t local_get_config_desc(uint8_t dev_addr, void *buf, uint16_t len) {
-    xfer_result_t result = XFER_RESULT_INVALID;
-    /* Use the synchronous form via tuh_descriptor_get directly so we can
-     * see actual_len. tuh_descriptor_get_configuration is a thin wrapper
-     * around tuh_descriptor_get; the wrapper hides actual_len from us. */
-    tusb_control_request_t request = {
-        .bmRequestType_bit = {
-            .recipient = TUSB_REQ_RCPT_DEVICE,
-            .type      = TUSB_REQ_TYPE_STANDARD,
-            .direction = TUSB_DIR_IN
-        },
-        .bRequest = TUSB_REQ_GET_DESCRIPTOR,
-        .wValue   = (TUSB_DESC_CONFIGURATION << 8) | 0,
-        .wIndex   = 0,
-        .wLength  = len
-    };
-    tuh_xfer_t xfer = {
-        .daddr       = dev_addr,
-        .ep_addr     = 0,
-        .setup       = &request,
-        .buffer      = buf,
-        .complete_cb = NULL,
-        .user_data   = (uintptr_t)&result,
-    };
-    if (!tuh_control_xfer(&xfer)) {
-        return XFER_RESULT_TIMEOUT;
-    }
-    ESP_LOGI("usbhost", "local_get_config_desc: requested=%u actual_len=%u result=%d",
-             (unsigned)len, (unsigned)xfer.actual_len, (int)result);
-    return result;
-}
+#include "tusb.h"
 
 /* Compile-time defaults; override at link time with -DUSBHOST_*=N. */
 #ifndef USBHOST_MAX_DEVICES
@@ -296,10 +247,27 @@ typedef struct {
     TaskHandle_t       pump_hdl;
     TaskHandle_t       watchdog_hdl;        /* R27: URB-completion watchdog */
     usbhost_slot_t     devices[USBHOST_MAX_DEVICES];
+    QueueHandle_t      enum_queue;          /* dev_addr values deferred from tuh_mount_hook */
 } usbhost_state_t;
 
 static usbhost_state_t s_state;
 static volatile bool   s_urb_verbose = false;
+
+/* Descriptor caches: populated by tuh_enum_descriptor_device_cb and
+ * tuh_enum_descriptor_configuration_cb (called during TinyUSB's own
+ * enumeration before tuh_mount_cb fires), so enumerate_device can
+ * build the usbip record without re-issuing any control transfers.
+ * Re-fetching after enumeration fails: devices return STALL on a second
+ * GET_DESCRIPTOR once the CDC class driver has claimed the interface. */
+#define USBHOST_CFG_DESC_MAX_LEN 512
+typedef struct {
+    bool                valid;
+    tusb_desc_device_t  device;
+    uint16_t            cfg_len;
+    uint8_t             cfg[USBHOST_CFG_DESC_MAX_LEN] __attribute__((aligned(4)));
+} usbhost_desc_cache_t;
+
+static usbhost_desc_cache_t s_desc_cache[CFG_TUH_DEVICE_MAX]; /* indexed by (dev_addr-1) */
 
 void usbhost_set_verbose(bool enable)
 {
@@ -967,52 +935,33 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
 
 static void enumerate_device(uint8_t dev_addr)
 {
-    tusb_desc_device_t dev_desc;
-    memset(&dev_desc, 0, sizeof(dev_desc));
-    xfer_result_t res = local_get_device_desc(dev_addr, &dev_desc);
-    if (res != XFER_RESULT_SUCCESS) {
-        ESP_LOGW(TAG, "get_device_desc failed addr=%u res=%d", dev_addr, (int)res);
+    /* Use descriptors cached during TinyUSB's enumeration phase.
+     * The device is in Address state (SET_CONFIGURATION was not sent),
+     * so these descriptors accurately reflect the device's configuration. */
+    if (dev_addr < 1 || dev_addr > CFG_TUH_DEVICE_MAX) {
+        ESP_LOGW(TAG, "enumerate_device: addr=%u out of range", dev_addr);
         return;
     }
+    usbhost_desc_cache_t *dcache = &s_desc_cache[dev_addr - 1];
+    if (!dcache->valid) {
+        ESP_LOGW(TAG, "enumerate_device: no cached descriptors for addr=%u", dev_addr);
+        return;
+    }
+    tusb_desc_device_t dev_desc = dcache->device;
 
     if (dev_desc.bDeviceClass == TUSB_CLASS_HUB) {
         ESP_LOGI(TAG, "hub at addr=%u, skipping", dev_addr);
         return;
     }
 
-    /* R27 DMA-mode requirement: DWC2 internal-DMA writes to memory in
-     * 4-byte words and rounds the destination address DOWN to a 4-byte
-     * boundary. If cfg_buf were not 4-byte aligned, the HW would write
-     * IN data starting (start & ~3), shifting the data toward lower
-     * addresses by `(start & 3)` bytes and clobbering the caller's
-     * preceding stack frame. Force 4-byte alignment so wire byte 0
-     * lands at cfg_buf[0]. Empirically observed on ESP32-S3 with the
-     * Pico CDC: when cfg_buf landed at 0x...b6, the 75-byte config
-     * descriptor was written with a 2-byte left shift (cfg_buf[0]
-     * held wire byte 2; bLength + bDescriptorType were lost into
-     * cfg_buf - 2). */
-    uint8_t cfg_buf[512] __attribute__((aligned(4)));
+    uint8_t cfg_buf[USBHOST_CFG_DESC_MAX_LEN] __attribute__((aligned(4)));
     memset(cfg_buf, 0, sizeof(cfg_buf));
-    /* R27 DMA enumeration debug: print cfg_buf address so we can tell
-     * whether stack-backed scratch lands in internal SRAM (DMA reaches)
-     * or PSRAM (DMA does not on S2/S3, must be flushed). Internal SRAM
-     * range on ESP32-S3 is approximately 0x3FC8_8000 - 0x3FCF_FFFF;
-     * PSRAM is 0x3C00_0000 - 0x3DFF_FFFF. */
-    ESP_LOGI(TAG, "enumerate_device: cfg_buf=%p (stack)", (void*)cfg_buf);
-    res = local_get_config_desc(dev_addr, cfg_buf, sizeof(cfg_buf));
-    {
-        /* Dump the full config descriptor in 32-byte chunks. */
-        for (size_t base = 0; base < 256; base += 32) {
-            char hex[3 * 32 + 1];
-            for (size_t i = 0; i < 32; i++) {
-                snprintf(hex + 3 * i, sizeof(hex) - 3 * i, "%02x ", cfg_buf[base + i]);
-            }
-            ESP_LOGI(TAG, "  cfg_buf[%3u..%3u]= %s",
-                     (unsigned)base, (unsigned)(base + 31), hex);
-        }
-    }
-    if (res != XFER_RESULT_SUCCESS) {
-        ESP_LOGW(TAG, "get_config_desc failed addr=%u res=%d", dev_addr, (int)res);
+    bool has_cfg = (dcache->cfg_len > 0);
+    if (has_cfg) {
+        memcpy(cfg_buf, dcache->cfg, dcache->cfg_len);
+        ESP_LOGI(TAG, "enumerate_device: addr=%u cfg_len=%u", dev_addr, dcache->cfg_len);
+    } else {
+        ESP_LOGW(TAG, "enumerate_device: no cached cfg_desc for addr=%u", dev_addr);
     }
 
     usbip_dev_record_t desc;
@@ -1033,7 +982,7 @@ static void enumerate_device(uint8_t dev_addr)
     memset(eps, 0, sizeof(eps));
     uint8_t num_eps = 0;
 
-    if (res == XFER_RESULT_SUCCESS) {
+    if (has_cfg) {
         uint16_t total_len = (uint16_t)cfg_buf[2] | ((uint16_t)cfg_buf[3] << 8);
         if (total_len > sizeof(cfg_buf)) {
             total_len = sizeof(cfg_buf);
@@ -1103,14 +1052,59 @@ static void enumerate_device(uint8_t dev_addr)
              desc.num_interfaces, num_eps);
 }
 
+/* Override the weak tuh_enum_descriptor_device_cb from usbh.c.
+ * Called during TinyUSB's enumeration with the device descriptor. */
+void tuh_enum_descriptor_device_cb(uint8_t daddr, const tusb_desc_device_t *desc_device)
+{
+    if (daddr >= 1 && daddr <= CFG_TUH_DEVICE_MAX && desc_device) {
+        s_desc_cache[daddr - 1].device = *desc_device;
+        ESP_LOGI(TAG, "dev_cache: addr=%u vid=%04x pid=%04x",
+                 daddr, desc_device->idVendor, desc_device->idProduct);
+    }
+}
+
+/* Override the weak tuh_enum_descriptor_configuration_cb from usbh.c.
+ * Cache the config descriptor, then return false to prevent TinyUSB from
+ * sending SET_CONFIGURATION.  The device stays in Address state so its
+ * EP0 remains fully responsive.  The connecting Linux host (via usbip)
+ * sends its own SET_CONFIGURATION as part of normal enumeration, which
+ * we forward transparently via sync_xfer. */
+bool tuh_enum_descriptor_configuration_cb(uint8_t daddr, uint8_t cfg_index,
+                                          const tusb_desc_configuration_t *desc_config)
+{
+    (void)cfg_index;
+    if (daddr >= 1 && daddr <= CFG_TUH_DEVICE_MAX && desc_config) {
+        usbhost_desc_cache_t *cache = &s_desc_cache[daddr - 1];
+        uint16_t total_len = tu_le16toh(desc_config->wTotalLength);
+        if (total_len > USBHOST_CFG_DESC_MAX_LEN) {
+            total_len = USBHOST_CFG_DESC_MAX_LEN;
+        }
+        memcpy(cache->cfg, desc_config, total_len);
+        cache->cfg_len = total_len;
+        cache->valid   = true;
+        ESP_LOGI(TAG, "cfg_cache: addr=%u len=%u (no SET_CONFIGURATION)", daddr, total_len);
+    }
+    return false;
+}
+
 /* Strong-linkage overrides of the weak no-ops in mp_usbh.c. */
 void tuh_mount_hook(uint8_t dev_addr)
 {
-    enumerate_device(dev_addr);
+    /* Post to the deferred queue; pump task drains it outside tuh_task_ext()
+     * so synchronous descriptor fetches in enumerate_device can complete. */
+    if (s_state.enum_queue) {
+        xQueueSend(s_state.enum_queue, &dev_addr, 0);
+    } else {
+        /* Queue not ready (called before usbhost_start): enumerate inline. */
+        enumerate_device(dev_addr);
+    }
 }
 
 void tuh_umount_hook(uint8_t dev_addr)
 {
+    if (dev_addr >= 1 && dev_addr <= CFG_TUH_DEVICE_MAX) {
+        s_desc_cache[dev_addr - 1].valid = false;
+    }
     xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
     int slot = find_slot_by_devaddr_locked(dev_addr);
     char busid[USBIP_BUSID_SIZE] = {0};
@@ -1135,6 +1129,16 @@ static void usbhost_pump_task(void *arg)
              (int)USBHOST_TASK_CORE);
     while (true) {
         tuh_task_ext(0, false);
+        /* Drain deferred enumeration queue — tuh_mount_hook posts here so
+         * enumerate_device (which does synchronous descriptor fetches) runs
+         * outside the tuh_task_ext() callback where TinyUSB re-entrance
+         * protection would otherwise deadlock the sync transfers. */
+        if (s_state.enum_queue) {
+            uint8_t dev_addr;
+            while (xQueueReceive(s_state.enum_queue, &dev_addr, 0) == pdTRUE) {
+                enumerate_device(dev_addr);
+            }
+        }
         if (!tuh_task_event_ready()) {
             vTaskDelay(USBHOST_PUMP_IDLE_TICKS);
         }
@@ -1156,8 +1160,18 @@ int usbhost_start(void)
     if (!s_state.state_mutex) {
         return -ENOMEM;
     }
+    s_state.enum_queue = xQueueCreate(4, sizeof(uint8_t));
+    if (!s_state.enum_queue) {
+        vSemaphoreDelete(s_state.state_mutex);
+        return -ENOMEM;
+    }
 
-    mp_usbh_init_tuh();
+    /* Only call mp_usbh_init_tuh() if TinyUSB has not been initialised yet.
+     * machine.USBHost().active(True) may have already done it; calling it
+     * twice reinitialises the USB PHY and drops any already-connected device. */
+    if (!tusb_inited()) {
+        mp_usbh_init_tuh();
+    }
     ESP_LOGI(TAG, "TinyUSB host stack initialised (R24)");
 
     BaseType_t rc = xTaskCreatePinnedToCore(
@@ -1188,6 +1202,22 @@ int usbhost_start(void)
     }
 
     s_state.started = true;
+
+    /* Seed the enumeration queue with any devices that TinyUSB already
+     * mounted before usbhost_start() was called. This happens when
+     * machine.USBHost().active(True) is called before usbip.start():
+     * tuh_mount_hook fires with enum_queue==NULL, enumerate_device fails
+     * silently (state_mutex is NULL), and TinyUSB keeps the device
+     * mounted without it appearing in s_state.devices. */
+    if (tusb_inited()) {
+        for (uint8_t dev_addr = 1; dev_addr <= CFG_TUH_DEVICE_MAX; dev_addr++) {
+            if (tuh_mounted(dev_addr)) {
+                ESP_LOGI(TAG, "seeding enum_queue with pre-mounted addr=%u", dev_addr);
+                xQueueSend(s_state.enum_queue, &dev_addr, 0);
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -1989,6 +2019,9 @@ int usbhost_control_transfer(const char busid[USBIP_BUSID_SIZE],
 {
     if (!setup) {
         return -EINVAL;
+    }
+    if (in_len) {
+        *in_len = 0;
     }
     return sync_xfer(busid, 0, true, setup,
                      out_data, out_len, in_data, in_capacity, in_len, cancel);
