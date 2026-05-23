@@ -3,13 +3,24 @@
 import glob
 import os
 import re
+import socket as _socket
 import subprocess
 import sys
 import time
 
-ANNEALAGE_POD_IP = os.environ.get("USBIPD_IP", "192.168.0.166")
+ANNEALAGE_POD_HOSTNAME = os.environ.get("ANNEALAGE_POD_HOST", "annealage-pod-dabao.local")
+_ANNEALAGE_POD_IP_FALLBACK = os.environ.get("USBIPD_IP", "192.168.0.166")
 UARTCDC_VID_PID = "c251:f00b"
 VHCI_DETACH_PATH = "/sys/devices/platform/vhci_hcd.0/detach"
+
+
+def _resolve_host():
+    """Return ANNEALAGE_POD_HOSTNAME if it resolves via mDNS/DNS, else _ANNEALAGE_POD_IP_FALLBACK."""
+    try:
+        _socket.getaddrinfo(ANNEALAGE_POD_HOSTNAME, None, _socket.AF_INET)
+        return ANNEALAGE_POD_HOSTNAME
+    except _socket.gaierror:
+        return _ANNEALAGE_POD_IP_FALLBACK
 
 
 def _run(cmd, **kw):
@@ -27,8 +38,8 @@ def annealage_pod_tty():
 
 
 def find_uartcdc_busid(ip=None):
-    """Parse `usbip list -r <ip>` and return the busid for c251:f00b."""
-    ip = ip or ANNEALAGE_POD_IP
+    """Parse `usbip list -r <host>` and return the busid for c251:f00b."""
+    ip = ip or _resolve_host()
     r = _run(["usbip", "list", "-r", ip])
     if r.returncode != 0:
         raise RuntimeError(f"usbip list failed: {r.stderr.strip()}")
@@ -56,7 +67,7 @@ def find_attached_uartcdc_port():
 
 
 def usbip_attach(busid, ip=None):
-    ip = ip or ANNEALAGE_POD_IP
+    ip = ip or _resolve_host()
     r = _run(["sudo", "usbip", "attach", "-r", ip, "-b", busid])
     if r.returncode != 0:
         raise RuntimeError(
@@ -109,7 +120,7 @@ class AttachedUartCDC:
     yield CDC port path, detach on exit."""
 
     def __init__(self, ip=None):
-        self.ip = ip or ANNEALAGE_POD_IP
+        self.ip = ip or _resolve_host()
         self._port_num = None
         self.cdc_path = None
 

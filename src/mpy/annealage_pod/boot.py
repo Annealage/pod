@@ -105,13 +105,16 @@ def mdns_announce(hostname=None):
         # may add a MicroPython binding. Until then this is a no-op.
         return None
     if hostname is None:
-        try:
-            import machine
+        creds = load_credentials()
+        hostname = creds.get("hostname") if creds else None
+        if not hostname:
+            try:
+                import machine
 
-            uid = machine.unique_id()
-            hostname = "annealage-pod-{}".format("".join("{:02x}".format(b) for b in uid)[-6:])
-        except Exception:  # noqa: BLE001
-            hostname = "annealage-pod"
+                uid = machine.unique_id()
+                hostname = "annealage-pod-{}".format("".join("{:02x}".format(b) for b in uid)[-6:])
+            except Exception:  # noqa: BLE001
+                hostname = "annealage-pod"
     try:
         _mdns.hostname(hostname)
         _mdns.add_service("_annealage-pod", "_tcp", 3240, {
