@@ -476,13 +476,17 @@ static int data_transfer(virtual_device_t *dev,
     }
 
     case UART_CDC_EP_DATA_IN: {
-        /* 10 ms timeout; ZLP if nothing arrived so the host re-submits
-         * (same pattern as dapprobe SWO EP3). */
+        /* 1 ms timeout; ZLP if nothing arrived so the host re-submits.
+         * The IDF UART driver is interrupt-driven, so uart_read_bytes
+         * returns as soon as data lands in the ring buffer - the timeout
+         * only fires on a genuinely empty buffer.  1 ms is above the
+         * ~87 µs inter-byte gap at 115200 so mid-packet ZLPs don't occur,
+         * and it cuts worst-case RX polling latency from 10 ms to 1 ms. */
         if (s_uart_num < 0) { return 0; }
         size_t cap = (in_cap > 64u) ? 64u : in_cap;
         int n = uart_read_bytes((uart_port_t)s_uart_num,
                                 in_data, (uint32_t)cap,
-                                pdMS_TO_TICKS(10));
+                                pdMS_TO_TICKS(1));
         if (n > 0) {
             *in_len = (size_t)n;
             CDC_LOGI("ep3_in: %d bytes <- uart", n);
