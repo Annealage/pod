@@ -143,6 +143,22 @@ TinyUSB host stack on the USB-OTG controller (FullSpeed, 12 Mbps). Enumerates on
 
 DUT MSC is forwarded through USB/IP unchanged. The host PC mounts `/dev/sdX` via its own MSC stack post-attach. Drag-drop UF2 deployment works through the host PC's filesystem, not the annealage_pod.
 
+#### 4.5.1 Pipeline depth and throughput ceiling
+
+The `usbip` server has a per-EP lane task that submits URBs to the host stack one at a time, gated by a counting semaphore initialised to `USBIP_PIPELINE_DEPTH` (`src/c_modules/usbip/usbip_server.c`). The lane takes one slot before each `tuh_edpt_xfer` submit; the responder gives it back after `RET_SUBMIT` reaches the wire.
+
+The IDF host backend on main (R22 era) ran depth=16 - matching the 16 read URBs cdc-acm typically submits - and the R23 deep-dive measured `avg_depth=13-15` under load, confirming the queue genuinely filled. The overlap between "device pushing the next IN packet" and "us sending RET_SUBMIT for the previous URB over TCP" was load-bearing for the 677 KiB/s ceiling on that path.
+
+On the TinyUSB host backend (R27+) `USBIP_PIPELINE_DEPTH` is forced to 1 by gotcha #2 in `src/c_modules/usbhost/usbhost.c`:
+
+> tuh_edpt_xfer allows only one transfer in flight per (dev,ep); subsequent submits while busy return `false`.
+
+Calling `tuh_edpt_xfer` while an earlier transfer is still in flight on the same (dev,ep) returns false (`ep_status.busy == true`). There is no internal queue. Depth=1 structurally avoids the rejected-submit race - the lane semaphore blocks until `RET_SUBMIT` releases the slot - at the cost of all bus-vs-TCP overlap.
+
+Throughput consequence: the per-EP ceiling on TinyUSB is bounded by `1 / (TinyUSB IN roundtrip + TCP send roundtrip)`, materially below the IDF baseline. Multi-URB pipelining at depth>1 must be achieved by other means: parallel transfers across multiple endpoints (cdc-acm has only one bulk-IN, so doesn't help that case), DWC2 hardware-side scheduling tweaks, or a class-driver-based forwarder that maintains its own pipeline above the `tuh_edpt_xfer` API.
+
+This is a TinyUSB host API design limitation, not a per-device or per-port issue. Any TinyUSB host application that wants high single-EP throughput hits the same ceiling.
+
 ### 4.6 SWD backend (CMSIS-DAP)
 
 ESP32-S3 SPI2 in half-duplex 3-wire mode driven by GDMA. Pin map at the translator boundary: SCLK to SWCLK (fixed-direction translator), SPI2 D pin to SWDIO (bidirectional translator with DIR controlled by a separate S3 GPIO toggled per SWD frame phase). Realistic clock: 25 MHz steady, up to 40 MHz with short wiring. Bit-bang via dedicated-GPIO + assembly is the fallback at 10-15 MHz, used as the runtime fallback if a target rejects 25 MHz.
