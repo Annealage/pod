@@ -323,6 +323,14 @@ TEST(test_pack_ret_submit_byteorder)
     p = (const uint8_t *)&raw.u.ret_submit.actual_length;
     ASSERT_EQ_INT(p[0], 0); ASSERT_EQ_INT(p[1], 0);
     ASSERT_EQ_INT(p[2], 0); ASSERT_EQ_INT(p[3], 16);
+
+    /* For non-iso traffic (all mpy-pod URBs are non-iso), the kernel
+     * requires number_of_packets = USBIP_NON_ISO_PACKETS (0xFFFFFFFF).
+     * Zero here makes vhci_rx interpret the URB as isochronous and trip
+     * "vhci_device speed not set" on every RET_SUBMIT. */
+    p = (const uint8_t *)&raw.u.ret_submit.number_of_packets;
+    ASSERT_EQ_INT(p[0], 0xff); ASSERT_EQ_INT(p[1], 0xff);
+    ASSERT_EQ_INT(p[2], 0xff); ASSERT_EQ_INT(p[3], 0xff);
 }
 
 TEST(test_pack_ret_submit_negative_status)

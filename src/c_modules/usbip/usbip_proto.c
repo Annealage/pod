@@ -149,7 +149,13 @@ void usbip_proto_pack_ret_submit(usbip_header_t *raw,
     raw->u.ret_submit.status              = (int32_t)HTON32((uint32_t)status);
     raw->u.ret_submit.actual_length       = HTON32(actual_length);
     raw->u.ret_submit.start_frame         = 0;
-    raw->u.ret_submit.number_of_packets   = 0;
+    /* For non-iso URBs (control / bulk / interrupt) the kernel expects
+     * USBIP_NON_ISO_PACKETS (0xFFFFFFFF). Leaving this at 0 makes
+     * vhci_rx interpret the URB as isochronous and trip the
+     * "vhci_device speed not set" warning on every URB, since iso
+     * URBs key off vdev->speed which is only populated for HS/FS-iso
+     * paths. mpy-pod forwards only non-iso traffic. */
+    raw->u.ret_submit.number_of_packets   = (int32_t)HTON32(USBIP_NON_ISO_PACKETS);
     raw->u.ret_submit.error_count         = 0;
     raw->u.ret_submit.padding             = 0;
 }

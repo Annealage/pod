@@ -1257,6 +1257,60 @@ bool usbhost_get_device_by_busid(const char busid[USBIP_BUSID_SIZE],
     return found;
 }
 
+bool usbhost_get_cached_device_desc(const char busid[USBIP_BUSID_SIZE],
+                                    uint8_t *out, size_t cap, size_t *out_len)
+{
+    if (!busid || !out || !out_len) {
+        return false;
+    }
+    *out_len = 0;
+    bool found = false;
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    int slot = find_slot_by_busid_locked(busid);
+    if (slot >= 0) {
+        uint8_t dev_addr = s_state.devices[slot].dev_addr;
+        if (dev_addr >= 1 && dev_addr <= CFG_TUH_DEVICE_MAX) {
+            const usbhost_desc_cache_t *dc = &s_desc_cache[dev_addr - 1];
+            if (dc->valid) {
+                /* sizeof(tusb_desc_device_t) is 18 per USB-2.0 spec. */
+                const size_t desc_size = sizeof(tusb_desc_device_t);
+                size_t n = (cap < desc_size) ? cap : desc_size;
+                memcpy(out, &dc->device, n);
+                *out_len = n;
+                found = true;
+            }
+        }
+    }
+    xSemaphoreGive(s_state.state_mutex);
+    return found;
+}
+
+bool usbhost_get_cached_config_desc(const char busid[USBIP_BUSID_SIZE],
+                                    uint8_t *out, size_t cap, size_t *out_len)
+{
+    if (!busid || !out || !out_len) {
+        return false;
+    }
+    *out_len = 0;
+    bool found = false;
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    int slot = find_slot_by_busid_locked(busid);
+    if (slot >= 0) {
+        uint8_t dev_addr = s_state.devices[slot].dev_addr;
+        if (dev_addr >= 1 && dev_addr <= CFG_TUH_DEVICE_MAX) {
+            const usbhost_desc_cache_t *dc = &s_desc_cache[dev_addr - 1];
+            if (dc->valid && dc->cfg_len > 0) {
+                size_t n = (cap < dc->cfg_len) ? cap : dc->cfg_len;
+                memcpy(out, dc->cfg, n);
+                *out_len = n;
+                found = true;
+            }
+        }
+    }
+    xSemaphoreGive(s_state.state_mutex);
+    return found;
+}
+
 bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],
                                    uint8_t ep_num, uint8_t direction)
 {
