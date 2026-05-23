@@ -62,17 +62,253 @@ The parked code on `r24-wip` (tip `79ee842`) is still a faithful
 TinyUSB-host port of `usbhost.c`; resuming means picking up where
 the fs-cp deadlock left off. Phase 1 below is exactly that.
 
+## Phase 0 (foundation) result (2026-05-05)
+
+Branch `r27-tinyusb-migration` created from main HEAD `cba329b`.
+Three commits on the branch:
+
+- `51597e7` R27 build config: enable TinyUSB host raw-URB API
+  (mpconfigboard.cmake adds `CFG_TUH_API_EDPT_XFER=1`; cmake
+  comment block updated; micropython.cmake header rewritten).
+- `5730ec0` R27 usbhost.c: replace IDF host backend with TinyUSB
+  host primitives (953 ins / 1042 del; the IDF backend is gone,
+  the new file is r24-wip's tip with R27 header documenting the
+  seven gotchas inline and the pump priority bumped 10 -> 20).
+- `de7e118` R27 lane pipeline depth: drop from 16 to 1 for
+  TinyUSB backend (one-line constant change in usbip_server.c
+  per gotcha #2).
+
+Build: clean. `idf.py size` reports 1852 KiB application binary
+(232 KiB free in the 2 MiB factory partition). No new compile
+warnings.
+
+Boot: clean. `annealage_pod.boot` status flags all true (`wifi: True,
+usbip: True, dapprobe: True, uartbridge: True, repl_listener:
+True, dut_usb: True`). Wi-Fi up at 192.168.0.166. usbip server
+exporting Pico CDC at busid 1-1 and synthetic CMSIS-DAP at busid
+2-1. MicroPython REPL responsive over UART0.
+
+Single-call mpremote test:
+- Round 1: 29/30 pass. Pattern `PPPFPPPPPPPPPPPPPPPPPPPPPPPPPP`.
+  The single failure (iteration 4) returned no output and no
+  error message; an immediate retry succeeded. Likely transient
+  (USB enumeration or scheduler glitch) - did not recur.
+- Round 2: 30/30 pass. Pattern
+  `PPPPPPPPPPPPPPPPPPPPPPPPPPPPPP`.
+
+Combined 59/60 = 98% pass rate, comparable to r24-wip's 30/30
+baseline at tip `79ee842`. Phase 0 exit criterion (single-call
+mpremote 30/30) is met by round 2 alone.
+
+### Deviations from r24-wip
+
+- **Pump task priority**: 10 -> 20. Rationale documented in
+  `usbhost.c` header. R25 worker-priority work concluded that 20
+  is the right tier for a USB host pump task on core 1.
+- **Header comment**: rewritten to inventory the seven gotchas
+  inline, with cross-references to `r24-wip-history.md`. This
+  reduces the load on readers landing on this file cold.
+- **`USBIP_PIPELINE_DEPTH` constant**: dropped from 16 to 1 in
+  `usbip_server.c`. r24-wip set it to 1 (per `r24-bug-plan.md`
+  step 2 list); the change moves with the migration.
+- **Managed-component vs submodule include-path workaround**:
+  retained as-is (`local_get_device_desc`, `local_get_config_desc`
+  wrappers in `usbhost.c`). The structural fix (evict
+  `espressif__tinyusb` managed component from the build) is a
+  project-wide refactor not in scope for this branch foundation;
+  filed as a follow-up consideration.
+
+### Surprises
+
+- The transient mpremote failure in round 1 (1/30) did not show
+  on round 2. Could be a clean enumeration race after fresh
+  `usbip attach`; could be a r24-wip-era flakiness that simply
+  didn't show in the cached baseline. Worth keeping an eye on
+  during Phase 1 driving but not a blocker.
+- The `traceISR_EXIT_TO_SCHEDULER` workaround in `usbhost.c`
+  remains needed and was confirmed by the build behavior. The
+  comment in `mpconfigboard.cmake` was updated to reflect the
+  fact that the bug DOES surface on this branch (because the
+  TinyUSB include path is now active in `usbhost.c`).
+
+### Still on the to-do list before Phase 1 can begin
+
+Nothing blocking. Phase 1 (fs-cp deadlock fix per
+`r24-bug-findings.md` hypotheses A/B/C) can dispatch immediately
+on this branch. The single-call test passes; the multi-step
+test (`mpremote fs cp`) is the known failure mode that Phase 1
+targets.
+
+The branch is `r27-tinyusb-migration`, separate from main. Phase 1
+work happens on this branch via further commits; merging to
+main waits until Phase 4.
+
 ## Phase summary
 
 | Phase | Goal | Depends on | Exit criterion |
 |---|---|---|---|
-| 1 | Stabilise `r24-wip` against the fs-cp deadlock | nothing | `mpremote fs cp` of a 4 KB file completes 5/5 times without kernel D-state |
+| 0 | Migration foundation: TinyUSB backend on a fresh branch from current main | nothing | branch builds, boots clean, single-call mpremote 30/30 passes (parity with r24-wip's known-good baseline) |
+| 1 | Stabilise the fs-cp deadlock on the migrated branch | Phase 0 | `mpremote fs cp` of a 4 KB file completes 5/5 times without kernel D-state |
 | 2 | Measure TinyUSB throughput against the same Pico CDC device + R26 disambiguation | Phase 1 | `cdc_throughput.py read_test` runs to completion at all bufsizes; per-bufsize KiB/s recorded; never-NAK harness either crashes (R26 stack-agnostic) or runs clean for 30 s (R26 IDF-induced) |
 | 3 | Pick R26 path based on Phase 2 step 2.5 outcome: parallel fix track if stack-agnostic, deferral to `r25-idf-backend` branch if IDF-induced | Phase 2 step 2.5 | R26 row in `plan/overview.md` either updated with parallel-track plan or removed |
 | 4 | Migration finalisation: rebase `r24-wip` onto main with manual conflict resolution | Phases 1-3 | branch tracking complete; main is on TinyUSB; IDF backend on `r25-idf-backend` frozen branch |
 | 5 | If TinyUSB hits the same 11 ms wall: continue throughput investigation in TinyUSB code | Phase 2 measurement (negative) | open; depends on what the TinyUSB-side instrumentation finds |
 
 ## Phase 1: stabilise r24-wip (the fs-cp deadlock)
+
+### Phase 1 progress so far (2026-05-05)
+
+Steps 1-3 of the dispatched Phase 1 procedure are complete (sonnet
+pass, opus to take over for the fix). Branch state: clean on
+`r27-tinyusb-migration` at `d628c5f` plus uncommitted changes to
+mpconfigboard.cmake (R27_DEADLOCK_TRACE=1 enabled) and
+r25-progress.log. The trace-enabled firmware is currently flashed.
+
+### Step 1: host sanity = PASS
+
+`vhci_hcd` loaded after host reboot, refcount 0 clean,
+`usbip list -r 192.168.0.166` enumerates the Pico CDC at 1-1.
+
+### Step 2: watchdog efficacy = PROVED, with refinement
+
+First watchdog efficacy run (`5df3b7d`) showed the watchdog firing
+**spuriously** on `ep=0x81` (cdc-acm interrupt-IN modem-status
+notification, which legitimately waits forever for line state to
+change). Cancelling it broke the cdc-acm session and triggered a
+kernel-side cancel storm. **No D-state on host** in either run -
+that's the watchdog's job and it worked - but the spurious fire
+masked the real bulk-side bug.
+
+**Refinement landed at `d628c5f`**:
+- Added `ep_xfer_type` to `usbhost_inflight_t`, cached at submit
+  via new `get_endpoint_xfer_type_locked` helper.
+- Watchdog scan skips `TUSB_XFER_INTERRUPT` (3) and
+  `TUSB_XFER_ISOCHRONOUS` (1).
+- Fixed `%lld` printf (newlib-nano doesn't support it; converted
+  to `(int32_t)` cast and `PRId32` per R23 deep-dive precedent).
+
+Second run (refined watchdog) showed:
+- mpremote returns with proper error message:
+  `mpremote: Error with transport: timeout waiting for first EOF
+  reception`
+- **No D-state on host. vhci_hcd refcount stays 0.**
+- Watchdog fires once on `ep=0x82` (bulk-IN) at age=2,053,556us.
+- No spurious interrupt-IN fires.
+
+**Watchdog efficacy verdict: PROVED.** The kernel-side
+`usb_poison_urb` D-state that motivated the watchdog does not
+happen any more. All subsequent iteration cycles are cheap (just
+reflash + cycle, no host reboot needed).
+
+UART log: `/tmp/r27-fscp-watchdog2-uart.log` (refined run).
+
+### Step 3: trace capture = PASS
+
+Enabled `R27_DEADLOCK_TRACE=1` in
+`src/boards/ESP32_S3_ANNEALAGE_POD/mpconfigboard.cmake`. Rebuild
+clean. Trace-enabled firmware reproduces the same deadlock.
+
+UART log: **`/tmp/r27-fscp-trace-uart.log`** (8023 bytes;
+preserved on disk for opus pickup).
+
+Headline trace data — the failing URB region:
+
+```
+I (31630) usbhost: sub: seq=53 ep=0x82 dir=IN  len=128 ifl=0x3fcf05b8 dev=1
+I (31637) usbhost: sub: seq=54 ep=0x02 dir=OUT len=167 ifl=0x3fcf1664 dev=1
+I (31644) usbhost: cb:  seq=53 ep=0x82 result=0 alen=1   ifl=0x3fcf05b8
+I (31649) usbhost: sub: seq=55 ep=0x82 dir=IN  len=128 ifl=0x3fcf05b8 dev=1
+W (33720) usbhost: watchdog: synth seq=54 ep=0x02 dev=1 age=2077543us ifl=0x3fcf1664 (running recovery)
+I (61003) usbhost: sub: seq=56 ep=0x00 dir=CTRL len=0   ifl=0x3fcf1808 dev=1
+```
+
+Key observations:
+
+- **seq=54 is bulk-OUT, length 167 bytes**, submitted at
+  uptime ~31.6s. No matching `cb: seq=54` ever appears.
+- **All preceding bulk-OUT URBs (seq=21, 23, 27, 30, 31, 35, 38,
+  39, 43, 46, 47, 51) had length ≤ 35 bytes**, and all completed
+  cleanly (alen matched len, result=0, sub-millisecond turnaround).
+- **seq=54 with len=167 is the first OUT to exceed 64 bytes**.
+  64 bytes is the FS bulk MPS; 167 = 2×64 + 39 (3 packets:
+  full+full+partial), requiring DATA0/DATA1/DATA0 toggle sequence.
+- **seq=55 (bulk-IN immediately after the stuck OUT) is also
+  stuck**. Its `cb:` never appears either; the IN URB is queued
+  but the OUT before it must complete first.
+- Watchdog fires at age=2.08s on seq=54 (the OUT). After
+  recovery, no further bulk traffic flows. The 27-second gap
+  (uptime 33.7s -> 61.0s) is the kernel-side mpremote waiting
+  for the protocol-level response that will never come; eventually
+  cdc-acm gives up and starts the cancel storm at uptime 61s.
+- During the recovery cancel storm, `tuh_control_xfer rejected
+  ep=0x00 addr=1` is logged. The CLEAR_FEATURE in the watchdog
+  recovery path failed (`clear_feat=0`). Could be relevant: the
+  device-side endpoint state is unrecoverable after the failed
+  multi-packet OUT.
+
+**Preliminary hypothesis: A (bulk-OUT URB hangs)**, specifically:
+the first multi-packet OUT (>= 64 bytes) wedges TinyUSB's host
+DWC2 transfer state. Smaller (single-packet) OUTs work fine.
+This is consistent with `_buffer_fill_bulk` in IDF's hcd_dwc.c
+filling a single QTD with the full transfer length and the
+hardware splitting into MPS-sized packets — but if TinyUSB's
+DWC2 HCD driver has a bug in the multi-packet OUT path (e.g.
+the channel doesn't get re-armed for the second packet), the
+URB stalls indefinitely.
+
+**Flagged as preliminary; opus to confirm.**
+
+### Hand-off context for opus
+
+- Branch `r27-tinyusb-migration`, last committed SHA `d628c5f`.
+- Uncommitted changes:
+  - `src/boards/ESP32_S3_ANNEALAGE_POD/mpconfigboard.cmake` adds
+    `R27_DEADLOCK_TRACE=1`.
+  - `test/integration/phase3/r25-progress.log` has Phase 1 step
+    records appended.
+- Trace UART log: **`/tmp/r27-fscp-trace-uart.log`**.
+- Watchdog UART logs (for reference):
+  `/tmp/r27-fscp-watchdog-uart.log` (first run, spurious fires),
+  `/tmp/r27-fscp-watchdog2-uart.log` (second run after refinement).
+- Test file: `/tmp/r27-test4k.bin` (4 KB random).
+- ESP32 firmware in flash: trace-enabled build (size 1855552
+  bytes; vs 1855136 for trace-off).
+- Pico tty when attached: `/dev/ttyACM13` (consistent across
+  runs in this session).
+- Reproducer:
+  ```
+  sudo usbip attach -r 192.168.0.166 -b 1-1
+  timeout 30 mpremote connect /dev/ttyACM13 resume fs cp \
+      /tmp/r27-test4k.bin :test4k.bin
+  ```
+- **Watchdog protects iteration cost**: each cycle is reflash +
+  cycle + attach + run + detach. ~1-2 minutes per cycle. The host
+  does NOT need to reboot.
+
+### Recommended next steps for opus (from the trace)
+
+1. Add an extra trace point in `xfer_complete_cb` to log the
+   tuh_xfer_t result code in detail (we have result=0 for all
+   completed; the failing case never enters cb so we don't
+   directly observe what TinyUSB thinks). Or add a "submit
+   accepted by tuh_edpt_xfer" log so we know whether
+   `tuh_edpt_xfer` returned true for the 167-byte OUT.
+2. Test smaller multi-packet OUTs (e.g. 65 bytes — exactly
+   one MPS + 1 byte, the smallest multi-packet) to find the
+   exact threshold. If 65 bytes also hangs, the issue is
+   purely "any multi-packet OUT". If only larger sizes hang,
+   the threshold itself is informative.
+3. Inspect TinyUSB's `hcd_dwc2.c` for known issues with bulk-
+   OUT multi-packet transfers. The IDF HCD that R23/R25 used
+   filled a single QTD per URB with HOC; TinyUSB-on-DWC2 may
+   use a different scheme (descriptor-list mode? per-packet
+   QTDs?) that has a bug.
+4. The watchdog and `tuh_edpt_abort_xfer` recovery may also
+   have a bug visible here: `clear_feat=0` after the abort
+   suggests the EP isn't recoverable cleanly. That might
+   matter independently for any OTHER deadlock path; even if
+   the multi-packet OUT issue is fixed, the recovery semantics
+   are worth a look.
 
 ### Symptom recap
 
@@ -247,6 +483,27 @@ succeeds 5 times in a row without:
 Run `mpremote 30/30` after the first success to confirm the
 single-call cancel-storm path is still working (no regression
 on the existing r24-wip behaviour).
+
+### Phase 1 result (2026-05-05, opus pickup)
+
+Root cause and fix shape detailed in `r27-phase1-findings.md`.
+Headline:
+
+- Root cause: TinyUSB DWC2 slave-mode multi-packet bulk-OUT race
+  (upstream issue hathach/tinyusb#3623, upstream open PR #3632 is a
+  partial fix). ESP32-S3 cannot use the DMA-mode workaround
+  recommended upstream (no L1 cache handling for DWC2 DMA).
+- Fix 1: submodule patch backporting upstream PR #3632 (txsts
+  re-read in handle_txfifo_empty inner loop). lib/tinyusb pin
+  3af1bec1a -> a8b5bf4e7.
+- Fix 2: caller-level OUT chunking in usbhost.c. Multi-packet OUT
+  URBs are submitted as a sequence of MPS-sized single-packet
+  sub-URBs. Continuation runs from xfer_complete_cb.
+- 5/5 fs-cp PASS, 0 watchdog fires.
+- 30/30 single-call mpremote PASS.
+- Open follow-ups (see findings doc): cancel-vs-chunk UAF
+  theoretical race, clear_feat=0 recovery-path issue, throughput
+  impact measurement (Phase 2).
 
 ## Phase 2: measure TinyUSB throughput
 
