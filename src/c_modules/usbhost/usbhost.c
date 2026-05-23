@@ -98,6 +98,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -125,10 +126,33 @@ static xfer_result_t local_get_device_desc(uint8_t dev_addr, tusb_desc_device_t 
 
 static xfer_result_t local_get_config_desc(uint8_t dev_addr, void *buf, uint16_t len) {
     xfer_result_t result = XFER_RESULT_INVALID;
-    if (!tuh_descriptor_get_configuration(dev_addr, 0, buf, len, NULL,
-            (uintptr_t)&result)) {
+    /* Use the synchronous form via tuh_descriptor_get directly so we can
+     * see actual_len. tuh_descriptor_get_configuration is a thin wrapper
+     * around tuh_descriptor_get; the wrapper hides actual_len from us. */
+    tusb_control_request_t request = {
+        .bmRequestType_bit = {
+            .recipient = TUSB_REQ_RCPT_DEVICE,
+            .type      = TUSB_REQ_TYPE_STANDARD,
+            .direction = TUSB_DIR_IN
+        },
+        .bRequest = TUSB_REQ_GET_DESCRIPTOR,
+        .wValue   = (TUSB_DESC_CONFIGURATION << 8) | 0,
+        .wIndex   = 0,
+        .wLength  = len
+    };
+    tuh_xfer_t xfer = {
+        .daddr       = dev_addr,
+        .ep_addr     = 0,
+        .setup       = &request,
+        .buffer      = buf,
+        .complete_cb = NULL,
+        .user_data   = (uintptr_t)&result,
+    };
+    if (!tuh_control_xfer(&xfer)) {
         return XFER_RESULT_TIMEOUT;
     }
+    ESP_LOGI("usbhost", "local_get_config_desc: requested=%u actual_len=%u result=%d",
+             (unsigned)len, (unsigned)xfer.actual_len, (int)result);
     return result;
 }
 
@@ -445,6 +469,21 @@ static void parse_config_desc(const uint8_t *raw, size_t total,
     }
     desc->num_interfaces = intf_count;
     *num_eps_out         = ep_count;
+#ifdef R27_DEADLOCK_TRACE
+    ESP_LOGI(TAG, "parse_config: total=%u intf=%u eps=%u",
+             (unsigned)total, (unsigned)intf_count, (unsigned)ep_count);
+    char hex[80];
+    size_t dump = total < 24 ? total : 24;
+    for (size_t i = 0; i < dump; i++) {
+        snprintf(hex + 3 * i, sizeof(hex) - 3 * i, "%02x ", raw[i]);
+    }
+    ESP_LOGI(TAG, "  first %u bytes: %s", (unsigned)dump, hex);
+    for (uint8_t i = 0; i < ep_count; i++) {
+        ESP_LOGI(TAG, "  ep[%u] addr=0x%02x attr=0x%02x mps=%u interval=%u",
+                 i, eps_out[i].address, eps_out[i].attributes,
+                 (unsigned)eps_out[i].max_packet_size, eps_out[i].interval);
+    }
+#endif
 }
 
 /* -------------------------------------------------------------------------
@@ -496,17 +535,6 @@ typedef struct usbhost_inflight {
                                             * legitimately wait
                                             * indefinitely (interrupt-IN). */
     volatile uint32_t  watchdog_armed;     /* CAS 0->1 to claim recovery */
-    /* R27 caller-level OUT chunking workaround for hathach/tinyusb#3623
-     * slave-mode multi-packet bulk-OUT race. chunk_size is the MPS used
-     * to chunk; 0 means no chunking (single submission). chunk_sent is
-     * cumulative bytes successfully transmitted so far; we re-submit the
-     * next chunk from xfer_complete_cb until chunk_sent == payload_len
-     * or an error is reported. Only set for non-control OUT URBs whose
-     * payload exceeds MPS; IN URBs and small OUTs use the single-shot
-     * path. ep_mps is cached for re-issuing without the state lock. */
-    uint16_t           chunk_size;
-    uint16_t           ep_mps;
-    size_t             chunk_sent;
 #ifdef R27_DEADLOCK_TRACE
     /* Local monotonic trace counter. NOT the usbip wire seqnum; this is
      * a per-host local id for correlating sub/cb log lines under a
@@ -514,6 +542,29 @@ typedef struct usbhost_inflight {
     uint32_t           trace_seq;
 #endif
 } usbhost_inflight_t;
+
+/* Allocate a DMA-capable URB buffer in internal SRAM.
+ *
+ * Required for CFG_TUH_DWC2_DMA_ENABLE=1 on ESP32-S2/S3 (and P4 in
+ * the non-PSRAM-DMA configuration). The DWC2 internal DMA engine
+ * accesses internal SRAM directly via the AHB bus and cannot reach
+ * PSRAM (on S2/S3) without cache flushes that we do not perform.
+ *
+ * MALLOC_CAP_DMA: ensure the allocation can be DMA'd to/from.
+ * MALLOC_CAP_INTERNAL: stay in internal SRAM, not PSRAM. Default
+ *   malloc() can return PSRAM for allocations >= 8 KB on this board
+ *   (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192) which would silently
+ *   break DMA transfers; force INTERNAL to be safe.
+ *
+ * Alignment falls out of heap_caps_malloc; for DWC2 internal DMA on
+ * ESP32-S3 4-byte alignment is sufficient (no L1 cache line concern).
+ *
+ * Returns NULL on OOM; caller must handle.
+ */
+static void *usbhost_buf_alloc(size_t len)
+{
+    return heap_caps_malloc(len, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+}
 
 static void inflight_free(usbhost_inflight_t *inflight)
 {
@@ -523,6 +574,9 @@ static void inflight_free(usbhost_inflight_t *inflight)
     if (inflight->done_sem) {
         vSemaphoreDelete(inflight->done_sem);
     }
+    /* heap_caps_malloc-ed buffers can be freed with free(); IDF maps
+     * free() through the multi-heap allocator that also handles
+     * heap_caps_malloc. */
     free(inflight->buf);
     free(inflight);
 }
@@ -539,59 +593,32 @@ static void xfer_complete_cb(tuh_xfer_t *xfer)
     ESP_LOGI(TAG, "cb:  seq=%" PRIu32 " ep=0x%02x result=%d alen=%u ifl=%p",
              inflight->trace_seq, xfer->ep_addr,
              (int)xfer->result, (unsigned)xfer->actual_len, inflight);
-#endif
-
-    /* R27 caller-level OUT chunking continuation. If this inflight is a
-     * chunked OUT that has not yet completed all chunks (and the just-
-     * finished chunk succeeded), advance the offset and submit the next
-     * chunk. We do this BEFORE the cancel-CAS so the inflight remains
-     * claimable by the cancel path (in case a cancel arrives mid-chunk).
-     * Only the FINAL chunk falls through to the CAS+user-callback path
-     * below. See submit_xfer for the chunking rationale (workaround for
-     * hathach/tinyusb#3623 slave-mode multi-packet bulk-OUT race). */
-    if (inflight->chunk_size > 0 && (int)xfer->result == 0) {
-        inflight->chunk_sent += (size_t)xfer->actual_len;
-        if (inflight->chunk_sent < inflight->payload_len &&
-            (uint32_t)xfer->actual_len == inflight->chunk_size) {
-            /* More chunks remain. Submit the next one. The same inflight
-             * is reused; current_inflight back-pointer remains set. */
-            size_t remain = inflight->payload_len - inflight->chunk_sent;
-            uint32_t next_len = (remain < inflight->chunk_size)
-                ? (uint32_t)remain : inflight->chunk_size;
-            tuh_xfer_t next;
-            memset(&next, 0, sizeof(next));
-            next.daddr       = inflight->dev_addr;
-            next.ep_addr     = inflight->ep_addr_full;
-            next.complete_cb = xfer_complete_cb;
-            next.user_data   = (uintptr_t)inflight;
-            next.buffer      = inflight->buf + inflight->chunk_sent;
-            next.buflen      = next_len;
-            inflight->t_submit_us = esp_timer_get_time();
-            bool ok = tuh_edpt_xfer(&next);
-            if (ok) {
-                return; /* wait for next completion */
-            }
-            /* Submission failed mid-chunk: fall through to CAS+complete
-             * with whatever state we have. xfer->result was 0 before;
-             * synthesise an EIO-equivalent here by using actual_len 0
-             * and result XFER_RESULT_FAILED via the existing path.
-             * We can't modify xfer easily, so set inflight to indicate
-             * partial completion and let the existing path handle. */
-            ESP_LOGW(TAG, "tuh_edpt_xfer rejected mid-chunk ep=0x%02x addr=%u "
-                          "sent=%u of %u",
-                     inflight->ep_addr_full, inflight->dev_addr,
-                     (unsigned)inflight->chunk_sent,
-                     (unsigned)inflight->payload_len);
-            /* Mark chunking done so the user callback treats this as final;
-             * status will come from xfer->result which was 0, so the user
-             * sees success with partial bytes. That's wrong but rare; the
-             * cancel path will also handle if the URB hasn't been freed. */
-            inflight->chunk_size = 0;
-        } else {
-            /* Final chunk just completed successfully (or short transfer).
-             * Fall through to the CAS+user-callback path. */
+    /* R27 DMA short-IN corruption triage: hex-dump short bulk-IN
+     * URB buffers right at the cb. We see a paste-mode-entry
+     * response where Pico sends b"R\x01" (2 bytes) but our reader
+     * gets b"\x80\x00\x01" (3 bytes). The dump shows what landed in
+     * inflight->buf vs what the wire sent, plus adjacent bytes to
+     * test the heap-reuse / channel-state / round-up hypotheses
+     * documented in r27-dma-fix-findings.md. Only fires for
+     * bulk-IN with actual_len <= 16 to keep the noise bounded. */
+    if ((xfer->ep_addr & 0x80) && (xfer->ep_addr & 0x0f) != 0 &&
+        xfer->actual_len > 0 && xfer->actual_len <= 64 &&
+        inflight->buf && inflight->buf_len > 0) {
+        size_t valid = xfer->actual_len;
+        if (valid > inflight->buf_len) {
+            valid = inflight->buf_len;
         }
+        char vhex[64 * 3 + 1];
+        for (size_t i = 0; i < valid && i < 64; i++) {
+            snprintf(vhex + 3 * i, sizeof(vhex) - 3 * i, "%02x ",
+                     inflight->buf[i]);
+        }
+        ESP_LOGI(TAG, "  short_in seq=%" PRIu32 " buf=%p buf_len=%u "
+                      "valid(%u): %s",
+                 inflight->trace_seq, inflight->buf,
+                 (unsigned)inflight->buf_len, (unsigned)valid, vhex);
     }
+#endif
 
     /* R24 diagnostic: track natural-completion win rate vs cancel-synth.
      * Always-on counters (cheap), summary log every 50 wins. */
@@ -801,7 +828,7 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
     if (buf_len == 0) {
         buf_len = 1;
     }
-    inflight->buf = malloc(buf_len);
+    inflight->buf = usbhost_buf_alloc(buf_len);
     inflight->buf_len = buf_len;
     if (!inflight->buf) {
         /* Nullify done_sem so inflight_free doesn't delete the caller's sem. */
@@ -822,73 +849,13 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
         memcpy(inflight->buf, out_data, copy);
     }
 
-    /* R27 caller-level OUT chunking workaround for hathach/tinyusb#3623.
-     * The DWC2 slave-mode HCD races against device NAKs on multi-packet
-     * bulk-OUT (FIFO write while previous packet is being NAKed leaves
-     * the channel without an XFER_COMPLETE). Upstream PR #3632 (txsts
-     * re-read) is a partial fix; full fix at the host-stack level
-     * requires DMA mode (not supported on ESP32-S3). HiFiPhile's
-     * confirmed-working workaround on the issue thread is "write only
-     * 1 packet each time"; we implement that here by submitting OUT
-     * URBs as a sequence of MPS-sized chunks, each chunk a single
-     * tuh_edpt_xfer call. The continuation runs from xfer_complete_cb.
-     * Only applied for non-control OUT bulk/interrupt transfers; IN and
-     * control transfers go single-shot.
-     *
-     * MPS comes from the device's parsed endpoint descriptor (cached
-     * at enumeration in usbhost_slot_t.endpoints[].max_packet_size),
-     * NOT a hardcoded value. For FS bulk endpoints this is 64; for HS
-     * bulk endpoints this is 512 (or whatever the device declares).
-     *
-     * TODO: untested on HS devices; verify multi-packet OUT chunking
-     * with wMaxPacketSize=512 once HS hardware is available in the
-     * test rig. The hathach/tinyusb#3623 race is documented for FS
-     * + DWC2; HS may or may not exhibit the same shape (HS also uses
-     * the DWC2 slave-mode HCD on ESP32-S3 OTG, so the FIFO race likely
-     * carries over, but the larger MPS may change the timing window).
-     *
-     * No fallback to 64 if the EP descriptor lookup fails: that would
-     * silently mis-chunk on HS endpoints (cutting 512-byte packets
-     * into 64-byte fragments produces 8x as many packets, all of
-     * them under-sized, which is malformed OUT traffic). If MPS is
-     * unavailable for a multi-packet OUT we surface -ENODEV; the
-     * lane will report the URB as failed rather than wedge the bus. */
-    inflight->chunk_size = 0;
-    inflight->chunk_sent = 0;
-    inflight->ep_mps = 0;
-    size_t first_chunk_len = xfer_payload;
-    if (!is_control && !is_in && xfer_payload > 0) {
-        uint16_t mps = 0;
-        xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
-        if (slot >= 0) {
-            mps = get_endpoint_mps_locked(slot, ep_addr);
-        }
-        xSemaphoreGive(s_state.state_mutex);
-        if (mps == 0) {
-            /* No descriptor data for this EP. Multi-packet OUT cannot
-             * be chunked correctly without knowing MPS. Single-packet
-             * OUTs (xfer_payload <= 64 worst-case FS MPS) might survive
-             * unchunked, but we cannot tell the difference here without
-             * MPS, so refuse the submit. The lane treats this as a
-             * URB-submit failure and reports it back via the kernel.
-             * This is structural (descriptor parsing didn't happen or
-             * raced with submit); should not occur in normal operation. */
-            ESP_LOGE(TAG, "submit_xfer: ep=0x%02x has no cached MPS "
-                          "(slot=%d, num_endpoints=%d). Refusing "
-                          "multi-packet OUT submit. dev_addr=%u",
-                     ep_addr, slot,
-                     (slot >= 0) ? s_state.devices[slot].num_endpoints : -1,
-                     dev_addr);
-            inflight->done_sem = NULL; /* don't delete caller's sem */
-            inflight_free(inflight);
-            return -ENODEV;
-        }
-        if (xfer_payload > mps) {
-            inflight->chunk_size = mps;
-            inflight->ep_mps = mps;
-            first_chunk_len = mps;
-        }
-    }
+    /* R27 DMA-mode: bulk-OUT URBs are submitted as a single tuh_edpt_xfer
+     * with the full payload. The DWC2 internal-DMA path handles
+     * multi-packet bulk-OUT in hardware, so the slave-mode FIFO/NAK
+     * race that motivated the Phase 1 chunking workaround does not
+     * apply here. Phase 1's chunking commit (34583f1) was reverted in
+     * 2026-05-06 once DMA mode became viable on ESP32-S3; see
+     * test/integration/phase3/r27-dma-fix-findings.md. */
 
     tuh_xfer_t xfer;
     memset(&xfer, 0, sizeof(xfer));
@@ -909,7 +876,7 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
         xfer.buffer = inflight->buf + 8;
     } else {
         xfer.buffer = inflight->buf;
-        xfer.buflen = (uint32_t)first_chunk_len;
+        xfer.buflen = (uint32_t)xfer_payload;
     }
 
     /* Publish the inflight as the current in-flight on this (slot, ep)
@@ -988,9 +955,37 @@ static void enumerate_device(uint8_t dev_addr)
         return;
     }
 
-    uint8_t cfg_buf[512];
+    /* R27 DMA-mode requirement: DWC2 internal-DMA writes to memory in
+     * 4-byte words and rounds the destination address DOWN to a 4-byte
+     * boundary. If cfg_buf were not 4-byte aligned, the HW would write
+     * IN data starting (start & ~3), shifting the data toward lower
+     * addresses by `(start & 3)` bytes and clobbering the caller's
+     * preceding stack frame. Force 4-byte alignment so wire byte 0
+     * lands at cfg_buf[0]. Empirically observed on ESP32-S3 with the
+     * Pico CDC: when cfg_buf landed at 0x...b6, the 75-byte config
+     * descriptor was written with a 2-byte left shift (cfg_buf[0]
+     * held wire byte 2; bLength + bDescriptorType were lost into
+     * cfg_buf - 2). */
+    uint8_t cfg_buf[512] __attribute__((aligned(4)));
     memset(cfg_buf, 0, sizeof(cfg_buf));
+    /* R27 DMA enumeration debug: print cfg_buf address so we can tell
+     * whether stack-backed scratch lands in internal SRAM (DMA reaches)
+     * or PSRAM (DMA does not on S2/S3, must be flushed). Internal SRAM
+     * range on ESP32-S3 is approximately 0x3FC8_8000 - 0x3FCF_FFFF;
+     * PSRAM is 0x3C00_0000 - 0x3DFF_FFFF. */
+    ESP_LOGI(TAG, "enumerate_device: cfg_buf=%p (stack)", (void*)cfg_buf);
     res = local_get_config_desc(dev_addr, cfg_buf, sizeof(cfg_buf));
+    {
+        /* Dump the full config descriptor in 32-byte chunks. */
+        for (size_t base = 0; base < 256; base += 32) {
+            char hex[3 * 32 + 1];
+            for (size_t i = 0; i < 32; i++) {
+                snprintf(hex + 3 * i, sizeof(hex) - 3 * i, "%02x ", cfg_buf[base + i]);
+            }
+            ESP_LOGI(TAG, "  cfg_buf[%3u..%3u]= %s",
+                     (unsigned)base, (unsigned)(base + 31), hex);
+        }
+    }
     if (res != XFER_RESULT_SUCCESS) {
         ESP_LOGW(TAG, "get_config_desc failed addr=%u res=%d", dev_addr, (int)res);
     }
@@ -1697,22 +1692,37 @@ static void usbhost_watchdog_task(void *arg)
                      * stack and then got stuck. */
                     continue;
                 }
-                /* Skip endpoints that legitimately wait indefinitely.
-                 * Interrupt-IN endpoints on CDC-ACM (e.g. ep 0x81 for
-                 * modem-status notifications) sit pending forever
-                 * waiting for the device to have something to report.
-                 * Cancelling them spuriously breaks the TTY contract
-                 * and makes the kernel-side cdc-acm tear down the
-                 * session. Isochronous endpoints similarly may have
-                 * long completion windows.
+                /* Skip endpoints that legitimately wait indefinitely
+                 * for device-side activity:
+                 *   - Interrupt-IN: CDC-ACM modem-status notifications
+                 *     (ep 0x81) sit pending forever until line state
+                 *     changes. Cancelling spuriously breaks the TTY
+                 *     contract.
+                 *   - Isochronous: long completion windows, scheduled.
+                 *   - Bulk-IN: under DMA mode the controller NAK-loops
+                 *     in HW with no IRQ activity, so an IN URB waiting
+                 *     for device data appears identical to a wedged
+                 *     URB to a software-only watchdog. Cancelling
+                 *     spuriously kills legitimate idle reads (the
+                 *     CDC-ACM bulk-IN queue normally has many URBs
+                 *     pending while the user types nothing). Under
+                 *     slave mode the same logic was masked because
+                 *     each NAK fired an IRQ; under DMA mode there is
+                 *     no such heartbeat.
                  *
-                 * The watchdog's purpose is to bound bulk-URB
-                 * completion latency so the kernel-side cdc-acm
-                 * never poisons a URB we cannot give back. Bulk and
-                 * control are the only types that fall in that
-                 * category. */
+                 * The watchdog's remaining responsibility is to bound
+                 * bulk-OUT and control completion latency: those are
+                 * host-driven (we have data to send) and should
+                 * complete in milliseconds; if they wedge for 2 s
+                 * something is structurally wrong. */
                 if (ifl->ep_xfer_type == 1 /* TUSB_XFER_ISOCHRONOUS */ ||
                     ifl->ep_xfer_type == 3 /* TUSB_XFER_INTERRUPT  */) {
+                    continue;
+                }
+                /* For bulk endpoints, skip IN direction (device-driven).
+                 * Watch only OUT (host-driven) and control (handshake). */
+                if (ifl->ep_xfer_type == 2 /* TUSB_XFER_BULK */ &&
+                    (ifl->ep_addr_full & 0x80) != 0) {
                     continue;
                 }
                 int64_t age = now - ifl->t_submit_us;
@@ -1849,7 +1859,7 @@ static int sync_xfer(const char busid[USBIP_BUSID_SIZE],
     if (buf_len == 0) {
         buf_len = 1;
     }
-    inflight->buf = malloc(buf_len);
+    inflight->buf = usbhost_buf_alloc(buf_len);
     inflight->buf_len = buf_len;
     if (!inflight->buf) {
         inflight_free(inflight);
