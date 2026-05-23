@@ -1,0 +1,128 @@
+From 7d112f9c80a7c7dd34e24b465b2888167090c99a Mon Sep 17 00:00:00 2001
+From: Andrew Leech <andrew.leech@planetinnovation.com.au>
+Date: Thu, 7 May 2026 19:15:06 +1000
+Subject: [PATCH] hcd/dwc2: hcd_edpt_abort_xfer should fire xfer_complete
+ callback.
+
+hcd_edpt_abort_xfer disabled the active channel but did not
+guarantee a hcd_event_xfer_complete callback for the in-flight
+transfer. The channel-halted IRQ that channel_disable triggered
+landed in handle_channel_in_dma / handle_channel_out_dma /
+handle_channel_in_slave / handle_channel_out_slave with no
+XFER_COMPLETE / STALL / BABBLE / XACT_ERR set, which the
+dispatch handlers leave as is_done=false and the natural
+callback never fires. Callers who needed a completion signal
+after abort had to synthesise one externally.
+
+Mark the channel for abort before disabling, then check the
+flag in handle_channel_irq's outer dispatch loop. If the
+channel is aborted AND the channel is no longer enabled
+(distinguishes a true abort halt from a NAK retry that
+re-armed the channel), force is_done and report
+XFER_RESULT_FAILED. The natural callback path then handles
+the giveback like any other terminal completion. The flag is
+single-shot and is cleared after firing so a subsequent reuse
+of the channel does not see a stale state.
+
+The function previously returned true unconditionally; tighten
+the contract so it returns false when no in-flight transfer
+was found (no channel allocated for the EP). The fix is
+symmetric across DMA and slave-mode IN/OUT channel handlers
+because they all dispatch through handle_channel_irq.
+
+Reproducer: the mpy-pod ESP32-S3 USB-host-over-IP forwarder
+issues tuh_edpt_abort_xfer on every USB/IP CMD_UNLINK from a
+Linux cdc-acm close. Without this patch, every UNLINK leaks
+the inflight URB struct + buffer + lane pipeline slot; a busy
+pipe (cdc-acm typically tracks 16 read URBs) leaks them all
+in a single close storm.
+
+Signed-off-by: Andrew Leech <andrew.leech@planetinnovation.com.au>
+---
+ src/portable/synopsys/dwc2/hcd_dwc2.c | 45 +++++++++++++++++++++------
+ 1 file changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/src/portable/synopsys/dwc2/hcd_dwc2.c b/src/portable/synopsys/dwc2/hcd_dwc2.c
+index 49ab845b6..fb67ed64c 100644
+--- a/src/portable/synopsys/dwc2/hcd_dwc2.c
++++ b/src/portable/synopsys/dwc2/hcd_dwc2.c
+@@ -104,6 +104,7 @@ typedef struct {
+     uint8_t period_split_nyet_count : 3;
+     uint8_t halted_nyet : 1;
+     uint8_t closing : 1; // closing channel
++    uint8_t aborted : 1; // hcd_edpt_abort_xfer marked this channel for abort
+   };
+   uint8_t result;
+ 
+@@ -738,8 +739,12 @@ bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t *
+   return edpt_xfer_kickoff(dwc2, ep_id);
+ }
+ 
+-// Abort a queued transfer. Note: it can only abort transfer that has not been started
+-// Return true if a queued transfer is aborted, false if there is no transfer to abort
++// Abort the in-flight transfer (if any) on the given endpoint. The channel
++// is disabled, which causes the channel-halted interrupt to fire; the IRQ
++// handler observes xfer->aborted and reports completion via
++// hcd_event_xfer_complete with XFER_RESULT_FAILED so the caller always
++// receives a callback. Returns true if an in-flight transfer was aborted,
++// false if no channel was active for this endpoint.
+ bool hcd_edpt_abort_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
+   dwc2_regs_t* dwc2 = DWC2_REG(rhport);
+   const uint8_t ep_num = tu_edpt_number(ep_addr);
+@@ -747,17 +752,23 @@ bool hcd_edpt_abort_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
+   const uint8_t ep_id = edpt_find_opened(dev_addr, ep_num, ep_dir);
+   TU_VERIFY(ep_id < CFG_TUH_DWC2_ENDPOINT_MAX);
+ 
+-  // hcd_int_disable(rhport);
+-
+-  // Find enabled channeled and disable it, channel will be de-allocated in the interrupt handler
++  // Find enabled channel and disable it. The channel will be de-allocated
++  // in the interrupt handler after the channel-halted interrupt fires.
+   const uint8_t ch_id = channel_find_enabled(dwc2, dev_addr, ep_num, ep_dir);
+-  if (ch_id < 16) {
+-    dwc2_channel_t* channel = &dwc2->channel[ch_id];
+-    channel_disable(dwc2, channel);
++  if (ch_id >= 16) {
++    return false; // no in-flight transfer
+   }
+ 
+-  // hcd_int_enable(rhport);
++  hcd_xfer_t* xfer = &_hcd_data.xfer[ch_id];
++  dwc2_channel_t* channel = &dwc2->channel[ch_id];
+ 
++  // Mark the xfer as aborted before disabling the channel so the IRQ
++  // handler's channel_irq path reports completion with XFER_RESULT_FAILED
++  // rather than treating the halt as a no-op.
++  xfer->aborted = 1;
++  xfer->result  = XFER_RESULT_FAILED;
++
++  channel_disable(dwc2, channel);
+   return true;
+ }
+ 
+@@ -1359,6 +1370,22 @@ static void handle_channel_irq(uint8_t rhport, bool in_isr) {
+   #endif
+       }
+ 
++      // hcd_edpt_abort_xfer marked this channel for abort. Force the
++      // halted interrupt to be treated as a terminal completion so the
++      // host stack receives a callback. The dispatch handlers leave
++      // is_done=false on a NAK retry (channel re-armed), so guard
++      // against firing on a re-armed channel by also requiring that
++      // the channel is not currently enabled. The flag is single-shot;
++      // clear it after observing the halt.
++      if (xfer->aborted && (hcint & HCINT_HALTED)) {
++        const dwc2_channel_char_t hcchar_post = {.value = channel->hcchar};
++        if (!hcchar_post.enable) {
++          is_done = true;
++          xfer->result = XFER_RESULT_FAILED;
++          xfer->aborted = 0;
++        }
++      }
++
+ #ifdef R27_DEADLOCK_TRACE
+       if (do_in_trace) {
+         uint32_t post_hctsiz = channel->hctsiz;
+-- 
+2.43.0
+

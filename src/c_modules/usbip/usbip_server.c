@@ -1912,6 +1912,28 @@ static void usbip_server_task(void *arg)
         int nodelay = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
+        /* TCP keepalive on the per-client socket. Without this, a host
+         * `usbip detach` that drops the connection asymmetrically (host
+         * side closes, RST/FIN lost in transit, or host kernel module
+         * unloads without a graceful close) leaves the device-side
+         * socket half-open. The client_task blocks in read_exact()
+         * forever, the import slot stays held, and subsequent attach
+         * requests fail with "busid '1-1' already attached, refusing"
+         * until the device is power-cycled.
+         *
+         * Probe after 30 s idle, then every 10 s up to 3 missed probes
+         * (worst-case 60 s to detect a dead peer). lwIP defaults are
+         * SO_KEEPALIVE off, KEEPIDLE=2 hours, which is far too slow
+         * for an interactive bench workflow. */
+        int keepalive = 1;
+        int keepidle  = 30;   /* seconds of idle before first probe */
+        int keepintvl = 10;   /* seconds between probes */
+        int keepcnt   = 3;    /* missed probes before close */
+        setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+
         client_task_arg_t *cargs = malloc(sizeof(*cargs));
         if (cargs == NULL) {
             close(client_fd);

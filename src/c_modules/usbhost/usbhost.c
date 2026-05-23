@@ -21,13 +21,36 @@
  *   3. tuh_xfer_t.setup and .buflen are in a UNION. submit_xfer() sets
  *      ONLY setup for control transfers; setting both corrupts setup
  *      into a pointer-cast-from-int that faults.
- *   4. tuh_edpt_abort_xfer does NOT reliably fire complete_cb for bulk
- *      EPs. usbhost_cancel_ep synthesises completion under an atomic
- *      CAS on inflight->completed.
+ *   4. (HISTORICAL) tuh_edpt_abort_xfer did NOT reliably fire complete_cb
+ *      for bulk EPs. The device-side workaround was a synth path in
+ *      usbhost_cancel_ep that delivered user_cb via atomic CAS on
+ *      inflight->completed. R27 phase 2 PR 3 (upstream
+ *      hcd/dwc2: hcd_edpt_abort_xfer should fire xfer_complete callback,
+ *      lib/tinyusb commit 7d112f9c8) makes the natural callback fire
+ *      reliably on abort. The synth path is now defensive only - the
+ *      CAS arbitrates and natural always wins in healthy operation.
+ *      The synth code can be deleted in a future cleanup once the
+ *      upstream PR has landed and the submodule pin tracks it.
  *   5. tuh_edpt_abort_xfer leaves the DWC2 channel half-allocated.
  *      Recovery is tuh_edpt_close + tuh_edpt_open (in usbhost_cancel_ep).
- *   6. close+open does not reset device-side data toggle. usbhost_cancel_ep
- *      issues CLEAR_FEATURE(ENDPOINT_HALT) via tuh_control_xfer to sync.
+ *      With PR 3 the channel is fully deallocated by channel_dealloc in
+ *      the IRQ handler, so close+open is also defensive only and may
+ *      become a no-op in a future cleanup.
+ *   6. close+open does not reset device-side data toggle. Previously
+ *      this was handled by issuing CLEAR_FEATURE(ENDPOINT_HALT) via
+ *      tuh_control_xfer. R27 phase 2 retired the call: PR 1
+ *      (lib/tinyusb DMA-mode IN handler post-transfer PID save) plus
+ *      the channel ARM path's DATATOGGLE_ERR retry recover the toggle
+ *      desync automatically on the next URB. Removing CLEAR_FEATURE
+ *      eliminates the only blocking tuh_control_xfer in the cancel
+ *      path. Upstream tuh_control_xfer with complete_cb=NULL is a
+ *      polled blocking wait with no timeout (TODO upstream); Pico
+ *      cdc-acm devices NAK CLEAR_FEATURE on bulk EP indefinitely,
+ *      which previously wedged DWC2 EP0 and every subsequent
+ *      control xfer (kernel-side cdc_acm_close hung in
+ *      usb_poison_urb). The user-side completion (sync done_sem
+ *      give / async user_cb) is delivered BEFORE the close+open so
+ *      the kernel-side URB lifecycle is not gated on the recovery.
  *   7. Holding any user mutex around tuh_edpt_abort_xfer deadlocks on
  *      _usbh_mutex. The ep_submit_mutex is held across close+open
  *      but NOT across abort.
@@ -55,11 +78,13 @@
  *   allocates inflight with a done_sem; xfer_complete_cb signals it.
  *
  * Cancel:
- *   usbhost_cancel_ep() calls tuh_edpt_abort_xfer(). Per gotcha #4
- *   TinyUSB does not synthesise a complete_cb for bulk on abort, so
- *   we synthesise via atomic CAS on inflight->completed; per gotcha
- *   #5 we close+open the EP to clear the DWC2 channel; per gotcha #6
- *   we issue CLEAR_FEATURE(ENDPOINT_HALT) to sync the device toggle.
+ *   usbhost_cancel_ep() calls tuh_edpt_abort_xfer(). With PR 3 the
+ *   natural complete_cb fires via TinyUSB's IRQ handler; the legacy
+ *   synth path under the atomic CAS on inflight->completed is now
+ *   defensive only and the CAS lets natural always win. close+open
+ *   recovery still runs per gotcha #5 (defensive). CLEAR_FEATURE
+ *   (gotcha #6) is retired - PR 1's DATATOGGLE_ERR retry recovers
+ *   the toggle desync on the next URB.
  *
  * Pump task priority:
  *   USBHOST_PUMP_TASK_PRIORITY=20 (above responder=11, lwIP=18, below
@@ -1326,6 +1351,7 @@ void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr)
     static uint32_t s_synth_wins = 0;
     s_synth_calls++;
     usbhost_inflight_t *inflight = NULL;
+    uint8_t            ep_xfer_type = 0xff;
     /* usbh_edpt_busy is in usbh_pvt.h but we read it via the public
      * usbh.h header path; declare prototype locally to avoid pulling
      * the private header in. */
@@ -1337,6 +1363,7 @@ void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr)
         if (inflight != NULL) {
             s_state.devices[slot].current_inflight[ep_idx] = NULL;
         }
+        ep_xfer_type = get_endpoint_xfer_type_locked(slot, ep_addr);
     }
     xSemaphoreGive(s_state.state_mutex);
 
@@ -1369,13 +1396,57 @@ void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr)
              s_synth_calls, s_synth_wins);
 #endif
 
+    /* R27 phase 2 fix: synthesise the user-side completion BEFORE the
+     * heavy EP recovery (close+open+CLEAR_FEATURE). The original ordering
+     * ran recovery first and synth last, which meant a wedged
+     * tuh_control_xfer (CLEAR_FEATURE blocking forever on a Pico CDC
+     * interrupt-IN that never replies) would also block this function.
+     * Because usbhost_cancel_ep is called synchronously from the usbip
+     * server's UNLINK read loop, that block prevented RET_UNLINK from
+     * being sent. The kernel's `usb_kill_urb` / `usb_poison_urb` waits
+     * for the URB to be given back, which only happens via RET_SUBMIT
+     * (worker path) or RET_UNLINK (read-loop path). Both paths gated
+     * on this function returning, so a stuck recovery wedged the host
+     * cdc-acm tty close in usb_poison_urb D-state.
+     *
+     * Decoupling: signal the user-side completion (sync done_sem or
+     * async user_cb) first. The user-side path immediately allows
+     * RET_SUBMIT(-ECONNRESET) to be queued and the cancel_done_sem to
+     * fire. The EP recovery still runs synchronously below, so a
+     * subsequent submit on the same EP is correctly serialised behind
+     * it via ep_submit_mutex; but the kernel-side URB lifecycle is no
+     * longer hostage to the recovery completing in bounded time. */
+    int    status = -ECONNRESET;
+    size_t in_len = 0;
+
+    if (inflight->done_sem) {
+        /* Sync caller is blocked on done_sem; signal it now. The caller
+         * frees inflight when it wakes. */
+        inflight->sync_status = status;
+        inflight->sync_in_len = in_len;
+        xSemaphoreGive(inflight->done_sem);
+    } else {
+        /* Async path: deliver the user_cb here, BEFORE the EP recovery,
+         * so the responder queue (and through it the RET_SUBMIT TCP
+         * path plus the read-loop's cancel_done_sem) is unblocked
+         * before any potentially-blocking control xfer runs below.
+         * The atomic CAS on completed claimed above guarantees we are
+         * the unique deliverer; inflight_free runs here. */
+        void (*pending_cb)(void *, int, size_t) = inflight->user_cb;
+        void *pending_ctx = inflight->user_ctx;
+        inflight_free(inflight);
+        if (pending_cb) {
+            pending_cb(pending_ctx, status, in_len);
+        }
+    }
+
     /* DWC2 channel reset: after tuh_edpt_abort_xfer, the DWC2 channel
      * stays half-allocated and subsequent tuh_edpt_xfer calls return
      * false (HCD allocation rejected) for the lifetime of the device.
      * Step 1 instrumentation confirmed: ep_status.busy=0 / claimed=0
      * (TinyUSB high level clean), but hcd_edpt_xfer rejects new submits.
      * Closing then re-opening the endpoint forces a clean DWC2 channel
-     * teardown + re-allocation. EP0 control is excluded — it is opened
+     * teardown + re-allocation. EP0 control is excluded; it is opened
      * implicitly at SetAddress and tuh_edpt_close on EP0 is undefined. */
     if (ep_addr != 0) {
         usbhost_ep_t ep_cache;
@@ -1410,63 +1481,38 @@ void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr)
             ep_desc.bInterval           = ep_cache.interval;
             bool open_ok = tuh_edpt_open(dev_addr, &ep_desc);
 
-            /* Send CLEAR_FEATURE(ENDPOINT_HALT) to reset the device-side
-             * data-toggle. close+open resets our (host) toggle to DATA0,
-             * but the device keeps its own toggle which may be at DATA1
-             * mid-stream. After cancel, we and the device disagree on
-             * the next expected PID; IN transactions get rejected as
-             * stale until both sides are reset. CLEAR_FEATURE is the
-             * standard USB way to force device-side reset.
+            /* CLEAR_FEATURE(ENDPOINT_HALT) was previously issued here
+             * to reset the device-side data toggle on bulk EPs. R27
+             * phase 2 retired it: the upstream lib/tinyusb DMA-mode
+             * IN handler now saves the post-transfer PID and the
+             * channel ARM path handles DATATOGGLE_ERR by retrying
+             * with the correct PID (PR 1 in r27-upstream-pr-draft.md,
+             * commit 6b0f49b06 on lib/tinyusb r27-fix-txfifo-recheck).
+             * The toggle desync that CLEAR_FEATURE used to fix is
+             * recovered automatically on the next URB.
              *
-             * This is what the IDF backend's halt+flush+clear sequence
-             * was doing under the hood (clear = CLEAR_FEATURE). TinyUSB
-             * doesn't expose it as a one-shot helper, so build the
-             * setup packet directly. tuh_control_xfer with NULL cb
-             * is synchronous (blocks until complete or stack idle). */
-            tusb_control_request_t setup;
-            memset(&setup, 0, sizeof(setup));
-            setup.bmRequestType_bit.recipient = TUSB_REQ_RCPT_ENDPOINT;
-            setup.bmRequestType_bit.type      = TUSB_REQ_TYPE_STANDARD;
-            setup.bmRequestType_bit.direction = TUSB_DIR_OUT;
-            setup.bRequest = TUSB_REQ_CLEAR_FEATURE;
-            setup.wValue   = TUSB_REQ_FEATURE_EDPT_HALT;
-            setup.wIndex   = ep_addr;
-            setup.wLength  = 0;
-            tuh_xfer_t cf;
-            memset(&cf, 0, sizeof(cf));
-            cf.daddr   = dev_addr;
-            cf.ep_addr = 0;
-            cf.setup   = &setup;
-            cf.buffer  = NULL;
-            cf.complete_cb = NULL; /* synchronous */
-            cf.user_data   = 0;
-            bool cf_ok = tuh_control_xfer(&cf);
+             * Removing the call eliminates the only blocking
+             * `tuh_control_xfer` in the cancel path. Upstream
+             * `tuh_control_xfer` with complete_cb=NULL has no
+             * built-in timeout (lib/tinyusb/src/host/usbh.c:773
+             * "TODO probably some timeout to prevent hanged");
+             * devices that NAK CLEAR_FEATURE on a bulk EP would
+             * leave the DWC2 EP0 channel half-allocated, hanging
+             * every subsequent control transfer on the device and
+             * wedging the kernel-side cdc_acm_close in
+             * usb_poison_urb. See r27-phase2-audit.md and PR4
+             * (upstream tuh_control_xfer timeout) in
+             * r27-upstream-pr-draft.md for the trace and patch. */
 
             if (ep_mutex) {
                 xSemaphoreGive(ep_mutex);
             }
-            ESP_LOGI(TAG, "ep_reset: ep=0x%02x close=%d open=%d clear_feat=%d",
-                     ep_addr, (int)close_ok, (int)open_ok, (int)cf_ok);
+            ESP_LOGI(TAG, "ep_reset: ep=0x%02x type=%u close=%d open=%d",
+                     ep_addr, (unsigned)ep_xfer_type,
+                     (int)close_ok, (int)open_ok);
         }
     }
 
-    /* We claimed completion. Synthesise -ECONNRESET (cancelled). */
-    int    status = -ECONNRESET;
-    size_t in_len = 0;
-
-    if (inflight->done_sem) {
-        inflight->sync_status = status;
-        inflight->sync_in_len = in_len;
-        xSemaphoreGive(inflight->done_sem);
-        return; /* sync caller frees */
-    }
-
-    void (*cb)(void *, int, size_t) = inflight->user_cb;
-    void *ctx = inflight->user_ctx;
-    inflight_free(inflight);
-    if (cb) {
-        cb(ctx, status, in_len);
-    }
 }
 
 /* -------------------------------------------------------------------------
@@ -1558,10 +1604,38 @@ static void usbhost_watchdog_recover(usbhost_inflight_t *inflight,
         return;
     }
 
-    /* Step 3: gotcha #5/#6 recovery. Skip for EP0 control (close on EP0
+    /* R27 phase 2 fix: deliver the user-side completion BEFORE running
+     * the heavy EP recovery, mirroring the change in usbhost_cancel_ep.
+     * Even though this runs on a dedicated watchdog task (not the usbip
+     * read loop), keeping the same ordering keeps the recovery path's
+     * blocking behaviour from delaying the per-URB giveback that the
+     * kernel side waits on. */
+    int    status = -ETIMEDOUT;
+    size_t in_len = 0;
+
+    if (inflight->done_sem) {
+        inflight->sync_status = status;
+        inflight->sync_in_len = in_len;
+        xSemaphoreGive(inflight->done_sem);
+        /* Sync caller frees inflight. */
+    } else {
+        /* Async path: deliver user_cb here, before the EP recovery,
+         * so the URB giveback is not gated on the recovery completing
+         * within bounded time (a wedged tuh_control_xfer would
+         * otherwise hold up RET_SUBMIT). */
+        void (*pending_cb)(void *, int, size_t) = inflight->user_cb;
+        void *pending_ctx = inflight->user_ctx;
+        inflight_free(inflight);
+        if (pending_cb) {
+            pending_cb(pending_ctx, status, in_len);
+        }
+    }
+
+    /* gotcha #5/#6 recovery. Skip for EP0 control (close on EP0
      * is undefined; the abort alone is sufficient). */
     if (!is_control && ep_addr_full != 0 && slot >= 0 && ep_idx < 32) {
-        usbhost_ep_t ep_cache;
+        uint8_t           ep_xfer_type = 0xff;
+        usbhost_ep_t      ep_cache;
         memset(&ep_cache, 0, sizeof(ep_cache));
         bool found = false;
         SemaphoreHandle_t ep_mutex = NULL;
@@ -1575,6 +1649,7 @@ static void usbhost_watchdog_recover(usbhost_inflight_t *inflight,
                 }
             }
             ep_mutex = get_ep_submit_mutex_locked(slot, ep_addr_full);
+            ep_xfer_type = get_endpoint_xfer_type_locked(slot, ep_addr_full);
         }
         xSemaphoreGive(s_state.state_mutex);
 
@@ -1597,55 +1672,24 @@ static void usbhost_watchdog_recover(usbhost_inflight_t *inflight,
             ep_desc.bInterval           = ep_cache.interval;
             bool open_ok = tuh_edpt_open(dev_addr, &ep_desc);
 
-            tusb_control_request_t setup;
-            memset(&setup, 0, sizeof(setup));
-            setup.bmRequestType_bit.recipient = TUSB_REQ_RCPT_ENDPOINT;
-            setup.bmRequestType_bit.type      = TUSB_REQ_TYPE_STANDARD;
-            setup.bmRequestType_bit.direction = TUSB_DIR_OUT;
-            setup.bRequest = TUSB_REQ_CLEAR_FEATURE;
-            setup.wValue   = TUSB_REQ_FEATURE_EDPT_HALT;
-            setup.wIndex   = ep_addr_full;
-            setup.wLength  = 0;
-            tuh_xfer_t cf;
-            memset(&cf, 0, sizeof(cf));
-            cf.daddr   = dev_addr;
-            cf.ep_addr = 0;
-            cf.setup   = &setup;
-            cf.buffer  = NULL;
-            cf.complete_cb = NULL; /* synchronous */
-            cf.user_data   = 0;
-            bool cf_ok = tuh_control_xfer(&cf);
+            /* CLEAR_FEATURE retired in R27 phase 2; see the matching
+             * comment block in usbhost_cancel_ep. PR 1
+             * (DATATOGGLE_ERR retry in lib/tinyusb DMA-mode IN
+             * handler) supersedes the toggle-resync motivation that
+             * the control xfer used to address. Removing it
+             * eliminates the wedge path through tuh_control_xfer's
+             * unbounded polled wait on a DWC2 EP0 channel that the
+             * device may NAK indefinitely. */
 
             if (ep_mutex) {
                 xSemaphoreGive(ep_mutex);
             }
-            ESP_LOGW(TAG, "watchdog: ep_reset ep=0x%02x close=%d open=%d "
-                          "clear_feat=%d", ep_addr_full,
-                     (int)close_ok, (int)open_ok, (int)cf_ok);
+            ESP_LOGW(TAG, "watchdog: ep_reset ep=0x%02x type=%u close=%d "
+                          "open=%d", ep_addr_full,
+                     (unsigned)ep_xfer_type, (int)close_ok, (int)open_ok);
         }
     }
 
-    /* Step 4: synthesise -ETIMEDOUT to the user callback. Mirrors the
-     * trailing path of usbhost_cancel_ep but with a different status
-     * code so the responder can distinguish a cancel-storm cancellation
-     * (-ECONNRESET) from a stuck-URB watchdog fire (-ETIMEDOUT) in
-     * any future log analysis. */
-    int    status = -ETIMEDOUT;
-    size_t in_len = 0;
-
-    if (inflight->done_sem) {
-        inflight->sync_status = status;
-        inflight->sync_in_len = in_len;
-        xSemaphoreGive(inflight->done_sem);
-        return; /* sync caller owns inflight */
-    }
-
-    void (*cb)(void *, int, size_t) = inflight->user_cb;
-    void *ctx = inflight->user_ctx;
-    inflight_free(inflight);
-    if (cb) {
-        cb(ctx, status, in_len);
-    }
 }
 
 static void usbhost_watchdog_task(void *arg)
