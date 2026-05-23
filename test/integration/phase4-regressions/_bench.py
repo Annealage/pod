@@ -7,6 +7,7 @@ focused on the regression they're pinning.
 
 import glob
 import os
+import socket as _socket
 import subprocess
 import sys
 import time
@@ -17,7 +18,22 @@ VHCI_DETACH_PATH = "/sys/devices/platform/vhci_hcd.0/detach"
 
 
 def env_ip():
-    return os.environ.get("USBIPD_IP", DEFAULT_USBIPD_IP)
+    """Return the annealage_pod host to connect to.
+
+    Resolution order:
+    1. ANNEALAGE_POD_HOST env var - tried first (supports mDNS names).
+    2. USBIPD_IP env var - used if ANNEALAGE_POD_HOST does not resolve.
+    3. DEFAULT_USBIPD_IP hardcoded fallback.
+    """
+    hostname = os.environ.get("ANNEALAGE_POD_HOST", "")
+    fallback = os.environ.get("USBIPD_IP", DEFAULT_USBIPD_IP)
+    if hostname:
+        try:
+            _socket.getaddrinfo(hostname, None, _socket.AF_INET)
+            return hostname
+        except _socket.gaierror:
+            pass
+    return fallback
 
 
 def env_busid():

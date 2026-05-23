@@ -38,13 +38,14 @@ Drop `credentials.json` onto the device's filesystem:
 cat > /tmp/credentials.json <<'EOF'
 {
   "ssid": "YOUR_SSID",
-  "password": "YOUR_PASSWORD"
+  "password": "YOUR_PASSWORD",
+  "hostname": "annealage-pod-myboard"
 }
 EOF
 mpremote connect "$(mpy-dev tty esp32-s3)" resume cp /tmp/credentials.json :credentials.json
 ```
 
-(or set them in NVS via the IDF NVS APIs; `boot.py` reads `credentials.json` first.)
+The `hostname` key sets the mDNS name (`annealage_pod-myboard.local`). If omitted, the device uses `annealage_pod-<last6hex>` derived from the chip UID. (Credentials may also be stored in NVS via IDF APIs; `boot.py` reads `credentials.json` first.)
 
 ## 4. Wire the DUT
 
@@ -102,12 +103,28 @@ annealage_pod.boot: REPL listener on :8266
 Find the Annealage Pod's IP / mDNS name:
 
 ```bash
-avahi-browse -tr _annealage_pod._tcp
-# or:
+# mDNS (preferred - works once the device is on the network):
+avahi-browse -rt _annealage_pod._tcp
+# macOS:
 dns-sd -B _annealage_pod._tcp local.
 ```
 
-Save the hostname; subsequent steps use it.
+The TXT record `firmware-version` and `mp-version` fields confirm the running build.
+
+If mDNS is not available, query the IP directly over the UART0 serial REPL before the network address is known:
+
+```bash
+mpremote connect "$(mpy-dev tty esp32-s3)" resume exec \
+  "import network; print(network.WLAN(network.STA_IF).ifconfig()[0])"
+```
+
+The boot log printed to UART0 also contains `Wi-Fi up, ifconfig=(IP, ...)` so monitoring the console immediately after power-on is sufficient if the device is freshly booting:
+
+```bash
+bash src/tools/monitor.sh
+```
+
+Save the hostname; subsequent steps use it. Integration tests resolve the mDNS name automatically and fall back to the raw IP if resolution fails - override with `ANNEALAGE_POD_HOST=annealage_pod-myboard.local` or `USBIPD_IP=192.168.x.y`.
 
 ## 6. Run the Phase 3 smoke test
 

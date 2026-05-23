@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run all uartcdc integration tests.
-# Override defaults via env: USBIPD_IP, ANNEALAGE_POD_TTY
+# Override defaults via env: ANNEALAGE_POD_HOST (mDNS name), USBIPD_IP (fallback), ANNEALAGE_POD_TTY
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
