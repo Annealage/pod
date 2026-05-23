@@ -182,6 +182,14 @@ int usbip_proto_validate_submit(const usbip_decoded_header_t *hdr,
     if (hdr->direction != USBIP_DIR_OUT && hdr->direction != USBIP_DIR_IN) {
         return -EINVAL;
     }
+    /* USB-2.0 endpoints are 4-bit; the wire field is 32-bit so a
+     * malformed client can put arbitrary garbage here. Reject up
+     * front rather than letting it cast-truncate into bus calls
+     * (the (uint8_t)(hdr->ep | 0x80) folds in lane_dispatch would
+     * silently alias different endpoints). */
+    if (hdr->ep > 15u) {
+        return -EINVAL;
+    }
     /* Per the kernel docs, non-iso URBs carry number_of_packets =
      * 0xFFFFFFFF. Some clients send 0. Reject only positive counts,
      * which would actually be isochronous. */

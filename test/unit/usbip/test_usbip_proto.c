@@ -284,6 +284,25 @@ TEST(test_validate_submit_bad_direction)
     ASSERT_EQ_INT(usbip_proto_validate_submit(&hdr, 16 * 1024), -EINVAL);
 }
 
+TEST(test_validate_submit_bad_ep)
+{
+    /* ep field is a wire uint32; USB-2.0 endpoints are 4-bit.
+     * Reject anything above 15 so it can't cast-truncate into the
+     * lane-index fold or alias a different endpoint. */
+    usbip_decoded_header_t hdr = {0};
+    hdr.direction = USBIP_DIR_IN;
+    hdr.ep = 16;
+    hdr.transfer_buffer_length = 0;
+    hdr.number_of_packets = (int32_t)USBIP_NON_ISO_PACKETS;
+    ASSERT_EQ_INT(usbip_proto_validate_submit(&hdr, 16 * 1024), -EINVAL);
+
+    hdr.ep = 0xDEADBEEFu;
+    ASSERT_EQ_INT(usbip_proto_validate_submit(&hdr, 16 * 1024), -EINVAL);
+
+    hdr.ep = 15u;
+    ASSERT_EQ_INT(usbip_proto_validate_submit(&hdr, 16 * 1024), 0);
+}
+
 TEST(test_pack_ret_submit_byteorder)
 {
     usbip_header_t raw;
@@ -528,6 +547,7 @@ int main(void)
     run_test_validate_submit_iso_unsupported();
     run_test_validate_submit_zero_packets_ok();
     run_test_validate_submit_bad_direction();
+    run_test_validate_submit_bad_ep();
     run_test_pack_ret_submit_byteorder();
     run_test_pack_ret_submit_negative_status();
     run_test_pack_ret_unlink();
