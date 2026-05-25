@@ -352,6 +352,21 @@ uint32_t usbhost_dwc2_hprt(void)
     return DWC2_REG(BOARD_TUH_RHPORT)->hprt;
 }
 
+int usbhost_bus_reset(void)
+{
+    if (!s_state.started) {
+        return -ENODEV;
+    }
+    if (!tuh_rhport_is_active(BOARD_TUH_RHPORT)) {
+        return -ENODEV;
+    }
+    ESP_LOGI(TAG, "bus_reset: driving SE0 10 ms on rhport %d", BOARD_TUH_RHPORT);
+    tuh_rhport_reset_bus(BOARD_TUH_RHPORT, true);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    tuh_rhport_reset_bus(BOARD_TUH_RHPORT, false);
+    return 0;
+}
+
 /* -------------------------------------------------------------------------
  * Helpers
  * ------------------------------------------------------------------------- */

@@ -41,9 +41,20 @@ static mp_obj_t mod_usbhost_dwc2_hprt(void)
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_dwc2_hprt_obj, mod_usbhost_dwc2_hprt);
 
+static mp_obj_t mod_usbhost_bus_reset(void)
+{
+    int rc = usbhost_bus_reset();
+    if (rc != 0) {
+        mp_raise_OSError(-rc);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_bus_reset_obj, mod_usbhost_bus_reset);
+
 static const mp_rom_map_elem_t mod_usbhost_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),  MP_ROM_QSTR(MP_QSTR_usbhost) },
     { MP_ROM_QSTR(MP_QSTR_flush),     MP_ROM_PTR(&mod_usbhost_flush_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bus_reset), MP_ROM_PTR(&mod_usbhost_bus_reset_obj) },
     { MP_ROM_QSTR(MP_QSTR_dwc2_hprt), MP_ROM_PTR(&mod_usbhost_dwc2_hprt_obj) },
 };
 static MP_DEFINE_CONST_DICT(mod_usbhost_globals, mod_usbhost_globals_table);

@@ -145,6 +145,15 @@ bool usbhost_is_verbose(void);
  * device is attached. */
 int usbhost_flush(bool force_bus_reset);
 
+/* Drive a USB bus reset (10 ms SE0) on root-hub port 0 without touching
+ * the host stack's device list. Independent of usbhost_flush; useful
+ * when a device is already enumerated to the annealage_pod but needs to see
+ * a fresh USB RESET event chip-side (e.g. to re-arm its EP0 RX path
+ * after an in-place firmware change).
+ *
+ * Returns 0 on success, negative errno on failure. */
+int usbhost_bus_reset(void);
+
 /* Diagnostic: return the raw 32-bit value of the DWC2 HPRT (Host Port
  * Control and Status) register, or 0 if the host stack is not running.
  * Useful to disambiguate "no device on the bus" from "device on bus but
