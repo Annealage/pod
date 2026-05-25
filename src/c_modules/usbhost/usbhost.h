@@ -133,25 +133,47 @@ void usbhost_set_verbose(bool enable);
 /* True if per-URB verbose logging is currently enabled. */
 bool usbhost_is_verbose(void);
 
-/* Flush the descriptor cache and all per-device slots, then optionally
- * drive a USB bus reset on root-hub port 0. Used when a DUT changes its
- * USB device identity behind a stuck D+ pull-up (e.g. boot1 -> user
- * firmware on Baochip dabao): the cache is invalidated so the next
- * enumeration reads fresh descriptors, and the bus reset forces the
- * device to re-enumerate from address 0 even if it did not signal a
- * physical disconnect.
+/* In-place USB identity change recovery (flush + bus_reset are split
+ * because of a DWC2 PRT_CONN_DET edge-trigger quirk; see below).
  *
- * Returns 0 on success, negative errno on failure. Safe to call when no
- * device is attached. */
+ * Use case: a DUT changes USB device identity in place behind a stuck
+ * D+ pull-up. The canonical example is the Baochip dabao going from
+ * boot1's CDC profile to user-firmware's CDC profile without ever
+ * tearing the pull-up down. Without a falling edge on D+, the host
+ * never sees a disconnect, tuh_umount_cb never fires, and TinyUSB
+ * serves the cached boot1 descriptors over USB/IP forever. The
+ * recovery is to forcibly evict the cached record from the host
+ * stack, and (in some cases) drive a fresh USB RESET event so the
+ * chip-side EP0 sees a recognisable PORTSC.PR transition and re-arms.
+ *
+ * usbhost_flush: runs tuh_deinit(rhport) + mp_usbh_init_tuh().
+ * tuh_deinit fires tuh_umount_cb for every attached device (clearing
+ * _usbh_data.devices[] via clear_device) and resets the DWC2
+ * controller; mp_usbh_init_tuh re-initialises with hot-plug detection
+ * re-armed. force_bus_reset=False takes a lightweight cache-only path
+ * (descriptor cache + slot table wipe only, no host stack restart).
+ *
+ * usbhost_bus_reset: standalone 10 ms SE0 drive via
+ * tuh_rhport_reset_bus, no host stack state changes.
+ *
+ * Why two entry points: DWC2's PRT_CONN_DET only fires on a 0->1
+ * transition. If the DUT holds D+ pull-up high throughout the
+ * deinit-init window (which a well-behaved DCD does), the post-init
+ * PHY may sense "already J state" with no transition to detect,
+ * HCD_EVENT_DEVICE_ATTACH never queues, and enum_new_device's
+ * implicit hcd_port_reset never executes. In that case the chip never
+ * sees a USB RESET event after flush(). A subsequent bus_reset()
+ * forces SE0 on the wire regardless of host stack state.
+ *
+ * For a chip whose DCD correctly handles tuh_init's natural
+ * enumeration sequence (port_reset is part of enum_new_device for
+ * a freshly-detected device), flush() alone is sufficient. Callers
+ * who suspect they're in the edge-trigger-miss case should chain
+ * flush() + bus_reset().
+ *
+ * Both return 0 on success, negative errno on failure. Safe to call
+ * when no device is attached. */
 int usbhost_flush(bool force_bus_reset);
-
-/* Drive a USB bus reset (10 ms SE0) on root-hub port 0 without touching
- * the host stack's device list. Independent of usbhost_flush; useful
- * when a device is already enumerated to the annealage_pod but needs to see
- * a fresh USB RESET event chip-side (e.g. to re-arm its EP0 RX path
- * after an in-place firmware change).
- *
- * Returns 0 on success, negative errno on failure. */
 int usbhost_bus_reset(void);
 
 /* Diagnostic: return the raw 32-bit value of the DWC2 HPRT (Host Port
