@@ -130,6 +130,7 @@
 #include "esp_timer.h"
 
 #include "host/usbh.h"
+#include "host/hcd.h"
 #include "mp_usbh.h"
 #include "tusb.h"
 
@@ -279,6 +280,60 @@ void usbhost_set_verbose(bool enable)
 bool usbhost_is_verbose(void)
 {
     return s_urb_verbose;
+}
+
+int usbhost_flush(bool force_bus_reset)
+{
+    if (!s_state.started) {
+        return -ENODEV;
+    }
+
+    /* Capture the dev_addrs of all occupied slots while holding the
+     * state lock, drop the lock before calling into TinyUSB (which may
+     * take its own locks), then run the per-device teardown. */
+    uint8_t to_close[USBHOST_MAX_DEVICES];
+    size_t  to_close_n = 0;
+
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < USBHOST_MAX_DEVICES; i++) {
+        if (s_state.devices[i].in_use) {
+            if (to_close_n < USBHOST_MAX_DEVICES) {
+                to_close[to_close_n++] = s_state.devices[i].dev_addr;
+            }
+        }
+    }
+    for (size_t i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+        s_desc_cache[i].valid = false;
+    }
+    xSemaphoreGive(s_state.state_mutex);
+
+    /* Tell TinyUSB the devices are gone; this fires tuh_umount_cb which
+     * runs our tuh_umount_hook (clearing the slot + invalidating cache
+     * already done above, but the hook also signals the hub_device
+     * beacon's interrupt EP). */
+    for (size_t i = 0; i < to_close_n; i++) {
+        ESP_LOGI(TAG, "flush: closing dev_addr=%u", to_close[i]);
+        hcd_device_close(BOARD_TUH_RHPORT, to_close[i]);
+    }
+
+    /* tuh_umount_cb is dispatched from tuh_task_ext (pump task); yield
+     * briefly so the cb runs and the hub_device beacon gets the
+     * disconnect edge before we drive the bus reset. */
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    if (force_bus_reset) {
+        if (!tuh_rhport_is_active(BOARD_TUH_RHPORT)) {
+            ESP_LOGW(TAG, "flush: rhport %d inactive, skipping bus reset",
+                     BOARD_TUH_RHPORT);
+            return 0;
+        }
+        ESP_LOGI(TAG, "flush: driving USB bus reset (SE0 10 ms)");
+        tuh_rhport_reset_bus(BOARD_TUH_RHPORT, true);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        tuh_rhport_reset_bus(BOARD_TUH_RHPORT, false);
+    }
+
+    return 0;
 }
 
 /* -------------------------------------------------------------------------

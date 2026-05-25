@@ -133,6 +133,18 @@ void usbhost_set_verbose(bool enable);
 /* True if per-URB verbose logging is currently enabled. */
 bool usbhost_is_verbose(void);
 
+/* Flush the descriptor cache and all per-device slots, then optionally
+ * drive a USB bus reset on root-hub port 0. Used when a DUT changes its
+ * USB device identity behind a stuck D+ pull-up (e.g. boot1 -> user
+ * firmware on Baochip dabao): the cache is invalidated so the next
+ * enumeration reads fresh descriptors, and the bus reset forces the
+ * device to re-enumerate from address 0 even if it did not signal a
+ * physical disconnect.
+ *
+ * Returns 0 on success, negative errno on failure. Safe to call when no
+ * device is attached. */
+int usbhost_flush(bool force_bus_reset);
+
 #ifdef __cplusplus
 }
 #endif

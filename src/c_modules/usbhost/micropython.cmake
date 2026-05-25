@@ -24,6 +24,7 @@ add_library(usermod_usbhost INTERFACE)
 
 target_sources(usermod_usbhost INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/usbhost.c
+    ${CMAKE_CURRENT_LIST_DIR}/modusbhost.c
 )
 
 target_include_directories(usermod_usbhost INTERFACE
