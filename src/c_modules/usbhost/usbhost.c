@@ -130,8 +130,10 @@
 #include "esp_timer.h"
 
 #include "host/usbh.h"
+#include "host/hcd.h"
 #include "mp_usbh.h"
 #include "tusb.h"
+#include "portable/synopsys/dwc2/dwc2_common.h"
 
 /* Compile-time defaults; override at link time with -DUSBHOST_*=N. */
 #ifndef USBHOST_MAX_DEVICES
@@ -279,6 +281,90 @@ void usbhost_set_verbose(bool enable)
 bool usbhost_is_verbose(void)
 {
     return s_urb_verbose;
+}
+
+static void clear_slot_locked(int slot);
+
+int usbhost_flush(bool force_bus_reset)
+{
+    if (!s_state.started) {
+        return -ENODEV;
+    }
+
+    /* Invalidate our descriptor cache up front. tuh_deinit also fires
+     * tuh_umount_cb -> tuh_umount_hook which sets each slot's cache
+     * entry invalid; wipe here so cache-only callers
+     * (force_bus_reset=False) get the wipe regardless. */
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < CFG_TUH_DEVICE_MAX; i++) {
+        s_desc_cache[i].valid = false;
+    }
+    xSemaphoreGive(s_state.state_mutex);
+
+    if (!force_bus_reset) {
+        /* Cache-only path: clear our slot table directly. Does NOT
+         * touch TinyUSB's _usbh_data.devices[] internal list, so
+         * USBHost().devices() may still show stale entries until a
+         * real disconnect arrives. */
+        xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+        for (size_t i = 0; i < USBHOST_MAX_DEVICES; i++) {
+            clear_slot_locked(i);
+        }
+        xSemaphoreGive(s_state.state_mutex);
+        return 0;
+    }
+
+    /* Hard host restart. tuh_deinit tears down every device on the
+     * rhport through the normal disconnect path (fires tuh_umount_cb
+     * for each, runs usbh_device_close + clear_device on the internal
+     * _usbh_data.devices[]), then hcd_deinit fully resets the DWC2
+     * controller. After mp_usbh_init_tuh the host stack is in a fresh
+     * "idle, waiting for attach" state with hot-plug detection re-armed.
+     *
+     * The earlier SE0-only path (tuh_rhport_reset_bus) drove a bus reset
+     * on the wire but skipped tuh_umount_cb, so _usbh_data.devices[]
+     * kept the old descriptors and no fresh enumeration GET_DESCRIPTOR
+     * ever went out. PRT_CONN_DET stayed latched from the original
+     * connection, so the host state machine never re-armed. */
+    ESP_LOGI(TAG, "flush: full host stack restart (tuh_deinit + tuh_init)");
+    tuh_deinit(BOARD_TUH_RHPORT);
+
+    /* Let the DWC2 PHY settle. tuh_deinit clears controller_id and
+     * stops the host interrupt; 50 ms is well above the 1-2 ms the
+     * PHY needs to drop its drive and return to idle. */
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    if (!tusb_inited()) {
+        mp_usbh_init_tuh();
+    }
+
+    return 0;
+}
+
+uint32_t usbhost_dwc2_hprt(void)
+{
+    if (!s_state.started) {
+        return 0;
+    }
+    if (!tuh_rhport_is_active(BOARD_TUH_RHPORT)) {
+        return 0;
+    }
+    return DWC2_REG(BOARD_TUH_RHPORT)->hprt;
+}
+
+int usbhost_bus_reset(void)
+{
+    if (!s_state.started) {
+        return -ENODEV;
+    }
+    if (!tuh_rhport_is_active(BOARD_TUH_RHPORT)) {
+        return -ENODEV;
+    }
+    ESP_LOGI(TAG, "bus_reset: driving SE0 10 ms on rhport %d", BOARD_TUH_RHPORT);
+    tuh_rhport_reset_bus(BOARD_TUH_RHPORT, true);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    tuh_rhport_reset_bus(BOARD_TUH_RHPORT, false);
+    return 0;
 }
 
 /* -------------------------------------------------------------------------
