@@ -35,9 +35,16 @@ static mp_obj_t mod_usbhost_flush(size_t n_args, const mp_obj_t *pos_args,
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(mod_usbhost_flush_obj, 0, mod_usbhost_flush);
 
+static mp_obj_t mod_usbhost_dwc2_hprt(void)
+{
+    return mp_obj_new_int_from_uint(usbhost_dwc2_hprt());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_dwc2_hprt_obj, mod_usbhost_dwc2_hprt);
+
 static const mp_rom_map_elem_t mod_usbhost_globals_table[] = {
-    { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_usbhost) },
-    { MP_ROM_QSTR(MP_QSTR_flush),    MP_ROM_PTR(&mod_usbhost_flush_obj) },
+    { MP_ROM_QSTR(MP_QSTR___name__),  MP_ROM_QSTR(MP_QSTR_usbhost) },
+    { MP_ROM_QSTR(MP_QSTR_flush),     MP_ROM_PTR(&mod_usbhost_flush_obj) },
+    { MP_ROM_QSTR(MP_QSTR_dwc2_hprt), MP_ROM_PTR(&mod_usbhost_dwc2_hprt_obj) },
 };
 static MP_DEFINE_CONST_DICT(mod_usbhost_globals, mod_usbhost_globals_table);
 

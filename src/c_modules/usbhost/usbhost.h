@@ -145,6 +145,20 @@ bool usbhost_is_verbose(void);
  * device is attached. */
 int usbhost_flush(bool force_bus_reset);
 
+/* Diagnostic: return the raw 32-bit value of the DWC2 HPRT (Host Port
+ * Control and Status) register, or 0 if the host stack is not running.
+ * Useful to disambiguate "no device on the bus" from "device on bus but
+ * host state machine wedged":
+ *
+ *   bit  0  PRT_CONN_STS   1 = device connected (D+/D- pull-up detected)
+ *   bit  1  PRT_CONN_DET   1 = port connect detected (W1C)
+ *   bit  2  PRT_EN          1 = port enabled
+ *   bit  3  PRT_EN_CHNG     1 = port enable changed (W1C)
+ *   bit  8  PRT_RST         1 = port reset asserted
+ *   bits 17:18 PRT_SPD      0=HS, 1=FS, 2=LS
+ */
+uint32_t usbhost_dwc2_hprt(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -133,6 +133,7 @@
 #include "host/hcd.h"
 #include "mp_usbh.h"
 #include "tusb.h"
+#include "portable/synopsys/dwc2/dwc2_common.h"
 
 /* Compile-time defaults; override at link time with -DUSBHOST_*=N. */
 #ifndef USBHOST_MAX_DEVICES
@@ -334,6 +335,17 @@ int usbhost_flush(bool force_bus_reset)
     }
 
     return 0;
+}
+
+uint32_t usbhost_dwc2_hprt(void)
+{
+    if (!s_state.started) {
+        return 0;
+    }
+    if (!tuh_rhport_is_active(BOARD_TUH_RHPORT)) {
+        return 0;
+    }
+    return DWC2_REG(BOARD_TUH_RHPORT)->hprt;
 }
 
 /* -------------------------------------------------------------------------
