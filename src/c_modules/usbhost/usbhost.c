@@ -367,6 +367,91 @@ int usbhost_bus_reset(void)
     return 0;
 }
 
+#define HPRT_TRACE_MAX_DURATION_MS 10000u
+
+int usbhost_hprt_trace(uint32_t duration_ms, uint32_t period_us,
+                       uint32_t force_every, usbhost_hprt_sample_t *out,
+                       size_t cap, size_t *out_n)
+{
+    if (!out || !out_n || cap == 0) {
+        return -EINVAL;
+    }
+    *out_n = 0;
+    if (!s_state.started) {
+        return -ENODEV;
+    }
+    if (!tuh_rhport_is_active(BOARD_TUH_RHPORT)) {
+        return -ENODEV;
+    }
+    if (duration_ms > HPRT_TRACE_MAX_DURATION_MS) {
+        duration_ms = HPRT_TRACE_MAX_DURATION_MS;
+    }
+    if (period_us == 0) {
+        period_us = 1;
+    }
+
+    volatile uint32_t *hprt_reg = &DWC2_REG(BOARD_TUH_RHPORT)->hprt;
+
+    int64_t t0_us = esp_timer_get_time();
+    int64_t deadline_us = t0_us + (int64_t)duration_ms * 1000;
+
+    /* Record initial sample. */
+    uint32_t last = *hprt_reg;
+    out[0].t_us = 0;
+    out[0].hprt = last;
+    size_t n = 1;
+
+    /* Counter of polls since last recorded sample. When force_every is
+     * non-zero, emit a sample every force_every polls even if HPRT
+     * hasn't changed, giving a continuous timeline rather than a
+     * transitions-only sparse view. */
+    uint32_t since_record = 0;
+
+    /* Iteration count for watchdog feed. The IDF task watchdog will
+     * bark after ~5 s of a single task hogging the CPU; feed every
+     * ~50 ms of wall time. */
+    uint32_t wdt_counter = 0;
+    const uint32_t wdt_feed_every_polls = 50000u / (period_us ? period_us : 1u);
+
+    int64_t next_us = t0_us + (int64_t)period_us;
+    while (n < cap) {
+        int64_t now = esp_timer_get_time();
+        if (now >= deadline_us) {
+            break;
+        }
+        if (now < next_us) {
+            /* Tight spin until next poll. No taskYIELD here: yielding
+             * lets WiFi/other tasks run for unbounded periods and we
+             * miss transitions. Trace runs at most HPRT_TRACE_MAX
+             * milliseconds so the single-core hog is bounded. */
+            continue;
+        }
+        next_us = now + (int64_t)period_us;
+
+        uint32_t cur = *hprt_reg;
+        bool changed = (cur != last);
+        bool forced  = (force_every > 0 && ++since_record >= force_every);
+
+        if (changed || forced) {
+            out[n].t_us = (uint32_t)(now - t0_us);
+            out[n].hprt = cur;
+            n++;
+            last = cur;
+            since_record = 0;
+        }
+
+        if (++wdt_counter >= wdt_feed_every_polls) {
+            wdt_counter = 0;
+            /* Yield once per ~50 ms to let the IDF task watchdog see
+             * us and to give WiFi a slice. Brief enough not to risk
+             * missing transitions (USB port reset is ~10 ms). */
+            taskYIELD();
+        }
+    }
+    *out_n = n;
+    return 0;
+}
+
 /* -------------------------------------------------------------------------
  * Helpers
  * ------------------------------------------------------------------------- */
