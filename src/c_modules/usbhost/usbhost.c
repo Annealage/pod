@@ -367,6 +367,64 @@ int usbhost_bus_reset(void)
     return 0;
 }
 
+#define HPRT_TRACE_MAX_DURATION_MS 10000u
+
+int usbhost_hprt_trace(uint32_t duration_ms, uint32_t period_us,
+                       usbhost_hprt_sample_t *out, size_t cap,
+                       size_t *out_n)
+{
+    if (!out || !out_n || cap == 0) {
+        return -EINVAL;
+    }
+    *out_n = 0;
+    if (!s_state.started) {
+        return -ENODEV;
+    }
+    if (!tuh_rhport_is_active(BOARD_TUH_RHPORT)) {
+        return -ENODEV;
+    }
+    if (duration_ms > HPRT_TRACE_MAX_DURATION_MS) {
+        duration_ms = HPRT_TRACE_MAX_DURATION_MS;
+    }
+
+    volatile uint32_t *hprt_reg = &DWC2_REG(BOARD_TUH_RHPORT)->hprt;
+
+    int64_t t0_us = esp_timer_get_time();
+    int64_t deadline_us = t0_us + (int64_t)duration_ms * 1000;
+
+    /* Record initial sample. */
+    uint32_t last = *hprt_reg;
+    out[0].t_us = 0;
+    out[0].hprt = last;
+    size_t n = 1;
+
+    int64_t next_us = t0_us + (int64_t)period_us;
+    while (n < cap) {
+        int64_t now = esp_timer_get_time();
+        if (now >= deadline_us) {
+            break;
+        }
+        if (now < next_us) {
+            /* Brief yield (keeps watchdog + networking alive) but
+             * preserve fine-grained sampling. portYIELD is too coarse
+             * on FreeRTOS; busy-wait between yields. */
+            taskYIELD();
+            continue;
+        }
+        next_us = now + (int64_t)period_us;
+
+        uint32_t cur = *hprt_reg;
+        if (cur != last) {
+            out[n].t_us = (uint32_t)(now - t0_us);
+            out[n].hprt = cur;
+            n++;
+            last = cur;
+        }
+    }
+    *out_n = n;
+    return 0;
+}
+
 /* -------------------------------------------------------------------------
  * Helpers
  * ------------------------------------------------------------------------- */

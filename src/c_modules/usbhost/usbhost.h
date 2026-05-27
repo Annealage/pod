@@ -190,6 +190,31 @@ int usbhost_bus_reset(void);
  */
 uint32_t usbhost_dwc2_hprt(void);
 
+/* Diagnostic: sample HPRT at a high rate for a bounded duration and
+ * record every value transition with a timestamp (microseconds from
+ * trace start). Used to observe bus-state changes during a DUT
+ * power-cycle or PROG+RESET when the kernel/TinyUSB-level mount/umount
+ * events are not granular enough.
+ *
+ * Each captured transition is written into out[] as a pair of
+ * (t_us, hprt). out_n receives the number of pairs written (clamped to
+ * cap). Initial HPRT value is recorded as the first entry at t=0; from
+ * there only transitions are appended.
+ *
+ * duration_ms is capped at HPRT_TRACE_MAX_DURATION_MS internally to
+ * keep the loop bounded. period_us is the minimum spacing between
+ * polls (a hint, not a tight bound).
+ *
+ * Returns 0 on success, negative errno on failure. */
+typedef struct {
+    uint32_t t_us;
+    uint32_t hprt;
+} usbhost_hprt_sample_t;
+
+int usbhost_hprt_trace(uint32_t duration_ms, uint32_t period_us,
+                       usbhost_hprt_sample_t *out, size_t cap,
+                       size_t *out_n);
+
 #ifdef __cplusplus
 }
 #endif

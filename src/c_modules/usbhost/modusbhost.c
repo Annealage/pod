@@ -51,11 +51,47 @@ static mp_obj_t mod_usbhost_bus_reset(void)
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_bus_reset_obj, mod_usbhost_bus_reset);
 
+#define HPRT_TRACE_BUF_LEN 256
+
+static mp_obj_t mod_usbhost_hprt_trace(size_t n_args, const mp_obj_t *pos_args,
+                                       mp_map_t *kw_args)
+{
+    enum { ARG_duration_ms, ARG_period_us };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_duration_ms, MP_ARG_INT, { .u_int = 3000 } },
+        { MP_QSTR_period_us,   MP_ARG_INT, { .u_int = 200 } },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all(n_args, pos_args, kw_args,
+                     MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+
+    usbhost_hprt_sample_t buf[HPRT_TRACE_BUF_LEN];
+    size_t n = 0;
+    int rc = usbhost_hprt_trace((uint32_t)args[ARG_duration_ms].u_int,
+                                (uint32_t)args[ARG_period_us].u_int,
+                                buf, HPRT_TRACE_BUF_LEN, &n);
+    if (rc != 0) {
+        mp_raise_OSError(-rc);
+    }
+
+    mp_obj_t list = mp_obj_new_list(0, NULL);
+    for (size_t i = 0; i < n; i++) {
+        mp_obj_t tup[2] = {
+            mp_obj_new_int_from_uint(buf[i].t_us),
+            mp_obj_new_int_from_uint(buf[i].hprt),
+        };
+        mp_obj_list_append(list, mp_obj_new_tuple(2, tup));
+    }
+    return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(mod_usbhost_hprt_trace_obj, 0, mod_usbhost_hprt_trace);
+
 static const mp_rom_map_elem_t mod_usbhost_globals_table[] = {
-    { MP_ROM_QSTR(MP_QSTR___name__),  MP_ROM_QSTR(MP_QSTR_usbhost) },
-    { MP_ROM_QSTR(MP_QSTR_flush),     MP_ROM_PTR(&mod_usbhost_flush_obj) },
-    { MP_ROM_QSTR(MP_QSTR_bus_reset), MP_ROM_PTR(&mod_usbhost_bus_reset_obj) },
-    { MP_ROM_QSTR(MP_QSTR_dwc2_hprt), MP_ROM_PTR(&mod_usbhost_dwc2_hprt_obj) },
+    { MP_ROM_QSTR(MP_QSTR___name__),   MP_ROM_QSTR(MP_QSTR_usbhost) },
+    { MP_ROM_QSTR(MP_QSTR_flush),      MP_ROM_PTR(&mod_usbhost_flush_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bus_reset),  MP_ROM_PTR(&mod_usbhost_bus_reset_obj) },
+    { MP_ROM_QSTR(MP_QSTR_dwc2_hprt),  MP_ROM_PTR(&mod_usbhost_dwc2_hprt_obj) },
+    { MP_ROM_QSTR(MP_QSTR_hprt_trace), MP_ROM_PTR(&mod_usbhost_hprt_trace_obj) },
 };
 static MP_DEFINE_CONST_DICT(mod_usbhost_globals, mod_usbhost_globals_table);
 
