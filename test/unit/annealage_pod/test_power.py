@@ -27,13 +27,28 @@ def test_cycle_increments_counter():
     assert power.vtarget.is_on() is True
 
 
-def test_vbus_present_threshold():
-    # Without an INA228 the voltage_mV() returns 0.0 so vbus_present is False.
+def test_is_measurable_without_i2c():
+    # Unix port has no I2C bus; both rails report unmeasurable up front
+    # rather than silently returning a zero sentinel from voltage_mV().
+    assert power.vtarget.is_measurable() is False
+    assert power.dut_usb.is_measurable() is False
+
+
+def test_voltage_mV_raises_when_unavailable():
+    import errno
+    import pytest
+    with pytest.raises(OSError) as exc:
+        power.vtarget.voltage_mV()
+    assert exc.value.errno == errno.ENODEV
+    with pytest.raises(OSError) as exc:
+        power.vtarget.current_mA()
+    assert exc.value.errno == errno.ENODEV
+
+
+def test_vbus_present_raises_when_unavailable():
+    import errno
+    import pytest
     power.dut_usb.off()
-    assert power.dut_usb.vbus_present() is False
-
-
-def test_voltage_mV_default_zero_without_i2c():
-    # No I2C bus on the Unix port; current/voltage default to 0.0.
-    assert power.vtarget.current_mA() == 0.0
-    assert power.vtarget.voltage_mV() == 0.0
+    with pytest.raises(OSError) as exc:
+        power.dut_usb.vbus_present()
+    assert exc.value.errno == errno.ENODEV
