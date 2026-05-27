@@ -244,6 +244,10 @@ typedef struct {
     struct usbhost_inflight *current_inflight[32];
     /* Per-EP counters for diagnosis; indexed by ep_mutex_index. */
     usbhost_ep_stats_t      ep_stats[32];
+    /* Ring buffer of recent failed EP0 control transfers. */
+    usbhost_ep0_error_t     ep0_errors[USBHOST_EP0_ERROR_LOG_SIZE];
+    uint8_t                 ep0_err_head;   /* next write index */
+    uint8_t                 ep0_err_count;  /* live entries, capped at SIZE */
 } usbhost_slot_t;
 
 typedef struct {
@@ -370,6 +374,31 @@ bool usbhost_get_ep_stats(const char busid[USBIP_BUSID_SIZE],
     }
     xSemaphoreGive(s_state.state_mutex);
     return hit;
+}
+
+int usbhost_get_ep0_errors(const char busid[USBIP_BUSID_SIZE],
+                           usbhost_ep0_error_t out[USBHOST_EP0_ERROR_LOG_SIZE])
+{
+    if (!busid || !out) {
+        return -EINVAL;
+    }
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    int slot = find_slot_by_busid_locked(busid);
+    if (slot < 0) {
+        xSemaphoreGive(s_state.state_mutex);
+        return -ENODEV;
+    }
+    usbhost_slot_t *slot_p = &s_state.devices[slot];
+    /* Copy oldest first. Ring is filled in [head - count, head) modulo
+     * SIZE; the oldest entry is at (head - count) mod SIZE. */
+    uint8_t count = slot_p->ep0_err_count;
+    uint8_t start = (slot_p->ep0_err_head + USBHOST_EP0_ERROR_LOG_SIZE - count)
+                    % USBHOST_EP0_ERROR_LOG_SIZE;
+    for (uint8_t i = 0; i < count; i++) {
+        out[i] = slot_p->ep0_errors[(start + i) % USBHOST_EP0_ERROR_LOG_SIZE];
+    }
+    xSemaphoreGive(s_state.state_mutex);
+    return (int)count;
 }
 
 int usbhost_bus_reset(void)
@@ -850,6 +879,23 @@ static void xfer_complete_cb(tuh_xfer_t *xfer)
             s_state.devices[inflight->slot_idx].ep_stats[inflight->ep_idx].completed++;
         } else {
             s_state.devices[inflight->slot_idx].ep_stats[inflight->ep_idx].errored++;
+            /* For control transfers (ep_idx == 0), also log the setup
+             * packet to the per-slot EP0-error ring buffer. The setup
+             * bytes live at inflight->buf[0..7] for control transfers
+             * (kept across the buf layout: [setup(8) | data]). */
+            if (inflight->ep_idx == 0 && inflight->is_control &&
+                inflight->buf != NULL) {
+                usbhost_slot_t *slot_p = &s_state.devices[inflight->slot_idx];
+                usbhost_ep0_error_t *rec = &slot_p->ep0_errors[slot_p->ep0_err_head];
+                rec->t_us = (uint32_t)esp_timer_get_time();
+                memcpy(rec->setup, inflight->buf, 8);
+                rec->result = (int8_t)xfer->result;
+                slot_p->ep0_err_head =
+                    (slot_p->ep0_err_head + 1) % USBHOST_EP0_ERROR_LOG_SIZE;
+                if (slot_p->ep0_err_count < USBHOST_EP0_ERROR_LOG_SIZE) {
+                    slot_p->ep0_err_count++;
+                }
+            }
         }
         xSemaphoreGive(s_state.state_mutex);
     }

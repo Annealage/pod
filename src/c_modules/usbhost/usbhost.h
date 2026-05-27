@@ -239,6 +239,28 @@ typedef struct {
 bool usbhost_get_ep_stats(const char busid[USBIP_BUSID_SIZE],
                           usbhost_ep_stats_t out[32]);
 
+/* Per-slot ring buffer of recent failed EP0 control transfers. Captures
+ * the 8-byte setup packet and the TinyUSB result code so callers can
+ * see WHICH control requests are failing (kernel-issued
+ * SET_CONTROL_LINE_STATE, vendor-specific bRequests, string-descriptor
+ * STALLs, etc.).
+ *
+ * Records only failures (xfer->result != XFER_RESULT_SUCCESS). The
+ * ring drops the oldest entry on overflow. */
+#define USBHOST_EP0_ERROR_LOG_SIZE 8u
+
+typedef struct {
+    uint32_t t_us;        /* esp_timer_get_time() at the time of failure */
+    uint8_t  setup[8];    /* bmRequestType, bRequest, wValue, wIndex, wLength */
+    int8_t   result;      /* TinyUSB xfer_result_t (STALLED=2, TIMEOUT=3, FAILED=4) */
+} usbhost_ep0_error_t;
+
+/* Copy up to USBHOST_EP0_ERROR_LOG_SIZE recent EP0-error records into
+ * `out`, oldest first. Returns the number of records written, or
+ * negative errno on busid lookup failure. */
+int usbhost_get_ep0_errors(const char busid[USBIP_BUSID_SIZE],
+                           usbhost_ep0_error_t out[USBHOST_EP0_ERROR_LOG_SIZE]);
+
 #ifdef __cplusplus
 }
 #endif

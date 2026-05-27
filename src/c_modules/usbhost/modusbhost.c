@@ -137,6 +137,44 @@ static mp_obj_t mod_usbhost_ep_stats(mp_obj_t busid_obj)
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_usbhost_ep_stats_obj, mod_usbhost_ep_stats);
 
+static mp_obj_t mod_usbhost_ep0_errors(mp_obj_t busid_obj)
+{
+    const char *busid_s = mp_obj_str_get_str(busid_obj);
+    char busid[USBIP_BUSID_SIZE] = {0};
+    size_t len = strlen(busid_s);
+    if (len > USBIP_BUSID_SIZE) {
+        len = USBIP_BUSID_SIZE;
+    }
+    memcpy(busid, busid_s, len);
+
+    usbhost_ep0_error_t errs[USBHOST_EP0_ERROR_LOG_SIZE];
+    int rc = usbhost_get_ep0_errors(busid, errs);
+    if (rc < 0) {
+        mp_raise_OSError(-rc);
+    }
+
+    /* Return list of (t_us, setup_bytes, result_code, result_str) tuples,
+     * oldest first. setup_bytes is a 8-byte bytes object; result_str is
+     * one of "STALLED" / "TIMEOUT" / "FAILED" / "OTHER" for human read. */
+    mp_obj_t list = mp_obj_new_list(0, NULL);
+    for (int i = 0; i < rc; i++) {
+        const usbhost_ep0_error_t *e = &errs[i];
+        const char *rstr = "OTHER";
+        if (e->result == 2) rstr = "STALLED";
+        else if (e->result == 3) rstr = "TIMEOUT";
+        else if (e->result == 4) rstr = "FAILED";
+        mp_obj_t tup[4] = {
+            mp_obj_new_int_from_uint(e->t_us),
+            mp_obj_new_bytes(e->setup, 8),
+            mp_obj_new_int(e->result),
+            mp_obj_new_str(rstr, strlen(rstr)),
+        };
+        mp_obj_list_append(list, mp_obj_new_tuple(4, tup));
+    }
+    return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_usbhost_ep0_errors_obj, mod_usbhost_ep0_errors);
+
 static const mp_rom_map_elem_t mod_usbhost_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),   MP_ROM_QSTR(MP_QSTR_usbhost) },
     { MP_ROM_QSTR(MP_QSTR_flush),      MP_ROM_PTR(&mod_usbhost_flush_obj) },
@@ -144,6 +182,7 @@ static const mp_rom_map_elem_t mod_usbhost_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_dwc2_hprt),  MP_ROM_PTR(&mod_usbhost_dwc2_hprt_obj) },
     { MP_ROM_QSTR(MP_QSTR_hprt_trace), MP_ROM_PTR(&mod_usbhost_hprt_trace_obj) },
     { MP_ROM_QSTR(MP_QSTR_ep_stats),   MP_ROM_PTR(&mod_usbhost_ep_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ep0_errors), MP_ROM_PTR(&mod_usbhost_ep0_errors_obj) },
 };
 static MP_DEFINE_CONST_DICT(mod_usbhost_globals, mod_usbhost_globals_table);
 
