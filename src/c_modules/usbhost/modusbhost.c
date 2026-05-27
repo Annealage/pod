@@ -14,6 +14,9 @@
 
 #include "py/runtime.h"
 
+#include <errno.h>
+#include <string.h>
+
 #include "usbhost.h"
 
 static mp_obj_t mod_usbhost_flush(size_t n_args, const mp_obj_t *pos_args,
@@ -92,12 +95,55 @@ static mp_obj_t mod_usbhost_hprt_trace(size_t n_args, const mp_obj_t *pos_args,
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(mod_usbhost_hprt_trace_obj, 0, mod_usbhost_hprt_trace);
 
+static mp_obj_t mod_usbhost_ep_stats(mp_obj_t busid_obj)
+{
+    const char *busid_s = mp_obj_str_get_str(busid_obj);
+    char busid[USBIP_BUSID_SIZE] = {0};
+    size_t len = strlen(busid_s);
+    if (len > USBIP_BUSID_SIZE) {
+        len = USBIP_BUSID_SIZE;
+    }
+    memcpy(busid, busid_s, len);
+
+    usbhost_ep_stats_t stats[32];
+    if (!usbhost_get_ep_stats(busid, stats)) {
+        mp_raise_OSError(ENODEV);
+    }
+
+    /* Return dict keyed by ep_addr (0x00..0x0F for OUT/CTRL, 0x80..0x8F
+     * for IN); only include entries with non-zero activity. */
+    mp_obj_t d = mp_obj_new_dict(0);
+    for (uint8_t idx = 0; idx < 32; idx++) {
+        const usbhost_ep_stats_t *e = &stats[idx];
+        if (e->submitted == 0 && e->completed == 0 &&
+            e->errored == 0 && e->cancelled == 0) {
+            continue;
+        }
+        /* Reverse ep_mutex_index: low 4 bits = EP num, bit 4 = direction. */
+        uint8_t ep_num = idx & 0x0F;
+        uint8_t ep_dir = (idx & 0x10) ? 0x80 : 0x00;
+        uint8_t ep_addr = ep_num | ep_dir;
+
+        mp_obj_t tup[4] = {
+            mp_obj_new_int_from_uint(e->submitted),
+            mp_obj_new_int_from_uint(e->completed),
+            mp_obj_new_int_from_uint(e->errored),
+            mp_obj_new_int_from_uint(e->cancelled),
+        };
+        mp_obj_dict_store(d, mp_obj_new_int_from_uint(ep_addr),
+                          mp_obj_new_tuple(4, tup));
+    }
+    return d;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_usbhost_ep_stats_obj, mod_usbhost_ep_stats);
+
 static const mp_rom_map_elem_t mod_usbhost_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),   MP_ROM_QSTR(MP_QSTR_usbhost) },
     { MP_ROM_QSTR(MP_QSTR_flush),      MP_ROM_PTR(&mod_usbhost_flush_obj) },
     { MP_ROM_QSTR(MP_QSTR_bus_reset),  MP_ROM_PTR(&mod_usbhost_bus_reset_obj) },
     { MP_ROM_QSTR(MP_QSTR_dwc2_hprt),  MP_ROM_PTR(&mod_usbhost_dwc2_hprt_obj) },
     { MP_ROM_QSTR(MP_QSTR_hprt_trace), MP_ROM_PTR(&mod_usbhost_hprt_trace_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ep_stats),   MP_ROM_PTR(&mod_usbhost_ep_stats_obj) },
 };
 static MP_DEFINE_CONST_DICT(mod_usbhost_globals, mod_usbhost_globals_table);
 

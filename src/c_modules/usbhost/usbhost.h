@@ -215,6 +215,30 @@ int usbhost_hprt_trace(uint32_t duration_ms, uint32_t period_us,
                        uint32_t force_every, usbhost_hprt_sample_t *out,
                        size_t cap, size_t *out_n);
 
+/* Per-endpoint URB counters for a given busid. Indexed by
+ * ep_mutex_index (low 4 bits = EP number, bit 4 = direction:
+ * 0=OUT/control, 1=IN). 32 entries total.
+ *
+ * Used to triage "URB went out but completion never landed" vs "URB
+ * was never submitted in the first place" failure modes - the
+ * counters increment at the points where the host-stack code
+ * actually has control, so a discrepancy between submitted and
+ * completed-or-errored points at the boundary where transfers are
+ * being lost.
+ */
+typedef struct {
+    uint32_t submitted;   /* tuh_*_xfer called (URB handed to TinyUSB) */
+    uint32_t completed;   /* xfer_complete_cb fired with XFER_RESULT_SUCCESS */
+    uint32_t errored;     /* xfer_complete_cb fired with non-SUCCESS result */
+    uint32_t cancelled;   /* usbhost_cancel_ep synthesised a completion */
+} usbhost_ep_stats_t;
+
+/* Copy the 32-entry per-EP stats array for the device at `busid` into
+ * `out` (must be at least 32 entries). Returns true on hit, false if
+ * busid not found. */
+bool usbhost_get_ep_stats(const char busid[USBIP_BUSID_SIZE],
+                          usbhost_ep_stats_t out[32]);
+
 #ifdef __cplusplus
 }
 #endif

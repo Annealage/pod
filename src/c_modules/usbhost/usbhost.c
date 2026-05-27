@@ -242,6 +242,8 @@ typedef struct {
      * and our cancel-synthesised completion is arbitrated via the
      * inflight->completed atomic. Indexed by ep_mutex_index(). */
     struct usbhost_inflight *current_inflight[32];
+    /* Per-EP counters for diagnosis; indexed by ep_mutex_index. */
+    usbhost_ep_stats_t      ep_stats[32];
 } usbhost_slot_t;
 
 typedef struct {
@@ -284,6 +286,7 @@ bool usbhost_is_verbose(void)
 }
 
 static void clear_slot_locked(int slot);
+static int find_slot_by_busid_locked(const char busid[USBIP_BUSID_SIZE]);
 
 int usbhost_flush(bool force_bus_reset)
 {
@@ -350,6 +353,23 @@ uint32_t usbhost_dwc2_hprt(void)
         return 0;
     }
     return DWC2_REG(BOARD_TUH_RHPORT)->hprt;
+}
+
+bool usbhost_get_ep_stats(const char busid[USBIP_BUSID_SIZE],
+                          usbhost_ep_stats_t out[32])
+{
+    if (!busid || !out) {
+        return false;
+    }
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    int slot = find_slot_by_busid_locked(busid);
+    bool hit = (slot >= 0);
+    if (hit) {
+        memcpy(out, s_state.devices[slot].ep_stats,
+               sizeof(usbhost_ep_stats_t) * 32);
+    }
+    xSemaphoreGive(s_state.state_mutex);
+    return hit;
 }
 
 int usbhost_bus_reset(void)
@@ -816,13 +836,20 @@ static void xfer_complete_cb(tuh_xfer_t *xfer)
                  s_natural_wins, s_natural_lost);
     }
 
-    /* Clear slot's current_inflight back-pointer. */
+    /* Clear slot's current_inflight back-pointer and bump completion
+     * counter. xfer->result == XFER_RESULT_SUCCESS counts as completed;
+     * anything else (STALL, TIMEOUT, FAILED) counts as errored. */
     if (inflight->slot_idx >= 0 && inflight->slot_idx < USBHOST_MAX_DEVICES &&
         inflight->ep_idx < 32) {
         xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
         if (s_state.devices[inflight->slot_idx].current_inflight[inflight->ep_idx]
             == inflight) {
             s_state.devices[inflight->slot_idx].current_inflight[inflight->ep_idx] = NULL;
+        }
+        if (xfer->result == XFER_RESULT_SUCCESS) {
+            s_state.devices[inflight->slot_idx].ep_stats[inflight->ep_idx].completed++;
+        } else {
+            s_state.devices[inflight->slot_idx].ep_stats[inflight->ep_idx].errored++;
         }
         xSemaphoreGive(s_state.state_mutex);
     }
@@ -926,6 +953,12 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
             }
         }
         ep_mutex = get_ep_submit_mutex_locked(slot, submit_ep);
+        /* Pre-increment submitted counter. Control transfers are
+         * tracked under submit_ep (always 0 for control), so EP0
+         * submissions count regardless of direction; bulk/intr are
+         * tracked by (ep_addr & 0x0F | dir<<4) per ep_mutex_index. */
+        uint8_t stats_idx = ep_mutex_index(is_control ? submit_ep : ep_addr);
+        s_state.devices[slot].ep_stats[stats_idx].submitted++;
     }
     xSemaphoreGive(s_state.state_mutex);
 
@@ -1641,6 +1674,15 @@ void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr)
         return; /* TinyUSB callback won the race */
     }
     s_synth_wins++;
+    /* Bump the per-EP cancelled counter. The natural-completion path
+     * in xfer_complete_cb won't fire for this URB (we just won the CAS),
+     * so the EP's completed/errored counter would otherwise stay flat
+     * across cancels. */
+    xSemaphoreTake(s_state.state_mutex, portMAX_DELAY);
+    if (slot >= 0 && ep_idx < 32) {
+        s_state.devices[slot].ep_stats[ep_idx].cancelled++;
+    }
+    xSemaphoreGive(s_state.state_mutex);
 #ifdef R27_DEADLOCK_TRACE
     ESP_LOGI(TAG, "synth: seq=%" PRIu32 " ep=0x%02x ifl=%p WON busy_pre=%d "
                   "(calls=%" PRIu32 " wins=%" PRIu32 ")",
