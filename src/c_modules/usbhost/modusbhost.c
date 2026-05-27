@@ -51,26 +51,31 @@ static mp_obj_t mod_usbhost_bus_reset(void)
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_bus_reset_obj, mod_usbhost_bus_reset);
 
-#define HPRT_TRACE_BUF_LEN 256
+#define HPRT_TRACE_BUF_LEN 1024
 
 static mp_obj_t mod_usbhost_hprt_trace(size_t n_args, const mp_obj_t *pos_args,
                                        mp_map_t *kw_args)
 {
-    enum { ARG_duration_ms, ARG_period_us };
+    enum { ARG_duration_ms, ARG_period_us, ARG_force_every };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_duration_ms, MP_ARG_INT, { .u_int = 3000 } },
         { MP_QSTR_period_us,   MP_ARG_INT, { .u_int = 200 } },
+        { MP_QSTR_force_every, MP_ARG_INT, { .u_int = 0 } },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args, pos_args, kw_args,
                      MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
-    usbhost_hprt_sample_t buf[HPRT_TRACE_BUF_LEN];
+    /* m_new uses MicroPython GC; 1024 samples * 8 bytes = 8 KB, fits
+     * comfortably on the heap and avoids busting the C stack. */
+    usbhost_hprt_sample_t *buf = m_new(usbhost_hprt_sample_t, HPRT_TRACE_BUF_LEN);
     size_t n = 0;
     int rc = usbhost_hprt_trace((uint32_t)args[ARG_duration_ms].u_int,
                                 (uint32_t)args[ARG_period_us].u_int,
+                                (uint32_t)args[ARG_force_every].u_int,
                                 buf, HPRT_TRACE_BUF_LEN, &n);
     if (rc != 0) {
+        m_del(usbhost_hprt_sample_t, buf, HPRT_TRACE_BUF_LEN);
         mp_raise_OSError(-rc);
     }
 
@@ -82,6 +87,7 @@ static mp_obj_t mod_usbhost_hprt_trace(size_t n_args, const mp_obj_t *pos_args,
         };
         mp_obj_list_append(list, mp_obj_new_tuple(2, tup));
     }
+    m_del(usbhost_hprt_sample_t, buf, HPRT_TRACE_BUF_LEN);
     return list;
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(mod_usbhost_hprt_trace_obj, 0, mod_usbhost_hprt_trace);

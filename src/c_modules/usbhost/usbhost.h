@@ -212,8 +212,8 @@ typedef struct {
 } usbhost_hprt_sample_t;
 
 int usbhost_hprt_trace(uint32_t duration_ms, uint32_t period_us,
-                       usbhost_hprt_sample_t *out, size_t cap,
-                       size_t *out_n);
+                       uint32_t force_every, usbhost_hprt_sample_t *out,
+                       size_t cap, size_t *out_n);
 
 #ifdef __cplusplus
 }
