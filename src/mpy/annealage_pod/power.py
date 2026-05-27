@@ -12,6 +12,7 @@
 # reference INA228 EVM; PCB design will pin actual values, override
 # at instantiation time if they change.
 
+import errno
 import time
 
 try:
@@ -98,6 +99,17 @@ class _Rail:
                     self._ina = None
         return self._ina
 
+    def is_measurable(self):
+        """Return True iff the INA228 for this rail is reachable on I2C.
+
+        When False, current_mA() / voltage_mV() / vbus_present() raise
+        OSError rather than silently returning a zero sentinel that can
+        be confused with a genuine zero reading. Caller uses this to
+        report "rail measurement not available on this carrier" cleanly
+        instead of falsely concluding the rail is off.
+        """
+        return self._ina_or_none() is not None
+
     def on(self):
         """Energise the rail."""
         self._pin.value(1)
@@ -134,17 +146,26 @@ class _Rail:
         return self._cycle_count
 
     def current_mA(self):
-        """Return the rail current in milliamps (0.0 if INA228 unavailable)."""
+        """Return the rail current in milliamps.
+
+        Raises OSError(ENODEV) if the INA228 for this rail is not reachable
+        on I2C (carrier without populated INAs, wedged bus, etc.). Use
+        is_measurable() to check up front if a clean fallback is preferred.
+        """
         ina = self._ina_or_none()
         if ina is None:
-            return 0.0
+            raise OSError(errno.ENODEV, "INA228 unavailable on this rail")
         return ina.current_mA()
 
     def voltage_mV(self):
-        """Return the rail bus voltage in millivolts (0.0 if INA228 unavailable)."""
+        """Return the rail bus voltage in millivolts.
+
+        Raises OSError(ENODEV) if the INA228 for this rail is not reachable
+        on I2C. See is_measurable() for the cleanly-checkable predicate.
+        """
         ina = self._ina_or_none()
         if ina is None:
-            return 0.0
+            raise OSError(errno.ENODEV, "INA228 unavailable on this rail")
         return ina.voltage_mV()
 
 
@@ -152,7 +173,11 @@ class _DutUsbRail(_Rail):
     """DUT-USB rail: adds vbus_present() per Appendix A workaround."""
 
     def vbus_present(self):
-        """Return True iff DUT-USB VBUS is above the 4 V detection threshold."""
+        """Return True iff DUT-USB VBUS is above the 4 V detection threshold.
+
+        Raises OSError(ENODEV) if the INA228 is not reachable - the caller
+        cannot conclude "VBUS absent" from an absent measurement.
+        """
         return self.voltage_mV() >= _VBUS_PRESENT_THRESHOLD_MV
 
 
