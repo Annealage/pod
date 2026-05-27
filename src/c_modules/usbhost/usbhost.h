@@ -215,6 +215,57 @@ int usbhost_hprt_trace(uint32_t duration_ms, uint32_t period_us,
                        uint32_t force_every, usbhost_hprt_sample_t *out,
                        size_t cap, size_t *out_n);
 
+/* Per-endpoint URB counters for a given busid. Indexed by
+ * ep_mutex_index (low 4 bits = EP number, bit 4 = direction:
+ * 0=OUT/control, 1=IN). 32 entries total.
+ *
+ * Used to triage "URB went out but completion never landed" vs "URB
+ * was never submitted in the first place" failure modes - the
+ * counters increment at the points where the host-stack code
+ * actually has control, so a discrepancy between submitted and
+ * completed-or-errored points at the boundary where transfers are
+ * being lost.
+ */
+typedef struct {
+    uint32_t submitted;    /* tuh_*_xfer called (URB handed to TinyUSB) */
+    uint32_t completed;    /* xfer_complete_cb fired with XFER_RESULT_SUCCESS */
+    uint32_t errored;      /* xfer_complete_cb fired with non-SUCCESS result */
+    uint32_t cancelled;    /* usbhost_cancel_ep synthesised a completion */
+    uint32_t bytes_total;  /* sum of xfer->actual_len across completed URBs.
+                              IN: bytes received from device; OUT: bytes
+                              sent to device. Disambiguates "URB completed
+                              but device sent ZLP" from "URB completed with
+                              payload". */
+} usbhost_ep_stats_t;
+
+/* Copy the 32-entry per-EP stats array for the device at `busid` into
+ * `out` (must be at least 32 entries). Returns true on hit, false if
+ * busid not found. */
+bool usbhost_get_ep_stats(const char busid[USBIP_BUSID_SIZE],
+                          usbhost_ep_stats_t out[32]);
+
+/* Per-slot ring buffer of recent failed EP0 control transfers. Captures
+ * the 8-byte setup packet and the TinyUSB result code so callers can
+ * see WHICH control requests are failing (kernel-issued
+ * SET_CONTROL_LINE_STATE, vendor-specific bRequests, string-descriptor
+ * STALLs, etc.).
+ *
+ * Records only failures (xfer->result != XFER_RESULT_SUCCESS). The
+ * ring drops the oldest entry on overflow. */
+#define USBHOST_EP0_ERROR_LOG_SIZE 8u
+
+typedef struct {
+    uint32_t t_us;        /* esp_timer_get_time() at the time of failure */
+    uint8_t  setup[8];    /* bmRequestType, bRequest, wValue, wIndex, wLength */
+    int8_t   result;      /* TinyUSB xfer_result_t (STALLED=2, TIMEOUT=3, FAILED=4) */
+} usbhost_ep0_error_t;
+
+/* Copy up to USBHOST_EP0_ERROR_LOG_SIZE recent EP0-error records into
+ * `out`, oldest first. Returns the number of records written, or
+ * negative errno on busid lookup failure. */
+int usbhost_get_ep0_errors(const char busid[USBIP_BUSID_SIZE],
+                           usbhost_ep0_error_t out[USBHOST_EP0_ERROR_LOG_SIZE]);
+
 #ifdef __cplusplus
 }
 #endif

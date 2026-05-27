@@ -2094,6 +2094,49 @@ int usbip_server_stop(void)
         close(s_state.listen_fd);
         s_state.listen_fd = -1;
     }
+
+    /* Force-close every active client connection. shutdown(SHUT_RDWR)
+     * wakes whatever recv() the client_task is blocked in; handle_client
+     * returns, attachment_release runs (clearing the slot), and the
+     * task exits. Without this, stop() only retired the listen socket
+     * and left existing client_tasks running with their slots still
+     * held - new attach attempts then hit attachment_acquire's
+     * busid-already-taken guard and fail. */
+    if (s_state.attach_lock != NULL) {
+        xSemaphoreTake(s_state.attach_lock, portMAX_DELAY);
+        for (size_t i = 0; i < USBIP_MAX_CLIENTS; i++) {
+            if (s_state.slots[i].in_use && s_state.slots[i].fd >= 0) {
+                ESP_LOGI(TAG, "stop: shutting down client fd=%d busid=%.32s",
+                         s_state.slots[i].fd, s_state.slots[i].busid);
+                shutdown(s_state.slots[i].fd, SHUT_RDWR);
+            }
+        }
+        xSemaphoreGive(s_state.attach_lock);
+    }
+
+    /* Wait briefly for client_tasks to drain. Each should exit within
+     * a few ms of socket shutdown; 500 ms is generous. If a task is
+     * wedged in something other than recv() (lane_task synchronisation,
+     * mid-URB-dispatch, etc.), the slot will stay held - caller can
+     * fall back to machine.reset() in that pathological case. */
+    if (s_state.attach_lock != NULL) {
+        for (int waited_ms = 0; waited_ms < 500; waited_ms += 10) {
+            bool any_held = false;
+            xSemaphoreTake(s_state.attach_lock, portMAX_DELAY);
+            for (size_t i = 0; i < USBIP_MAX_CLIENTS; i++) {
+                if (s_state.slots[i].in_use) {
+                    any_held = true;
+                    break;
+                }
+            }
+            xSemaphoreGive(s_state.attach_lock);
+            if (!any_held) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
     return 0;
 }
 
