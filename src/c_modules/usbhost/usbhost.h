@@ -227,10 +227,15 @@ int usbhost_hprt_trace(uint32_t duration_ms, uint32_t period_us,
  * being lost.
  */
 typedef struct {
-    uint32_t submitted;   /* tuh_*_xfer called (URB handed to TinyUSB) */
-    uint32_t completed;   /* xfer_complete_cb fired with XFER_RESULT_SUCCESS */
-    uint32_t errored;     /* xfer_complete_cb fired with non-SUCCESS result */
-    uint32_t cancelled;   /* usbhost_cancel_ep synthesised a completion */
+    uint32_t submitted;    /* tuh_*_xfer called (URB handed to TinyUSB) */
+    uint32_t completed;    /* xfer_complete_cb fired with XFER_RESULT_SUCCESS */
+    uint32_t errored;      /* xfer_complete_cb fired with non-SUCCESS result */
+    uint32_t cancelled;    /* usbhost_cancel_ep synthesised a completion */
+    uint32_t bytes_total;  /* sum of xfer->actual_len across completed URBs.
+                              IN: bytes received from device; OUT: bytes
+                              sent to device. Disambiguates "URB completed
+                              but device sent ZLP" from "URB completed with
+                              payload". */
 } usbhost_ep_stats_t;
 
 /* Copy the 32-entry per-EP stats array for the device at `busid` into

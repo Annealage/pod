@@ -877,6 +877,8 @@ static void xfer_complete_cb(tuh_xfer_t *xfer)
         }
         if (xfer->result == XFER_RESULT_SUCCESS) {
             s_state.devices[inflight->slot_idx].ep_stats[inflight->ep_idx].completed++;
+            s_state.devices[inflight->slot_idx].ep_stats[inflight->ep_idx].bytes_total +=
+                (uint32_t)xfer->actual_len;
         } else {
             s_state.devices[inflight->slot_idx].ep_stats[inflight->ep_idx].errored++;
             /* For control transfers (ep_idx == 0), also log the setup

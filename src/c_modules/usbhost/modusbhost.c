@@ -124,14 +124,15 @@ static mp_obj_t mod_usbhost_ep_stats(mp_obj_t busid_obj)
         uint8_t ep_dir = (idx & 0x10) ? 0x80 : 0x00;
         uint8_t ep_addr = ep_num | ep_dir;
 
-        mp_obj_t tup[4] = {
+        mp_obj_t tup[5] = {
             mp_obj_new_int_from_uint(e->submitted),
             mp_obj_new_int_from_uint(e->completed),
             mp_obj_new_int_from_uint(e->errored),
             mp_obj_new_int_from_uint(e->cancelled),
+            mp_obj_new_int_from_uint(e->bytes_total),
         };
         mp_obj_dict_store(d, mp_obj_new_int_from_uint(ep_addr),
-                          mp_obj_new_tuple(4, tup));
+                          mp_obj_new_tuple(5, tup));
     }
     return d;
 }
