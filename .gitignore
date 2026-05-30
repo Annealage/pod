@@ -22,6 +22,10 @@ __pycache__/
 .env.local
 *.local
 
+# Pod network credentials (provisioned to the device FS, never committed)
+config.py
+src/boards/*/config.py
+
 # Firmware images (downloaded or extracted, not source)
 *.uf2
 *.bin
