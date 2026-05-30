@@ -3,6 +3,9 @@
 Operational learnings from the RP2350 bring-up spike. These cost real debugging
 time; read them before working on the RP2350 target so you do not re-learn them.
 
+For the end-to-end build/flash/provision runbook (and the `config.py` network
+configuration), see `src/boards/ANNEALAGE_POD_RP2350/README.md`.
+
 ## 1. `mpremote resume` caches imported modules
 
 `mpremote ... resume` connects without resetting the runtime, so `import X`

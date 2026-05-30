@@ -6,16 +6,31 @@ the debug stack; sequenced after Phases 2-3 (decision 3).
 Goal: a host PC enumerates the DUT as a local USB device via `usbip attach` over
 Wi-Fi.
 
+Current status (after Phase 1): the board firmware compiles `machine.USBHost`,
+but **host mode is unverified**. One USB controller cannot be device and host at
+once; at boot the controller is in device/CDC mode (the USB-CDC REPL enumerates),
+and host is meant to engage on demand (`machine.USBHost()` -> `mp_usbh_init_tuh()`,
+which deinits the device stack and inits the host stack on the same rhport).
+Whether that switch and enumeration actually work on this silicon is unproven, no
+DUT has been on the pod's USB port yet. "`machine.USBHost` imports" is not proof.
+
 ## Dependencies
 
 - F1 (transport), native USB host validated in D1.2.
 
 ## Tasks
 
-### F4.1 Native USB host enumeration
-- Bring up the native USB controller in host mode (machine-usbhost branch),
-  enumerate a DUT (target the typical composite MicroPython-DUT shape: CDC + MSC),
-  expose raw URB submit/complete suitable for USB/IP forwarding.
+### F4.1 Native USB host bring-up and verification
+- **Verify the device->host switch**: activating `machine.USBHost()` must take the
+  controller out of device mode (the USB-CDC REPL drops, the host `/dev/ttyACM`
+  disappears) and into host mode. Confirm over the Wi-Fi REPL (which is
+  independent of USB), since USB-CDC is gone once host engages.
+- **Standalone enumeration first**: enumerate a simple known USB device (CDC or
+  HID) end to end as its own milestone, before any USB/IP forwarding, to prove
+  host works at all on this hardware. If the switch or enumeration fails, this is
+  the R2 trigger (fall back to Pico-PIO-USB host).
+- Then expose raw URB submit/complete suitable for USB/IP forwarding; target the
+  typical composite MicroPython-DUT shape (CDC + MSC).
 
 ### F4.2 USB/IP server over Wi-Fi
 - A C user module on the rp2 port (decision 1), factoring the S3 `usbip` protocol
