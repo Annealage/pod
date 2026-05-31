@@ -7,10 +7,15 @@
 #
 # Credentials and port come from a config.py on the filesystem (NOT frozen, NOT
 # committed) so they change without a firmware rebuild. See config.example.py.
+#
+# After Wi-Fi is up it also advertises a browsable mDNS service
+# (_annealage-pod._tcp) via the native lwIP responder (network.mdns_add_service)
+# so host tooling discovers the pod by service type rather than a hardcoded IP.
 
 import network
 import socket
 import os
+import sys
 import time
 
 
@@ -48,6 +53,37 @@ def _serve(port):
         os.dupterm(cl)
 
 
+def _advertise_mdns(repl_port):
+    # Advertise a browsable service via the native lwIP mDNS responder. Guarded
+    # so any failure (missing API, responder not ready) does not stop the REPL.
+    try:
+        import config
+    except ImportError:
+        config = None
+    carrier_id = getattr(config, "CARRIER_ID", "") if config else ""
+    try:
+        mp_version = ".".join(str(x) for x in sys.implementation.version)
+    except Exception:
+        mp_version = sys.version
+    txt = {
+        "repl-port": str(repl_port),
+        "usbip-port": "3240",
+        "uart-port": "2000",
+        "carrier-id": str(carrier_id),
+        "mp-version": mp_version,
+    }
+    try:
+        slot = network.mdns_add_service(
+            "annealage-pod", "_annealage-pod", "tcp", repl_port, txt=txt
+        )
+        print("netboot: mDNS service advertised, slot", slot)
+        return slot
+    except Exception as e:
+        print("netboot: mDNS advertise failed:")
+        sys.print_exception(e)
+        return None
+
+
 def start():
     try:
         import config
@@ -68,4 +104,5 @@ def start():
     print("netboot: Wi-Fi up", ip, "REPL on port", port)
     import _thread
     _thread.start_new_thread(_serve, (port,))
+    _advertise_mdns(port)
     return ip
