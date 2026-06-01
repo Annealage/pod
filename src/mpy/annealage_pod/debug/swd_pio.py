@@ -101,6 +101,8 @@ class SWDPio:
         # reconfiguring the Pin to SIO afterwards would disconnect PIO from the
         # pad (a real bug found in bring-up), so do not.
         Pin(swdio, Pin.IN, Pin.PULL_UP)
+        self.swdio_num = swdio
+        self.swclk_num = swclk
         self.swdio = Pin(swdio)
         self.swclk = Pin(swclk)
         self.sm_id = sm_id
@@ -250,6 +252,50 @@ class SWDPio:
             sm.put(v & 1)
             sm.put(14)                    # 8-bit output (idle)
             sm.put(0)
+
+    @micropython.native
+    def read_drw_block(self, count):
+        # Fast inner loop for block reads (verify / dump). Same inlining win as
+        # write_drw_block. Each word is a posted AP DRW read (returns the
+        # previous result, latches the current one and auto-increments TAR)
+        # followed by a DP RDBUFF read that yields that word, mirroring
+        # MEMAP.read_ap but without the per-word method chain. Caller sets CSW to
+        # 32-bit auto-increment and writes TAR; SELECT must be AP bank 0 with
+        # DPBANKSEL=0 (so RDBUFF reads the AP result). Parity is clocked but not
+        # checked (a bad read shows up as a verify mismatch); ACK is checked.
+        sm = self.sm
+        req_drw = self._request(1, 1, 0x0C)   # AP read, DRW (posted)
+        req_rb = self._request(0, 1, 0x0C)    # DP read, RDBUFF
+        out = []
+        push = out.append
+        for _ in range(count):
+            # posted DRW read: discard return, latches current word, TAR += 4
+            sm.put(14)
+            sm.put(req_drw)
+            sm.put(5)
+            a = (sm.get() >> 29) & 7
+            if a != 1:
+                raise SWDError("DRW read ack=%d" % a, a)
+            sm.put(63)                    # 32-bit input (data, discard)
+            sm.get()
+            sm.put(1)                     # 1-bit input (parity, discard)
+            sm.get()
+            sm.put(3)                     # 2-bit input (read->write turnaround)
+            sm.get()
+            # RDBUFF read: yields the word the posted read latched
+            sm.put(14)
+            sm.put(req_rb)
+            sm.put(5)
+            a = (sm.get() >> 29) & 7
+            if a != 1:
+                raise SWDError("RDBUFF read ack=%d" % a, a)
+            sm.put(63)                    # 32-bit input (data)
+            push(sm.get() & 0xFFFFFFFF)
+            sm.put(1)
+            sm.get()
+            sm.put(3)
+            sm.get()
+        return out
 
 
 # Known DPIDR / IDR values for sanity-checks during bring-up.

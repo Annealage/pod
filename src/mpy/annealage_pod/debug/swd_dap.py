@@ -165,6 +165,21 @@ class DebugPort:
             self.clear_sticky()
         return stat
 
+    def resync(self):
+        # Re-establish SWD framing after the bus has been driven by another
+        # engine (the PIO DRW streamer hands the pins between PIO blocks, which
+        # leaves the DP state machine out of phase). A line reset + JTAG-to-SWD
+        # re-syncs the DP without disturbing the AP (CSW/TAR persist); SELECT is
+        # reset by the line reset, so drop the cache and re-assert power.
+        self.swd.jtag_to_swd()
+        self.dpidr = self.read_dp(DP_DPIDR)
+        self._select = None
+        self.clear_sticky()
+        stat = self.read_dp(DP_CTRL_STAT)
+        if (stat & PWRUP_ACK) != PWRUP_ACK:
+            self.power_up()
+        return self.dpidr
+
 
 class MEMAP:
     def __init__(self, dp, apsel=0):
@@ -192,6 +207,10 @@ class MEMAP:
 
     def read_block32(self, addr, count):
         # Auto-increment TAR within each 1 KB region; re-arm TAR at the boundary.
+        # The per-word posted-read + RDBUFF pair is run by the transport's
+        # inlined read_drw_block (same method-call-overhead win as the write
+        # streamer), so verify and dump are not bottlenecked by the DP/AP method
+        # chain.
         out = []
         self._set_csw(CSW_WORD_INC)
         i = 0
@@ -202,8 +221,7 @@ class MEMAP:
             n = count - i
             if n > room:
                 n = room
-            for _ in range(n):
-                out.append(self.dp.read_ap(AP_DRW, self.apsel))
+            out.extend(self.dp.swd.read_drw_block(n))
             addr += n * 4
             i += n
         return out
