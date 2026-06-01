@@ -106,3 +106,28 @@ toward discovery-first rather than name-first.
 - `prototypes/rp2350-swd-spike/swd_bitbang.py`: bit-bang SWD (DP/AP/MEM-AP), the
   validated turnaround framing (see `dev-notes.md` §3).
 - `prototypes/rp2350-swd-spike/netrepl.py`: Wi-Fi + `os.dupterm` TCP REPL server.
+
+## 6. Phase 1/2 results on hardware (nRF52840 target, no USB DUT)
+
+Productionised under `src/mpy/annealage_pod/debug/` (`swd_pio`, `swd_dap`,
+`flash_nrf52`), driven from the host over the pod's USB-CDC REPL for development
+and over the Wi-Fi socket REPL for the network proof.
+
+- **DP/AP/MEM-AP + Cortex-M (D2.1)**: validated on the nRF52840, DPIDR
+  `0x2BA01477`, AP IDR `0x24770011`, CPUID `0x410FC241`, FICR.PART `0x52840`,
+  1 MB / 4 KB pages / 256 pages. Halt/resume toggles `S_HALT`; 32-bit block reads
+  with TAR auto-increment (re-armed at the 1 KB boundary) match single reads.
+- **nRF52 NVMC flash (D2.2/D2.4 step 1)**: erase / program / read-back-verify
+  works, including a payload crossing the 1 KB TAR boundary, driven **over Wi-Fi**
+  (the Phase 2 over-the-network milestone for this hardware). ~425 words/s
+  (1.66 KB/s) at 9.375 MHz after block-write tuning. Full Phase 2 gate's
+  RP-native and CMSIS-FLM targets stay hardware-blocked (no RP / STM32 DUT wired);
+  full-image streaming-from-file and an FLM general path are the next D2 work.
+- **PIO SWD clock (D1.1 partial)**: `clkdiv=8` = 9.375 MHz reliable (100/100 DPIDR
+  clean); hard cliff at 12.5 MHz (input-sampling phase). Just under the >= 10 MHz
+  gate target; needs PIO input-phase tuning. RP-target + multidrop (TARGETSEL)
+  remain blocked (no RP DUT wired).
+- **PIO/core coexistence (D1.2 partial)**: CYW43 Wi-Fi (PIO0 SM0-3) + PIO SWD
+  (PIO1 SM4) running together, 300/300 MEM-AP read-pairs clean while commands flow
+  over Wi-Fi; Wi-Fi stays connected and mDNS keeps answering throughout. The
+  USB-host leg of the three-way test is deferred until a USB DUT is available.
