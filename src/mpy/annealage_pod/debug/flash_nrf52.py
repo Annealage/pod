@@ -9,7 +9,7 @@
 #
 # nRF52840 flash: 1 MB at 0x00000000, 4 KB pages, word (32-bit) writes only.
 
-from .swd_dap import TransferError
+from .swd_dap import (TransferError, CSW_WORD_INC, AP_TAR, TAR_INC_BOUNDARY)
 
 # NVMC registers (nRF52840)
 NVMC_BASE = 0x4001E000
@@ -31,10 +31,12 @@ ERASED = 0xFFFFFFFF
 
 
 class NRF52Flash:
-    def __init__(self, memap, cortexm, page_size=PAGE_SIZE):
+    def __init__(self, memap, cortexm, page_size=PAGE_SIZE, streamer=None):
         self.ap = memap
         self.cm = cortexm
         self.page_size = page_size
+        # Optional PIO DRW streamer (swd_stream.DRWStreamer) for the write burst.
+        self.streamer = streamer
 
     def _wait(self, reg=NVMC_READY, timeout=100000):
         for _ in range(timeout):
@@ -91,11 +93,34 @@ class NRF52Flash:
             raise ValueError("write addr not word-aligned")
         self._config(CONFIG_WEN)
         try:
-            self.ap.write_block32_fast(addr, words)
+            if self.streamer is not None:
+                self._stream_write(addr, words)
+            else:
+                self.ap.write_block32_fast(addr, words)
             self._wait(NVMC_READY)
             self.ap.dp.check_sticky()
         finally:
             self._config(CONFIG_REN)
+
+    def _stream_write(self, addr, words):
+        # Program a run via the PIO DRW streamer, one 1 KB TAR window at a time.
+        # The streamer hands the pins to PIO2 for the burst; the DP is out of
+        # phase afterwards, so re-sync before the next window's DP/AP setup.
+        ap = self.ap
+        count = len(words)
+        i = 0
+        while i < count:
+            ap._csw = None
+            ap._set_csw(CSW_WORD_INC)
+            ap.dp.write_ap(AP_TAR, addr, ap.apsel)
+            room = (TAR_INC_BOUNDARY - (addr & (TAR_INC_BOUNDARY - 1))) >> 2
+            n = count - i
+            if n > room:
+                n = room
+            self.streamer.write_words(words[i:i + n])
+            ap.dp.resync()
+            addr += n * 4
+            i += n
 
     # --- byte-oriented, bounded-memory image programming ---
     @staticmethod
