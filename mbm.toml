@@ -3,8 +3,11 @@
 #
 # Composes src/micropython into the integration branch `tessera` from:
 #   - machine-usbhost : native USB host (machine.USBHost) + shared TinyUSB host
-#                       infra. Carries the mp_usbh.h forward-decl fix folded in,
-#                       and does NOT pin pico-sdk (inherits micropython master).
+#                       infra. Carries the mp_usbh.h forward-decl fix folded in.
+#                       Pins nothing: pico-sdk, tinyusb, and micropython-lib all
+#                       inherit micropython master (the older lib pins it used to
+#                       carry were squashed out; the CDCInterface timeout fix it
+#                       once pinned belongs in a separate micropython-lib PR).
 #   - network-mdns    : expose lwIP's mDNS responder services on the network
 #                       module (network.mdns_add_service / remove_service /
 #                       announce). The real upstream-PR-candidate feature.
