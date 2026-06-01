@@ -10,6 +10,7 @@ ports/*/build*/
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 
 # Editor / OS scratch
 .vscode/

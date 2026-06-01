@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "annealage-pod-host"
+version = "0.1.0"
+description = "Host-side tooling for the Annealage Pod hardware-in-the-loop test rig."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+zeroconf = ["zeroconf"]
+mcp = ["mcp"]
+dev = ["pytest", "zeroconf", "mcp"]
+
+[project.scripts]
+pod = "pod.cli:main"
+pod-mcp = "pod.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pod*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
