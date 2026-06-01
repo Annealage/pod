@@ -170,13 +170,20 @@ def cmd_cp(args):
 
 
 def cmd_flash(args):
-    print("flash: not yet implemented - Phase 2/3 (on-pod FLM loader)")
-    return 1
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    addr = int(args.addr, 0) if isinstance(args.addr, str) else args.addr
+    result = pod.flash_dut(args.image, target=args.target, addr=addr)
+    print(result)
+    return 0 if result.get("ok") else 1
 
 
 def cmd_reset(args):
-    print("reset: not yet implemented - Phase 2/3 (on-pod reset control)")
-    return 1
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    result = pod.reset_dut(mode=args.mode)
+    print(result)
+    return 0 if result.get("ok") else 1
 
 
 # ── main ─────────────────────────────────────────────────────────────────
@@ -258,17 +265,18 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("src", help="Source path (use ':path' for pod-side)")
     p.add_argument("dst", help="Destination path (use ':path' for pod-side)")
 
-    # flash (stub)
-    p = sub.add_parser("flash", help="Flash a DUT image via the pod (not yet implemented)")
+    # flash
+    p = sub.add_parser("flash", help="Flash a DUT firmware image via the pod")
     p.add_argument("label")
-    p.add_argument("image", help="Firmware image path")
+    p.add_argument("image", help="Firmware image path (raw binary)")
+    p.add_argument("--addr", default="0", help="Flash base address (default: 0)")
     p.add_argument("--target", default=None, help="Target MCU identifier")
 
-    # reset (stub)
-    p = sub.add_parser("reset", help="Reset the DUT via the pod (not yet implemented)")
+    # reset
+    p = sub.add_parser("reset", help="Reset the DUT via the pod")
     p.add_argument("label")
-    p.add_argument("--mode", default="swd", choices=["swd", "nrst", "power"],
-                   help="Reset method (default: swd)")
+    p.add_argument("--mode", default="sysreset", choices=["sysreset", "halt"],
+                   help="Reset method (default: sysreset)")
 
     args = parser.parse_args()
 

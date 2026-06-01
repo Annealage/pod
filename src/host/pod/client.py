@@ -14,8 +14,21 @@ Stubbed methods raise NotImplementedError with the phase they're pending:
   gdb_endpoint          - pending Phase 3 (on-pod GDB server)
 """
 
+import ast
 import subprocess as _subprocess
 from typing import Callable, List, Optional
+
+
+def _last_dict(stdout: str) -> dict:
+    """Parse the last printed dict literal from on-pod stdout."""
+    for line in reversed((stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                return ast.literal_eval(line)
+            except (ValueError, SyntaxError):
+                pass
+    return {"raw": stdout}
 
 
 class Pod:
@@ -90,26 +103,63 @@ class Pod:
         argv = self._argv("repl")
         self._runner(argv)
 
-    # ── stubbed methods (pending future phases) ──────────────────────────
+    # ── DUT flash / reset / read (on-pod debug stack, workstream D) ───────
 
-    def flash_dut(self, image: str, target: Optional[str] = None) -> None:
-        """Flash a firmware image to the DUT via the on-pod FLM loader.
+    def flash_dut(self, image: str, target: Optional[str] = None,
+                  addr: int = 0, verify: bool = True) -> dict:
+        """Flash a firmware image file to the DUT over SWD via the on-pod loader.
 
-        Pending Phase 2/3: requires on-pod FLM flash loader (workstream D2/D3).
+        The image is copied to the pod and programmed + verified in bounded
+        chunks on the pod (it is never held whole in pod RAM, and the prior DUT
+        contents are not read). Returns the on-pod result dict
+        {ok, addr, bytes, ms}. `target` is reserved for selecting target data
+        once more than the nRF52 native path exists.
         """
-        raise NotImplementedError(
-            "flash_dut is not yet implemented - pending Phase 2/3 (on-pod FLM loader)"
-        )
+        remote = "_dutimg.bin"
+        self.cp(image, ":" + remote)
+        try:
+            out = self.exec(
+                "import annealage_pod.debug.ops as o;"
+                "print(o.flash_file(%d, %r, verify=%s))"
+                % (addr, remote, bool(verify))
+            )
+        finally:
+            try:
+                self.exec("import os; os.remove(%r)" % remote)
+            except Exception:
+                pass
+        return _last_dict(out)
 
-    def reset_dut(self, mode: str = "swd") -> None:
+    def reset_dut(self, mode: str = "sysreset") -> dict:
         """Reset the DUT via the on-pod debug probe.
 
-        Pending Phase 2/3: requires on-pod reset control (workstream D2/D3).
-        mode: 'swd', 'nrst', or 'power' (power requires custom carrier hardware).
+        mode: 'sysreset' (reset and run) or 'halt' (reset and halt at the
+        vector). nRST and power-cycle reset need carrier hardware not present.
         """
-        raise NotImplementedError(
-            "reset_dut is not yet implemented - pending Phase 2/3 (on-pod reset control)"
+        out = self.exec(
+            "import annealage_pod.debug.ops as o; print(o.reset(%r))" % mode
         )
+        return _last_dict(out)
+
+    def read_dut(self, addr: int, length: int, out_path: str) -> str:
+        """Explicitly read `length` bytes of DUT flash from `addr` to a host file.
+
+        This is the only path that returns target contents, and only when
+        called; flashing never reads the DUT back to the host.
+        """
+        remote = "_dump.bin"
+        self.exec(
+            "import annealage_pod.debug.ops as o;"
+            "print(o.dump_to_file(%d, %d, %r))" % (addr, length, remote)
+        )
+        self.cp(":" + remote, out_path)
+        try:
+            self.exec("import os; os.remove(%r)" % remote)
+        except Exception:
+            pass
+        return out_path
+
+    # ── stubbed methods (pending future phases) ──────────────────────────
 
     def usbip_attach(self) -> None:
         """Attach the DUT USB device over USB/IP.

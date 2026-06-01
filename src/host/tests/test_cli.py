@@ -129,20 +129,18 @@ class TestUnregister:
         assert ret == 1
 
 
-class TestStubs:
-    def test_flash_prints_not_implemented(self, monkeypatch, capsys):
-        monkeypatch.setattr(sys, "argv", ["pod", "flash", "some-pod", "fw.bin"])
-        ret = main()
-        out, _ = capsys.readouterr()
-        assert "not yet implemented" in out.lower() or "phase" in out.lower()
-        assert ret == 1
+class TestFlashReset:
+    # flash/reset are wired to the on-pod loader; with an unknown label they
+    # resolve-then-fail (exit 1) rather than printing a stub message.
+    def test_flash_unknown_label_errors(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["pod", "flash", "nope", "fw.bin"])
+        with pytest.raises(SystemExit):
+            main()
 
-    def test_reset_prints_not_implemented(self, monkeypatch, capsys):
-        monkeypatch.setattr(sys, "argv", ["pod", "reset", "some-pod"])
-        ret = main()
-        out, _ = capsys.readouterr()
-        assert "not yet implemented" in out.lower() or "phase" in out.lower()
-        assert ret == 1
+    def test_reset_unknown_label_errors(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["pod", "reset", "nope"])
+        with pytest.raises(SystemExit):
+            main()
 
 
 class TestNoSubcommand:

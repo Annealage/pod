@@ -103,17 +103,37 @@ class TestExecWithFakeRunner:
         assert result == "2\n"
 
 
+class TestDutOps:
+    def test_flash_dut_invokes_cp_and_flash_file(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'addr': 0, 'bytes': 4096, 'ms': 459}\n",
+            returncode=0)
+        result = pod_fake.flash_dut("fw.bin")
+        calls = [c.args[0] for c in fake_runner.call_args_list]
+        assert any(
+            c[:5] == ["ampremote", "connect", CONNECT_TARGET, "fs", "cp"]
+            and "fw.bin" in c for c in calls)
+        assert any("flash_file" in " ".join(c) for c in calls)
+        assert result.get("ok") is True and result.get("bytes") == 4096
+
+    def test_reset_dut_invokes_reset(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'mode': 'sysreset'}\n", returncode=0)
+        result = pod_fake.reset_dut()
+        calls = [c.args[0] for c in fake_runner.call_args_list]
+        assert any("o.reset" in " ".join(c) for c in calls)
+        assert result.get("ok") is True
+
+    def test_read_dut_invokes_dump_and_cp_back(self, pod_fake, fake_runner):
+        pod_fake.read_dut(0x1000, 256, "/tmp/out.bin")
+        calls = [c.args[0] for c in fake_runner.call_args_list]
+        assert any("dump_to_file" in " ".join(c) for c in calls)
+        assert any(
+            c[:5] == ["ampremote", "connect", CONNECT_TARGET, "fs", "cp"]
+            and "/tmp/out.bin" in c for c in calls)
+
+
 class TestNotImplementedStubs:
-    def test_flash_dut_raises(self, pod):
-        with pytest.raises(NotImplementedError) as exc_info:
-            pod.flash_dut("firmware.bin")
-        assert "Phase 2" in str(exc_info.value) or "Phase 3" in str(exc_info.value)
-
-    def test_reset_dut_raises(self, pod):
-        with pytest.raises(NotImplementedError) as exc_info:
-            pod.reset_dut("swd")
-        assert "Phase 2" in str(exc_info.value) or "Phase 3" in str(exc_info.value)
-
     def test_usbip_attach_raises(self, pod):
         with pytest.raises(NotImplementedError) as exc_info:
             pod.usbip_attach()
@@ -133,8 +153,3 @@ class TestNotImplementedStubs:
         with pytest.raises(NotImplementedError) as exc_info:
             pod.gdb_endpoint()
         assert "Phase 3" in str(exc_info.value)
-
-    def test_flash_dut_message_mentions_flm(self, pod):
-        with pytest.raises(NotImplementedError) as exc_info:
-            pod.flash_dut("fw.bin")
-        assert "FLM" in str(exc_info.value) or "loader" in str(exc_info.value).lower()
