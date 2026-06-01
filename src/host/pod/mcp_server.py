@@ -9,8 +9,9 @@ Tools:
   pod_info        show registry info for a named pod
   dut_exec        execute MicroPython code on a pod
   mount_dir       mount a local directory on a pod
-  flash_dut       (stub) flash a DUT image - pending Phase 2/3
-  reset_dut       (stub) reset the DUT - pending Phase 2/3
+  flash_dut       flash a DUT image (streamed into pod RAM, no pod FS)
+  reset_dut       reset the DUT (sysreset to run, halt to catch the vector)
+  read_dut        read DUT memory to a host file (streamed, no pod FS)
 
 The mcp import is guarded so this module can be imported and tested
 even if the mcp package is absent. build_server() is only called
@@ -72,18 +73,32 @@ def handle_mount_dir(label: str, directory: str) -> str:
     return f"Mounted {directory} on {label}."
 
 
-def handle_flash_dut(label: str, image: str, target: str = None) -> str:
-    """Stub: flash a DUT image via the pod. Pending Phase 2/3."""
-    raise NotImplementedError(
-        "flash_dut is not yet implemented - pending Phase 2/3 (on-pod FLM loader)"
-    )
+def handle_flash_dut(label: str, image: str, target: str = None,
+                     addr: int = 0) -> dict:
+    """Flash a firmware image to the DUT via the pod (streamed, no pod FS)."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    return pod.flash_dut(image, target=target, addr=addr)
 
 
-def handle_reset_dut(label: str, mode: str = "swd") -> str:
-    """Stub: reset the DUT via the pod. Pending Phase 2/3."""
-    raise NotImplementedError(
-        "reset_dut is not yet implemented - pending Phase 2/3 (on-pod reset control)"
-    )
+def handle_reset_dut(label: str, mode: str = "sysreset") -> dict:
+    """Reset the DUT via the pod ('sysreset' to run, 'halt' to catch reset)."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    return pod.reset_dut(mode=mode)
+
+
+def handle_read_dut(label: str, addr: int, length: int, out_path: str) -> str:
+    """Read DUT memory to a host file via the pod (streamed, no pod FS)."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    return pod.read_dut(addr, length, out_path)
 
 
 # ── MCP server construction ───────────────────────────────────────────────
@@ -154,14 +169,19 @@ def build_server():
             Tool(
                 name="flash_dut",
                 description=(
-                    "Flash a firmware image to the DUT via the on-pod loader. "
-                    "NOT YET IMPLEMENTED - pending Phase 2/3."
+                    "Flash a firmware image to the DUT over SWD via the pod, "
+                    "streamed into pod RAM (no pod filesystem)."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
-                        "image": {"type": "string", "description": "Firmware image path."},
+                        "image": {"type": "string", "description": "Firmware image path (raw binary)."},
+                        "addr": {
+                            "type": "integer",
+                            "description": "Flash base address.",
+                            "default": 0,
+                        },
                         "target": {
                             "type": "string",
                             "description": "Target MCU identifier (optional).",
@@ -172,22 +192,37 @@ def build_server():
             ),
             Tool(
                 name="reset_dut",
-                description=(
-                    "Reset the DUT via the on-pod debug probe. "
-                    "NOT YET IMPLEMENTED - pending Phase 2/3."
-                ),
+                description="Reset the DUT via the on-pod debug probe.",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "mode": {
                             "type": "string",
-                            "enum": ["swd", "nrst", "power"],
-                            "description": "Reset method.",
-                            "default": "swd",
+                            "enum": ["sysreset", "halt"],
+                            "description": "sysreset = reset and run; halt = reset and halt.",
+                            "default": "sysreset",
                         },
                     },
                     "required": ["label"],
+                },
+            ),
+            Tool(
+                name="read_dut",
+                description=(
+                    "Read DUT memory to a host file via the pod, streamed from "
+                    "pod RAM (no pod filesystem). The only path that returns "
+                    "target contents."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "addr": {"type": "integer", "description": "Source address."},
+                        "length": {"type": "integer", "description": "Bytes to read."},
+                        "out_path": {"type": "string", "description": "Host file to write."},
+                    },
+                    "required": ["label", "addr", "length", "out_path"],
                 },
             ),
         ]
@@ -218,15 +253,25 @@ def build_server():
                     arguments["label"],
                     arguments["image"],
                     arguments.get("target"),
+                    arguments.get("addr", 0),
                 )
-                return [TextContent(type="text", text=result)]
+                return [TextContent(type="text", text=str(result))]
 
             elif name == "reset_dut":
                 result = handle_reset_dut(
                     arguments["label"],
-                    arguments.get("mode", "swd"),
+                    arguments.get("mode", "sysreset"),
                 )
-                return [TextContent(type="text", text=result)]
+                return [TextContent(type="text", text=str(result))]
+
+            elif name == "read_dut":
+                result = handle_read_dut(
+                    arguments["label"],
+                    arguments["addr"],
+                    arguments["length"],
+                    arguments["out_path"],
+                )
+                return [TextContent(type="text", text=str(result))]
 
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
