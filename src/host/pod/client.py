@@ -185,22 +185,63 @@ class Pod:
         )
         return _last_dict(out)
 
-    def read_dut(self, addr: int, length: int, out_path: str) -> str:
-        """Explicitly read `length` bytes of DUT flash from `addr` to a host file.
-
-        This is the only path that returns target contents, and only when
-        called; flashing never reads the DUT back to the host.
-        """
-        remote = "_dump.bin"
-        self.exec(
+    @staticmethod
+    def _dump_stream_cmd(addr: int, length: int, port: int) -> str:
+        """Build the on-pod dump_stream invocation (pure, for testability)."""
+        return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.dump_to_file(%d, %d, %r))" % (addr, length, remote)
+            "print(o.dump_stream(%d, %d, port=%d))" % (addr, length, port)
         )
-        self.cp(":" + remote, out_path)
+
+    def read_dut(self, addr: int, length: int, out_path: str,
+                 port: int = 3334) -> str:
+        """Explicitly read `length` bytes of DUT memory from `addr` to a host file.
+
+        Streamed straight from pod RAM over TCP into the host file, no pod
+        filesystem (the reverse of flash_dut). This is the only path that
+        returns target contents, and only when called; flashing never reads the
+        DUT back to the host.
+        """
+        result: dict = {}
+
+        def _run():
+            try:
+                result["out"] = self.exec(
+                    self._dump_stream_cmd(addr, length, port))
+            except Exception as exc:  # noqa: BLE001 - surfaced to caller
+                result["exc"] = exc
+
+        worker = threading.Thread(target=_run)
+        worker.start()
+        sock = None
+        for _ in range(100):
+            if "exc" in result:
+                break
+            try:
+                sock = socket.create_connection((self.address, port), timeout=5)
+                break
+            except OSError:
+                time.sleep(0.1)
+        if sock is None:
+            worker.join()
+            exc = result.get("exc")
+            raise RuntimeError(
+                "could not connect to pod dump port %d: %r\n%s"
+                % (port, exc, getattr(exc, "stderr", "") or ""))
+        got = 0
         try:
-            self.exec("import os; os.remove(%r)" % remote)
-        except Exception:
-            pass
+            with open(out_path, "wb") as f:
+                while got < length:
+                    block = sock.recv(min(65536, length - got))
+                    if not block:
+                        break
+                    f.write(block)
+                    got += len(block)
+        finally:
+            sock.close()
+        worker.join()
+        if "exc" in result:
+            raise result["exc"]
         return out_path
 
     # ── stubbed methods (pending future phases) ──────────────────────────

@@ -121,13 +121,12 @@ class TestDutOps:
         assert any("o.reset" in " ".join(c) for c in calls)
         assert result.get("ok") is True
 
-    def test_read_dut_invokes_dump_and_cp_back(self, pod_fake, fake_runner):
-        pod_fake.read_dut(0x1000, 256, "/tmp/out.bin")
-        calls = [c.args[0] for c in fake_runner.call_args_list]
-        assert any("dump_to_file" in " ".join(c) for c in calls)
-        assert any(
-            c[:5] == ["ampremote", "connect", CONNECT_TARGET, "fs", "cp"]
-            and "/tmp/out.bin" in c for c in calls)
+    def test_dump_stream_cmd(self):
+        cmd = Pod._dump_stream_cmd(0x1000, 256, 3334)
+        assert "dump_stream" in cmd
+        assert "256" in cmd
+        assert "port=3334" in cmd
+        assert str(0x1000) in cmd
 
 
 class TestNotImplementedStubs:

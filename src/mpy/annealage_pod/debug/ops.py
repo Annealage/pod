@@ -121,20 +121,45 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True):
     return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err}
 
 
-def dump_to_file(addr, length, path, clkdiv=8, chunk_words=256):
-    # Explicit read of target memory to a pod-side file in bounded chunks; the
-    # host copies the file back. This is the only path that returns target
-    # contents, and only when explicitly invoked.
+def dump_stream(addr, length, port=3334, clkdiv=8):
+    # Explicit read of target memory streamed to the host over TCP, no
+    # filesystem (the reverse of flash_stream). Reads the DUT in bounded
+    # 256-word blocks and sends each over the socket; nothing is written to the
+    # pod FS and nothing is held whole in pod RAM. This is the only path that
+    # returns target contents, and only when explicitly invoked.
+    import socket
+    import struct
+
     dp, ap, cm, fl = _ensure(clkdiv)
     if not cm.is_halted():
         cm.halt()
-    f = open(path, "wb")
+    err = None
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    cl = None
     try:
-        written = fl.dump(addr, length, f, chunk_words=chunk_words)
+        srv.bind(("0.0.0.0", port))
+        srv.listen(1)
+        cl, _ = srv.accept()
+        a = addr
+        left = length
+        while left > 0:
+            nwords = 256 if left >= 1024 else (left + 3) // 4
+            buf = b"".join(struct.pack("<I", w)
+                           for w in ap.read_block32(a, nwords))
+            if len(buf) > left:
+                buf = buf[:left]
+            cl.sendall(buf)
+            a += len(buf)
+            left -= len(buf)
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        err = repr(e)
     finally:
-        f.close()
-    cm.resume()
-    return {"ok": True, "addr": addr, "bytes": written}
+        if cl is not None:
+            cl.close()
+        srv.close()
+        cm.resume()
+    return {"ok": err is None, "addr": addr, "bytes": length, "err": err}
 
 
 def reset(mode="sysreset", clkdiv=8):
