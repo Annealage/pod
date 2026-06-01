@@ -223,6 +223,23 @@ class MEMAP:
             addr += n * 4
             i += n
 
+    def write_block32_fast(self, addr, words):
+        # Same as write_block32 but uses the transport's inlined DRW streamer for
+        # the hot path (CSW/TAR/SELECT are set here; SELECT stays in AP bank 0,
+        # where CSW/TAR/DRW live, so the streamer's DRW writes are consistent).
+        count = len(words)
+        self._set_csw(CSW_WORD_INC)
+        i = 0
+        while i < count:
+            self.dp.write_ap(AP_TAR, addr, self.apsel)
+            room = (TAR_INC_BOUNDARY - (addr & (TAR_INC_BOUNDARY - 1))) >> 2
+            n = count - i
+            if n > room:
+                n = room
+            self.dp.swd.write_drw_block(words[i:i + n])
+            addr += n * 4
+            i += n
+
     # Byte/halfword single access: place data in the correct DRW lane per CSW
     # size and TAR low bits (ADIv5 byte-laning).
     def read8(self, addr):

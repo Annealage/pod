@@ -91,8 +91,9 @@ class NRF52Flash:
             raise ValueError("write addr not word-aligned")
         self._config(CONFIG_WEN)
         try:
-            self.ap.write_block32(addr, words)
+            self.ap.write_block32_fast(addr, words)
             self._wait(NVMC_READY)
+            self.ap.dp.check_sticky()
         finally:
             self._config(CONFIG_REN)
 
@@ -153,3 +154,57 @@ class NRF52Flash:
             self._verify_chunk(addr + w * 4, words[w:w + c])
             w += c
         return True
+
+    # --- streaming file <-> flash (bounded memory) ---
+    def program_file(self, addr, fileobj, length=None, erase=True, verify=True,
+                     chunk_words=256):
+        # Program flash from an open binary file, holding only one chunk in RAM
+        # at a time. The whole image is never materialised, so a large image
+        # cannot exhaust the heap mid-operation (the failure mode that lost the
+        # original page contents during early bring-up). Returns bytes written.
+        if addr % 4:
+            raise ValueError("program addr not word-aligned")
+        if length is None:
+            try:
+                fileobj.seek(0, 2)
+                length = fileobj.tell()
+                fileobj.seek(0)
+            except (OSError, AttributeError):
+                raise ValueError("length required for non-seekable file")
+        self.prepare()
+        if erase:
+            start = addr & ~(self.page_size - 1)
+            span = ((addr & (self.page_size - 1)) + length
+                    + self.page_size - 1) & ~(self.page_size - 1)
+            self.erase_range(start, span)
+        a = addr
+        written = 0
+        chunk_bytes = chunk_words * 4
+        while written < length:
+            buf = fileobj.read(chunk_bytes)
+            if not buf:
+                break
+            words = self._chunk_words(buf, 0, (len(buf) + 3) // 4)
+            self.write_words(a, words)
+            if verify:
+                self._verify_chunk(a, words)
+            a += len(words) * 4
+            written += len(buf)
+        return written
+
+    def dump(self, addr, length, fileobj, chunk_words=256):
+        # Read target memory and stream it to an open binary file in bounded
+        # chunks. Use this to capture a region to the HOST before a destructive
+        # write so a restore survives any pod-side failure.
+        import struct
+        remaining = (length + 3) // 4
+        a = addr
+        out = 0
+        while remaining:
+            n = chunk_words if remaining > chunk_words else remaining
+            for w in self.ap.read_block32(a, n):
+                fileobj.write(struct.pack("<I", w))
+                out += 4
+            a += n * 4
+            remaining -= n
+        return min(out, length)

@@ -139,12 +139,17 @@ reset because `main`/`netboot` does not run after a raw-REPL soft reset). Use
 
 The wired nRF52840 SWD target is itself a MicroPython board (PCA10059). Its
 flash: 1 MB, 4 KB pages. The MicroPython nrf filesystem (littlefs) is the top
-64 KB, `0xF0000`-`0x100000` (16 blocks). Flashing into that region corrupts FS
-blocks. Pick a target region deliberately, and capture the original contents to
-the HOST (never only pod RAM) before any destructive write so a restore survives
-a pod-side error. (Cost real data: a MemoryError between a test write and its
-in-RAM restore lost a free FS block's contents; littlefs self-healed, both test
-files survived, but the original was unrecoverable.)
+64 KB, `0xF0000`-`0x100000` (16 blocks). Flashing into that region touches FS
+blocks; pick a target region deliberately.
+
+Real flashing is erase + program + verify and never reads the prior contents.
+Do NOT wrap flash tests in a read-modify-write that saves the original to pod
+RAM and restores it: a MemoryError (or any pod-side fault) between the test write
+and the in-RAM restore loses the original. That exact sequence cost a free FS
+block's contents during bring-up (littlefs self-healed, both test files survived,
+but the saved-in-RAM original was unrecoverable). If a region's prior contents
+matter, read them back to a HOST file first with the explicit read-flash command,
+that is a separate, deliberate operation, not part of the flash path.
 
 ## 7. On-pod flash loader: throughput and memory
 

@@ -14,11 +14,18 @@
 # label jmp targets but not an `out pc` literal, so we avoid a jump table).
 
 import rp2
+import micropython
 from machine import Pin
 
 SWD_OK = 1      # ACK = 0b001, LSB-first on the wire
 SWD_WAIT = 2    # 0b010
 SWD_FAULT = 4   # 0b100
+
+
+class SWDError(Exception):
+    def __init__(self, msg, ack=None):
+        super().__init__(msg)
+        self.ack = ack
 
 # Control-word routine selector (bit 0); bits 1.. carry (bit count - 1).
 SEL_OUTPUT = 0
@@ -86,7 +93,9 @@ class SWDPio:
     # PIO clock base (RP2350 sys clock). f_swclk(write) = SYS / clkdiv / 2.
     SYS_HZ = 150_000_000
 
-    def __init__(self, swdio=14, swclk=15, sm_id=4, clkdiv=12):
+    def __init__(self, swdio=14, swclk=15, sm_id=4, clkdiv=8):
+        # clkdiv=8 -> 9.375 MHz SWCLK, validated 100/100 clean on the nRF52840
+        # (12.5 MHz fails: input-sampling phase limit). See spike-findings.md.
         # sm_id 4..7 = PIO1 (PIO0 SMs 0..3 are used by CYW43 Wi-Fi).
         # Enable the SWDIO pad pull-up BEFORE StateMachine() grabs the pin;
         # reconfiguring the Pin to SIO afterwards would disconnect PIO from the
@@ -201,6 +210,46 @@ class SWDPio:
         self.write_bits(parity32(value), 1)
         self.idle(8)
         return SWD_OK
+
+    @micropython.native
+    def write_drw_block(self, words):
+        # Fast inner loop for flash programming: stream AP DRW writes with the
+        # request precomputed and the whole SWD write sequence (request, ACK,
+        # 32-bit data, parity, read->write turnaround, idle) inlined, avoiding
+        # the per-word method-call chain that dominates the cost (~99% of the
+        # per-word time is Python/transaction overhead, not wire time). The
+        # caller must have set CSW to 32-bit auto-increment and written TAR; the
+        # SELECT bank must be AP bank 0 (CSW/TAR/DRW all live there). ACK is
+        # checked but not WAIT-retried; the caller verifies by read-back and
+        # checks sticky errors, so a stray WAIT is caught, not silently dropped.
+        sm = self.sm
+        req = self._request(1, 0, 0x0C)   # AP write, DRW
+        trn = self.TRN_RW
+        trn_ctl = ((trn - 1) << 1 | 1) if trn else 0
+        for w in words:
+            w = w & 0xFFFFFFFF
+            sm.put(14)                    # 8-bit output (request)
+            sm.put(req)
+            sm.put(5)                     # 3-bit input (ACK)
+            ack = (sm.get() >> 29) & 7
+            if trn:
+                sm.put(trn_ctl)           # read->write turnaround
+                sm.get()
+            if ack != 1:                  # SWD_OK
+                raise SWDError("DRW write ack=%d" % ack, ack)
+            sm.put(62)                    # 32-bit output (data)
+            sm.put(w)
+            # inline parity32(w)
+            v = w
+            v ^= v >> 16
+            v ^= v >> 8
+            v ^= v >> 4
+            v ^= v >> 2
+            v ^= v >> 1
+            sm.put(0)                     # 1-bit output (parity)
+            sm.put(v & 1)
+            sm.put(14)                    # 8-bit output (idle)
+            sm.put(0)
 
 
 # Known DPIDR / IDR values for sanity-checks during bring-up.
