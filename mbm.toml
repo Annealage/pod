@@ -1,0 +1,34 @@
+# micropython-branch-manager (mbm) configuration for the Annealage Pod build.
+# Install: uv tool install micropython-branch-manager   Usage: mbm rebase -s src/micropython
+#
+# Composes src/micropython into the integration branch `tessera` from:
+#   - machine-usbhost : native USB host (machine.USBHost) + shared TinyUSB host
+#                       infra. Carries the mp_usbh.h forward-decl fix folded in,
+#                       and does NOT pin pico-sdk (inherits micropython master).
+#   - network-mdns    : expose lwIP's mDNS responder services on the network
+#                       module (network.mdns_add_service / remove_service /
+#                       announce). The real upstream-PR-candidate feature.
+#   - tinyusb-host-no-werror : temporary - stop treating the latent
+#                       unused-variable in vendored TinyUSB cdc_host.c as an
+#                       error (surfaces only when CFG_TUH_CDC_LINE_CODING/
+#                       CONTROL_ON_ENUM are unset). Drop once the TinyUSB PR
+#                       (`(void) idx;`) merges and lib/tinyusb is re-pinned.
+
+[[submodules]]
+path = "src/micropython"
+integration_branch = "tessera"
+
+[[submodules.branches]]
+name = "machine-usbhost"
+pr_url = "https://github.com/andrewleech/micropython/tree/machine-usbhost"
+title = "Add native USB host (machine.USBHost) across ports + shared TinyUSB host infra"
+
+[[submodules.branches]]
+name = "network-mdns"
+pr_url = "https://github.com/andrewleech/micropython/tree/network-mdns"
+title = "extmod/network: expose lwIP mDNS responder services (network.mdns_add_service)"
+
+[[submodules.branches]]
+name = "tinyusb-host-no-werror"
+pr_url = ""
+title = "rp2/tinyusb: do not -Werror unused-variable on vendored TinyUSB host sources"
