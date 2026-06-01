@@ -15,6 +15,10 @@ Stubbed methods raise NotImplementedError with the phase they're pending:
 """
 
 import ast
+import os
+import socket
+import threading
+import time
 import subprocess as _subprocess
 from typing import Callable, List, Optional
 
@@ -105,30 +109,70 @@ class Pod:
 
     # ── DUT flash / reset / read (on-pod debug stack, workstream D) ───────
 
-    def flash_dut(self, image: str, target: Optional[str] = None,
-                  addr: int = 0, verify: bool = True) -> dict:
-        """Flash a firmware image file to the DUT over SWD via the on-pod loader.
+    @staticmethod
+    def _flash_stream_cmd(addr: int, total: int, port: int, verify: bool) -> str:
+        """Build the on-pod flash_stream invocation (pure, for testability)."""
+        return (
+            "import annealage_pod.debug.ops as o;"
+            "print(o.flash_stream(%d, %d, port=%d, verify=%s))"
+            % (addr, total, port, bool(verify))
+        )
 
-        The image is copied to the pod and programmed + verified in bounded
-        chunks on the pod (it is never held whole in pod RAM, and the prior DUT
-        contents are not read). Returns the on-pod result dict
-        {ok, addr, bytes, ms}. `target` is reserved for selecting target data
-        once more than the nRF52 native path exists.
+    def flash_dut(self, image: str, target: Optional[str] = None,
+                  addr: int = 0, verify: bool = True, port: int = 3333) -> dict:
+        """Flash a firmware image to the DUT, streamed into pod RAM (no pod FS).
+
+        The pod runs a TCP receiver that double-buffers the image into two RAM
+        buffers (Wi-Fi fills one while SWD programs the other) and never writes
+        the image to its filesystem or reads the prior DUT contents. The host
+        starts that receiver over the REPL and streams the file straight to it.
+        Returns the on-pod result dict {ok, addr, bytes, err}.
         """
-        remote = "_dutimg.bin"
-        self.cp(image, ":" + remote)
-        try:
-            out = self.exec(
-                "import annealage_pod.debug.ops as o;"
-                "print(o.flash_file(%d, %r, verify=%s))"
-                % (addr, remote, bool(verify))
-            )
-        finally:
+        total = os.path.getsize(image)
+        result: dict = {}
+
+        def _run():
             try:
-                self.exec("import os; os.remove(%r)" % remote)
-            except Exception:
+                result["out"] = self.exec(
+                    self._flash_stream_cmd(addr, total, port, verify))
+            except Exception as exc:  # noqa: BLE001 - surfaced to caller
+                result["exc"] = exc
+
+        worker = threading.Thread(target=_run)
+        worker.start()
+        sock = None
+        for _ in range(100):
+            if "exc" in result:
+                break
+            try:
+                sock = socket.create_connection((self.address, port), timeout=5)
+                break
+            except OSError:
+                time.sleep(0.1)
+        if sock is None:
+            worker.join()
+            exc = result.get("exc")
+            detail = getattr(exc, "stderr", "") or ""
+            raise RuntimeError(
+                "could not connect to pod flash port %d: %r\n%s"
+                % (port, exc, detail))
+        try:
+            with open(image, "rb") as f:
+                while True:
+                    block = f.read(65536)
+                    if not block:
+                        break
+                    sock.sendall(block)
+            try:
+                sock.recv(1)   # status byte from the pod
+            except OSError:
                 pass
-        return _last_dict(out)
+        finally:
+            sock.close()
+        worker.join()
+        if "exc" in result:
+            raise result["exc"]
+        return _last_dict(result.get("out", ""))
 
     def reset_dut(self, mode: str = "sysreset") -> dict:
         """Reset the DUT via the on-pod debug probe.

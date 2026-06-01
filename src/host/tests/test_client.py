@@ -104,17 +104,14 @@ class TestExecWithFakeRunner:
 
 
 class TestDutOps:
-    def test_flash_dut_invokes_cp_and_flash_file(self, pod_fake, fake_runner):
-        fake_runner.return_value = MagicMock(
-            stdout="{'ok': True, 'addr': 0, 'bytes': 4096, 'ms': 459}\n",
-            returncode=0)
-        result = pod_fake.flash_dut("fw.bin")
-        calls = [c.args[0] for c in fake_runner.call_args_list]
-        assert any(
-            c[:5] == ["ampremote", "connect", CONNECT_TARGET, "fs", "cp"]
-            and "fw.bin" in c for c in calls)
-        assert any("flash_file" in " ".join(c) for c in calls)
-        assert result.get("ok") is True and result.get("bytes") == 4096
+    def test_flash_stream_cmd(self):
+        cmd = Pod._flash_stream_cmd(0x1000, 4096, 3333, True)
+        assert "flash_stream" in cmd
+        assert "4096" in cmd and "4096" in cmd
+        assert "port=3333" in cmd
+        assert "verify=True" in cmd
+        # addr is rendered as the decimal of 0x1000
+        assert str(0x1000) in cmd
 
     def test_reset_dut_invokes_reset(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(

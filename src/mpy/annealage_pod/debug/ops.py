@@ -57,6 +57,70 @@ def flash_file(addr, path, clkdiv=8, verify=True, chunk_words=256):
     return {"ok": True, "addr": addr, "bytes": n, "ms": dt}
 
 
+def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True):
+    # Flash a DUT image streamed over TCP straight into pod RAM, no filesystem.
+    # The image is received into a RAM buffer a chunk at a time and programmed
+    # to the DUT over SWD; the whole image is never resident (only one chunk
+    # plus the socket receive queue). The Wi-Fi receive and the SWD write
+    # overlap naturally: while the CPU programs the current chunk, lwIP fills
+    # the next one into the socket receive buffer in the background, so the
+    # following recv returns immediately. (An explicit two-buffer split with the
+    # SWD write on core 1 was tried; MicroPython threading + PIO from the second
+    # core deadlocked, and since Wi-Fi is much faster than SWD the gain was
+    # marginal, so this single-buffer-plus-lwIP form is used.)
+    import socket
+
+    dp, ap, cm, fl = _ensure(clkdiv)
+    fl.prepare()
+    page = fl.page_size
+    err = None
+
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    cl = None
+    try:
+        srv.bind(("0.0.0.0", port))
+        srv.listen(1)
+        cl, _ = srv.accept()
+
+        # erase the covered region once (host is connected; its stream buffers
+        # in TCP while we erase)
+        start = addr & ~(page - 1)
+        span = ((addr & (page - 1)) + total_len + page - 1) & ~(page - 1)
+        fl.erase_range(start, span)
+
+        buf = bytearray(chunk)
+        mv = memoryview(buf)
+        a = addr
+        left = total_len
+        while left > 0:
+            n = chunk if left > chunk else left
+            got = 0
+            while got < n:
+                r = cl.readinto(mv[got:n])
+                if not r:
+                    break
+                got += r
+            if got == 0:
+                err = "short read"
+                break
+            fl.program(a, bytes(mv[:got]), erase=False, verify=verify)
+            a += got
+            left -= got
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        err = repr(e)
+    finally:
+        if cl is not None:
+            try:
+                cl.send(b"\x01" if err is None else b"\x00")
+            except Exception:
+                pass
+            cl.close()
+        srv.close()
+        cm.resume()
+    return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err}
+
+
 def dump_to_file(addr, length, path, clkdiv=8, chunk_words=256):
     # Explicit read of target memory to a pod-side file in bounded chunks; the
     # host copies the file back. This is the only path that returns target
