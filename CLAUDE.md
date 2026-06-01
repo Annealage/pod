@@ -27,6 +27,13 @@ and naming conventions.
   DP/AP/MEM-AP, Wi-Fi dupterm TCP REPL + `ampremote` socket transport + mount) and
   the settled architecture points (native USB host, on-pod probe, mDNS service
   discovery).
+- `docs/rp2350/debug-stack.md`: usage of the on-pod debug stack
+  (`annealage_pod.debug`) - the layered SWD / DAP / nRF52-flash modules, the
+  high-level `ops` entry points, hardware wiring, deployment, and the
+  no-filesystem streaming flash/read.
+- `src/host/README.md`: usage of the host `pod` tooling - the CLI, the `Pod`
+  Python client, the MCP server, and the discover/register/flash/reset/read
+  workflow over Wi-Fi.
 - `docs/rp2350/plan/`: the phased development plan. Start at `overview.md` (goals,
   architecture deltas, workstreams, phase map + gates, host `pod` CLI/MCP design,
   risk register), then `phase-1-foundation.md` .. `phase-7-integration-hardening.md`.
