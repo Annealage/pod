@@ -131,6 +131,13 @@ and over the Wi-Fi socket REPL for the network proof.
   / 1 KB), 3/3 deterministic. Generalises flashing to any CMSIS-pack target;
   `tools/flm_extract.py` produces the on-VFS algo data. RP-native (bootrom) flash
   remains, blocked on a wired RP DUT.
+- **GDB debugging (Phase 3)**: hybrid GDB server, a stateless on-pod binary
+  debug-command server (`dbgsrv`, port 3335) + host GDB RSP translator
+  (`pod.gdbserver`), with FPB hardware breakpoints in `CortexM` and a framed,
+  interruptible `RESUME_WAIT` for Ctrl-C. Validated with real `arm-none-eabi-gdb`
+  through the pod to an nRF52840: reset-halt, read registers/memory, an FPB
+  hardware breakpoint that hit, backtrace, single-step, continue + re-hit (global
+  observed incrementing), clean detach. `pod gdb <label>` and a `gdb` MCP tool.
 - **PIO SWD clock (D1.1 partial)**: `clkdiv=8` = 9.375 MHz reliable (100/100 DPIDR
   clean); hard cliff at 12.5 MHz (input-sampling phase). Just under the >= 10 MHz
   gate target; needs PIO input-phase tuning. RP-target + multidrop (TARGETSEL)

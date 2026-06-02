@@ -29,6 +29,7 @@ hardware-validated results, see `spike-findings.md` section 6.
 | `flash_nrf52.NRF52Flash` | nRF52 NVMC flash loader (erase / program / verify) driven through the MEM-AP, bounded-memory chunked. The per-family native path. |
 | `flm.FLMFlasher` + `flm_<target>.py` | Generic CMSIS flash-algorithm runner: loads a vendor FLM blob into target RAM and calls its Init/EraseSector/ProgramPage. Works for any chip with a CMSIS pack. |
 | `swd_stream.DRWStreamer` | Experimental, opt-in PIO2 write-streamer (see below). |
+| `dbgsrv` (pod) + `pod.gdbserver` (host) | GDB debugging: a binary debug-command server on the pod (port 3335) plus a host GDB RSP translator, so host `gdb` debugs a DUT through the pod. FPB hardware breakpoints live in `CortexM`. |
 | `ops` | High-level entry points the host drives over the REPL. |
 
 ## Deployment
@@ -149,6 +150,41 @@ opt-in via `NRF52Flash(ap, cm, streamer=DRWStreamer(dp.swd))`. It measured ~3131
 vs ~2934 words/s (~7%) for a second PIO block, GP14/15 funcsel switching, and a
 per-burst DP resync, so it is disabled by default. Kept because the margin may
 matter once other write-path work lands.
+
+## GDB debugging through the pod (Phase 3)
+
+A host `arm-none-eabi-gdb` debugs a DUT through the pod. Architecture is hybrid:
+the pod runs a small, stateless **binary debug-command server** (`dbgsrv`, port
+3335, alongside flash 3333 / dump 3334) exposing read/write register, read/write
+memory, halt/step/continue, reset, breakpoint set/clear, and an interruptible
+`RESUME_WAIT`; a host-side **GDB RSP translator** (`pod.gdbserver`) speaks the
+gdb remote protocol to gdb and the binary protocol to the pod. All RSP state,
+`target.xml`, the Cortex-M register map and software-breakpoint bookkeeping live
+on the host (CPython), so the pod code stays small and the link cost is one
+round-trip per gdb operation (gdb's `g`/`m` batch into single commands).
+
+Hardware breakpoints use the Cortex-M FPB (`CortexM.set_breakpoint` /
+`clear_breakpoint` in `swd_dap.py`). Ctrl-C interrupt is carried as a framed
+flag on the `RESUME_WAIT` re-arm (no out-of-band byte), so a continue is
+interruptible within one wait-window without corrupting the wire framing.
+
+Usage:
+
+```bash
+pod gdb lab1 --listen-port 5005      # starts the pod dbgsrv + a local RSP listener
+# then, in another shell:
+arm-none-eabi-gdb -q firmware.elf \
+    -ex 'target extended-remote 127.0.0.1:5005' \
+    -ex 'hbreak main' -ex 'continue'
+```
+
+`pod gdb` reset-halts the DUT by default (`--no-reset-halt` to attach to a
+running target). The session leaves the DUT in a defined state on exit (FPB
+cleared) on every path including disconnect. There is also a `gdb` MCP tool.
+
+Validated on the nRF52840: connect + reset-halt, read registers and memory,
+set an FPB hardware breakpoint that hits, backtrace, single-step, and continue,
+through the pod over Wi-Fi.
 
 ## Limitations
 
