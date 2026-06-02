@@ -18,15 +18,17 @@ _dp = None
 _ap = None
 _cm = None
 _flash = None
+_fpb = None
 
 
 def _ensure(clkdiv=8):
-    global _dp, _ap, _cm, _flash
+    global _dp, _ap, _cm, _flash, _fpb
     if _dp is None:
         _dp = swd_dap.DebugPort(swdio=14, swclk=15, sm_id=4, clkdiv=clkdiv)
         _ap = swd_dap.MEMAP(_dp)
         _cm = swd_dap.CortexM(_ap)
         _flash = flash_nrf52.NRF52Flash(_ap, _cm)
+        _fpb = swd_dap.FPB(_ap)
     _dp.connect()
     return _dp, _ap, _cm, _flash
 
@@ -172,12 +174,60 @@ def reset(mode="sysreset", clkdiv=8):
     return {"ok": True, "mode": mode}
 
 
+def gdb_serve(port=3335, clkdiv=8, reset_halt=True):
+    # Bring the DP up ONCE, halt, and hand the live session to the binary debug
+    # server (dbgsrv). The dbgsrv loop runs against this session and never calls
+    # _ensure/connect again: a per-command _dp.connect() would line-reset the DP
+    # mid-session. _ensure's per-call connect() is tolerable only because this
+    # entry point calls it exactly once at session start.
+    #
+    # Blocks for the session, then returns a result dict the host scrapes from
+    # the REPL stdout (as flash_stream does).
+    #
+    # The finally puts the DUT in a defined state on EVERY exit path (clean
+    # detach, socket drop, EOF, exception): the FPB comparators are unconditionally
+    # disabled and cleared and the core is resumed. Without this, an abnormal
+    # teardown (gdb killed, Wi-Fi drop) would leave the core halted with live FPB
+    # comparators in flash, which a later flash_stream (it never calls FPB.init)
+    # would inherit and spuriously trap on. The host 'D' detach still issues its
+    # own clear/resume; this is the backstop for the paths 'D' never reaches.
+    from . import dbgsrv
+    dp, ap, cm, fl = _ensure(clkdiv)
+    if reset_halt:
+        cm.reset_and_halt()
+    elif not cm.is_halted():
+        cm.halt()
+    err = None
+    try:
+        dbgsrv.serve(dp, ap, cm, _fpb, port=port)
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        err = repr(e)
+    finally:
+        # Defined post-session DUT state, independent of how the session ended.
+        try:
+            if _fpb is not None:
+                _fpb.disable()
+                _fpb.clear_all()
+        except Exception:
+            pass
+        try:
+            cm.resume()
+        except Exception:
+            pass
+    return {"ok": err is None, "port": port, "err": err}
+
+
 def close():
     # Resume the target and drop the cached session (next call re-creates it).
-    global _dp, _ap, _cm, _flash
+    global _dp, _ap, _cm, _flash, _fpb
     try:
         if _cm is not None:
             _cm.resume()
     except Exception:
         pass
+    _dp = None
+    _ap = None
+    _cm = None
+    _flash = None
+    _fpb = None
     return {"ok": True}

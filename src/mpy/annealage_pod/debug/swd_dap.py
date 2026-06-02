@@ -81,6 +81,27 @@ AIRCR_VECTKEY = 0x05FA << 16
 AIRCR_SYSRESETREQ = 1 << 2
 AIRCR_VECTRESET = 1 << 0
 
+# DFSR (Debug Fault Status Register): records why the core last halted. Bits are
+# write-1-to-clear; the GDB server clears it before every resume/step so the next
+# halt reports a fresh cause, then decodes the raw value into a gdb signal.
+DFSR = 0xE000ED30
+DFSR_HALTED = 1 << 0
+DFSR_BKPT = 1 << 1
+DFSR_DWTTRAP = 1 << 2
+DFSR_VCATCH = 1 << 3
+DFSR_EXTERNAL = 1 << 4
+DFSR_CLEAR_ALL = 0x1F
+
+# --- Flash Patch and Breakpoint unit (FPBv1, Cortex-M4) -----------------------
+# FPBv1 comparators match only the code/flash region (addr < 0x20000000); RAM
+# breakpoints are realised by the host as software BKPT instructions. CTRL writes
+# require the KEY bit set in the same write. The host owns the flash-vs-RAM
+# realisation policy; this unit exposes only the hardware comparator mechanism.
+FP_CTRL = 0xE0002000
+FP_COMP0 = 0xE0002008
+FP_CTRL_KEY = 1 << 1
+FP_CTRL_ENABLE = 1 << 0
+
 
 class TransferError(Exception):
     def __init__(self, msg, ack=None):
@@ -277,6 +298,12 @@ class MEMAP:
         self.dp.write_ap(AP_TAR, addr, self.apsel)
         self.dp.write_ap(AP_DRW, (value & 0xFF) << (8 * (addr & 3)), self.apsel)
 
+    def write16(self, addr, value):
+        # Mirror read16's lane shift (8 * (addr & 2)) for halfword writes.
+        self._set_csw(CSW_BASE | CSW_SIZE16 | CSW_NADDRINC)
+        self.dp.write_ap(AP_TAR, addr, self.apsel)
+        self.dp.write_ap(AP_DRW, (value & 0xFFFF) << (8 * (addr & 2)), self.apsel)
+
 
 class CortexM:
     def __init__(self, ap):
@@ -298,12 +325,24 @@ class CortexM:
     def resume(self):
         self.ap.write32(DHCSR, DBGKEY | C_DEBUGEN)
 
-    def step(self, timeout=50):
-        self.ap.write32(DHCSR, DBGKEY | C_DEBUGEN | C_MASKINTS | C_STEP)
+    def step(self, maskints=True, timeout=50):
+        # maskints defaults True so the FLM call frame and existing callers keep
+        # interrupts masked across the step; the GDB server steps with
+        # maskints=False so the target's own interrupts can fire.
+        bits = DBGKEY | C_DEBUGEN | C_STEP | (C_MASKINTS if maskints else 0)
+        self.ap.write32(DHCSR, bits)
         for _ in range(timeout):
             if self.read_dhcsr() & S_HALT:
                 return True
         raise TransferError("single-step did not complete")
+
+    def read_dfsr(self):
+        return self.ap.read32(DFSR)
+
+    def clear_dfsr(self):
+        # DFSR bits are write-1-to-clear. Cleared before every resume/step so the
+        # next halt reports a fresh cause (mandatory; the host relies on this).
+        self.ap.write32(DFSR, DFSR_CLEAR_ALL)
 
     def reset_and_halt(self, timeout=100):
         # Catch the reset vector so the core halts at the first instruction.
@@ -342,3 +381,81 @@ class CortexM:
             if self.read_dhcsr() & S_REGRDY:
                 return
         raise TransferError("core reg %d write timeout" % regsel)
+
+
+class FPB:
+    # Flash Patch and Breakpoint unit, FPBv1 only (nRF52840 Cortex-M4). The unit
+    # is lazily initialised on first use; comparators are flash-only. The host
+    # treats a TransferError from set_breakpoint (no free slot / unsupported addr,
+    # surfaced as wire status 1) as the signal to fall back to a software BKPT.
+    def __init__(self, ap):
+        self.ap = ap
+        self.rev = None
+        self.nb_code = 0
+        self.enabled = False
+        self._comp = []        # per-slot: breakpoint addr or None
+        self._inited = False
+
+    def init(self):
+        fpcr = self.ap.read32(FP_CTRL)
+        self.rev = (fpcr >> 28) & 0xF
+        # NUM_CODE is split: [14:12] high bits and [7:4] low bits.
+        self.nb_code = ((fpcr >> 8) & 0x70) | ((fpcr >> 4) & 0xF)
+        self.ap.write32(FP_CTRL, FP_CTRL_KEY)            # disable; KEY on every CTRL write
+        for n in range(self.nb_code):
+            self.ap.write32(FP_COMP0 + 4 * n, 0)
+        self._comp = [None] * self.nb_code
+        self.enabled = False
+        self._inited = True
+
+    def enable(self):
+        self.ap.write32(FP_CTRL, FP_CTRL_KEY | FP_CTRL_ENABLE)
+        self.enabled = True
+
+    def disable(self):
+        # Clear FP_CTRL.ENABLE so no comparator can trap. KEY is required on
+        # every CTRL write. Used on session teardown so the FPB unit is not left
+        # armed in the DUT for the next operation (e.g. a flash that never inits
+        # the FPB) to inherit. Safe to call before init().
+        self.ap.write32(FP_CTRL, FP_CTRL_KEY)
+        self.enabled = False
+
+    def can_support(self, addr):
+        # FPBv1 (rev != 2) comparators match only the flash/code region.
+        return self.rev != 2 and addr < 0x20000000
+
+    def set_breakpoint(self, addr):
+        if not self._inited:
+            self.init()
+        if not self.can_support(addr):
+            raise TransferError("FPB cannot break at 0x%08x (not flash/FPBv1)" % addr)
+        if addr in self._comp:
+            return self._comp.index(addr)
+        try:
+            slot = self._comp.index(None)
+        except ValueError:
+            raise TransferError("no free FPB comparator")
+        if not self.enabled:
+            self.enable()
+        # FPBv1 COMP: bits[28:2]=addr, REPLACE[31:30] selects upper/lower halfword,
+        # bit0=ENABLE.
+        replace = 2 if (addr & 0x2) else 1
+        comp = (addr & 0x1FFFFFFC) | (replace << 30) | 1
+        self.ap.write32(FP_COMP0 + 4 * slot, comp)
+        self._comp[slot] = addr
+        return slot
+
+    def clear_breakpoint(self, addr):
+        if addr not in self._comp:
+            return False
+        slot = self._comp.index(addr)
+        self.ap.write32(FP_COMP0 + 4 * slot, 0)
+        self._comp[slot] = None
+        return True
+
+    def clear_all(self):
+        if not self._inited:
+            return
+        for n in range(self.nb_code):
+            self.ap.write32(FP_COMP0 + 4 * n, 0)
+            self._comp[n] = None
