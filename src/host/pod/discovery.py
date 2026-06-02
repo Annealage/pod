@@ -14,6 +14,7 @@ Resolved pod record keys:
   repl_port   - ampremote socket REPL port (int)
   usbip_port  - USB/IP server port (int or None)
   uart_port   - UART-over-TCP port (int or None)
+  gdb_port    - GDB debug-command server port (int or None)
   carrier_id  - carrier board identifier string (may be empty)
   mp_version  - MicroPython version string (may be empty)
 """
@@ -37,6 +38,7 @@ class PodInfo:
     repl_port: int
     usbip_port: Optional[int] = None
     uart_port: Optional[int] = None
+    gdb_port: Optional[int] = None
     carrier_id: str = ""
     mp_version: str = ""
 
@@ -48,6 +50,7 @@ class PodInfo:
             "repl_port": self.repl_port,
             "usbip_port": self.usbip_port,
             "uart_port": self.uart_port,
+            "gdb_port": self.gdb_port,
             "carrier_id": self.carrier_id,
             "mp_version": self.mp_version,
         }
@@ -101,8 +104,10 @@ def parse_avahi_line(line: str) -> Optional[PodInfo]:
     repl_port = int(props.get("repl-port", port))
     usbip_raw = props.get("usbip-port")
     uart_raw = props.get("uart-port")
+    gdb_raw = props.get("gdb-port")
     usbip_port = int(usbip_raw) if usbip_raw else None
     uart_port = int(uart_raw) if uart_raw else None
+    gdb_port = int(gdb_raw) if gdb_raw else None
 
     return PodInfo(
         name=name,
@@ -111,6 +116,7 @@ def parse_avahi_line(line: str) -> Optional[PodInfo]:
         repl_port=repl_port,
         usbip_port=usbip_port,
         uart_port=uart_port,
+        gdb_port=gdb_port,
         carrier_id=props.get("carrier-id", ""),
         mp_version=props.get("mp-version", ""),
     )
@@ -162,6 +168,7 @@ def _discover_zeroconf(timeout: float = 5.0) -> list:
             repl_port = int(props_raw.get("repl-port", port))
             usbip_raw = props_raw.get("usbip-port")
             uart_raw = props_raw.get("uart-port")
+            gdb_raw = props_raw.get("gdb-port")
             found.append(PodInfo(
                 name=info.name,
                 address=address,
@@ -169,6 +176,7 @@ def _discover_zeroconf(timeout: float = 5.0) -> list:
                 repl_port=repl_port,
                 usbip_port=int(usbip_raw) if usbip_raw else None,
                 uart_port=int(uart_raw) if uart_raw else None,
+                gdb_port=int(gdb_raw) if gdb_raw else None,
                 carrier_id=props_raw.get("carrier-id", ""),
                 mp_version=props_raw.get("mp-version", ""),
             ))

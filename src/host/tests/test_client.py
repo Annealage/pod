@@ -128,6 +128,16 @@ class TestDutOps:
         assert "port=3334" in cmd
         assert str(0x1000) in cmd
 
+    def test_gdb_serve_cmd(self):
+        cmd = Pod._gdb_serve_cmd(3335, True)
+        assert "gdb_serve" in cmd
+        assert "port=3335" in cmd
+        assert "reset_halt=True" in cmd
+
+    def test_gdb_serve_cmd_no_reset_halt(self):
+        cmd = Pod._gdb_serve_cmd(3335, False)
+        assert "reset_halt=False" in cmd
+
 
 class TestNotImplementedStubs:
     def test_usbip_attach_raises(self, pod):
@@ -144,8 +154,3 @@ class TestNotImplementedStubs:
         with pytest.raises(NotImplementedError) as exc_info:
             pod.telemetry()
         assert "Phase 5" in str(exc_info.value)
-
-    def test_gdb_endpoint_raises(self, pod):
-        with pytest.raises(NotImplementedError) as exc_info:
-            pod.gdb_endpoint()
-        assert "Phase 3" in str(exc_info.value)

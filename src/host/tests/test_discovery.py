@@ -9,7 +9,7 @@ from pod.discovery import parse_avahi_line, PodInfo, _parse_txt_properties
 AVAHI_LINE = (
     '=;eth0;IPv4;annealage-pod;_annealage-pod._tcp;local;'
     'annealage-pod.local;192.168.0.121;8266;'
-    '"repl-port=8266" "usbip-port=3240" "uart-port=2000" '
+    '"repl-port=8266" "usbip-port=3240" "uart-port=2000" "gdb-port=3335" '
     '"carrier-id=" "mp-version=1.29.0.preview"'
 )
 
@@ -73,6 +73,10 @@ class TestParseAvahiLine:
         pod = parse_avahi_line(AVAHI_LINE)
         assert pod.uart_port == 2000
 
+    def test_gdb_port(self):
+        pod = parse_avahi_line(AVAHI_LINE)
+        assert pod.gdb_port == 3335
+
     def test_carrier_id_empty(self):
         pod = parse_avahi_line(AVAHI_LINE)
         assert pod.carrier_id == ""
@@ -92,6 +96,7 @@ class TestParseAvahiLine:
         assert pod.repl_port == 8266
         assert pod.usbip_port is None
         assert pod.uart_port is None
+        assert pod.gdb_port is None
 
     def test_browse_line_returns_none(self):
         result = parse_avahi_line(AVAHI_LINE_BROWSE)
@@ -112,4 +117,5 @@ class TestParseAvahiLine:
         assert d["repl_port"] == 8266
         assert d["usbip_port"] == 3240
         assert d["uart_port"] == 2000
+        assert d["gdb_port"] == 3335
         assert d["mp_version"] == "1.29.0.preview"

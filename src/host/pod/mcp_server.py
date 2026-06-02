@@ -12,6 +12,7 @@ Tools:
   flash_dut       flash a DUT image (streamed into pod RAM, no pod FS)
   reset_dut       reset the DUT (sysreset to run, halt to catch the vector)
   read_dut        read DUT memory to a host file (streamed, no pod FS)
+  gdb_dut         start a local GDB RSP server to the DUT and return its endpoint
 
 The mcp import is guarded so this module can be imported and tested
 even if the mcp package is absent. build_server() is only called
@@ -20,6 +21,7 @@ from main().
 
 import asyncio
 import sys
+import threading
 from pod.discovery import discover_pods as _discover_pods
 from pod.registry import get_pod, load_registry
 from pod.client import Pod
@@ -100,6 +102,58 @@ def handle_read_dut(label: str, addr: int, length: int, out_path: str) -> str:
         raise KeyError(f"Pod '{label}' not found in registry.")
     pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
     return pod.read_dut(addr, length, out_path)
+
+
+# Running GDB sessions keyed by label, so an agent can start a session and
+# spawn its own gdb against the returned endpoint. The host GdbServer runs in a
+# background thread (a blocking RSP session does not fit a request/response
+# tool call).
+_GDB_SESSIONS: dict = {}
+
+
+def handle_gdb_dut(label: str, listen_port: int = 0) -> dict:
+    """Start an on-pod GDB server and a background host RSP translator.
+
+    Non-interactive shape: returns {"endpoint": "127.0.0.1:<port>",
+    "gdb_port": <pod_port>, "label": label} once the local listener is bound,
+    so the agent spawns arm-none-eabi-gdb itself. The host RSP session runs in
+    a background thread until gdb detaches.
+    """
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    if label in _GDB_SESSIONS and _GDB_SESSIONS[label]["thread"].is_alive():
+        sess = _GDB_SESSIONS[label]
+        return {"endpoint": sess["endpoint"], "gdb_port": sess["gdb_port"],
+                "label": label}
+
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    gdb_port = entry.get("gdb_port") or 3335
+    ready = threading.Event()
+    bound: dict = {}
+
+    def _on_listen(host, port):
+        bound["host"] = host
+        bound["port"] = port
+        ready.set()
+
+    def _run():
+        try:
+            pod.gdb_endpoint(listen_port=listen_port, gdb_port=gdb_port,
+                             on_listen=_on_listen)
+        except Exception:  # noqa: BLE001 - background session, surfaced via state
+            ready.set()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    if not ready.wait(timeout=30):
+        raise RuntimeError("GDB server did not bind within 30s")
+    if "port" not in bound:
+        raise RuntimeError("GDB server failed to start")
+    endpoint = f"{bound['host']}:{bound['port']}"
+    _GDB_SESSIONS[label] = {
+        "thread": thread, "endpoint": endpoint, "gdb_port": gdb_port}
+    return {"endpoint": endpoint, "gdb_port": gdb_port, "label": label}
 
 
 # ── MCP server construction ───────────────────────────────────────────────
@@ -226,6 +280,27 @@ def build_server():
                     "required": ["label", "addr", "length", "out_path"],
                 },
             ),
+            Tool(
+                name="gdb_dut",
+                description=(
+                    "Start an on-pod GDB server and a local RSP translator, then "
+                    "return its endpoint. Spawn arm-none-eabi-gdb yourself with "
+                    "'target extended-remote <endpoint>'. The host session runs "
+                    "in the background until gdb detaches."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "listen_port": {
+                            "type": "integer",
+                            "description": "Local gdb-facing port (0 = ephemeral).",
+                            "default": 0,
+                        },
+                    },
+                    "required": ["label"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -259,6 +334,10 @@ def build_server():
                 result = await asyncio.to_thread(
                     handle_read_dut, arguments["label"], arguments["addr"],
                     arguments["length"], arguments["out_path"])
+            elif name == "gdb_dut":
+                result = await asyncio.to_thread(
+                    handle_gdb_dut, arguments["label"],
+                    arguments.get("listen_port", 0))
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
             return [TextContent(type="text", text=str(result))]

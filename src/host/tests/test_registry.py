@@ -92,6 +92,7 @@ class TestReconcile:
             repl_port=8266,
             usbip_port=3240,
             uart_port=2000,
+            gdb_port=3335,
             carrier_id="",
             mp_version="1.29.0.preview",
         )
@@ -102,6 +103,7 @@ class TestReconcile:
         assert entry["repl_port"] == 8266
         assert entry["usbip_port"] == 3240
         assert entry["uart_port"] == 2000
+        assert entry["gdb_port"] == 3335
         assert entry["mp_version"] == "1.29.0.preview"
 
     def test_reconcile_updates_address(self):

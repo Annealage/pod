@@ -7,11 +7,9 @@ The subprocess runner is injected (default subprocess.run) so tests can
 pass a fake without invoking the real ampremote.
 
 Stubbed methods raise NotImplementedError with the phase they're pending:
-  flash_dut, reset_dut  - pending Phase 2/3 (on-pod FLM loader / GDB)
   usbip_attach          - pending Phase 4 (DUT USB host + USB/IP)
   uart_stream           - pending Phase 5 (UART-over-TCP)
   telemetry             - pending Phase 5 (INA228; custom carrier hardware)
-  gdb_endpoint          - pending Phase 3 (on-pod GDB server)
 """
 
 import ast
@@ -244,6 +242,60 @@ class Pod:
             raise result["exc"]
         return out_path
 
+    # ── DUT GDB endpoint (on-pod debug stack, workstream D3) ──────────────
+
+    @staticmethod
+    def _gdb_serve_cmd(port: int, reset_halt: bool) -> str:
+        """Build the on-pod gdb_serve invocation (pure, for testability)."""
+        return (
+            "import annealage_pod.debug.ops as o;"
+            "print(o.gdb_serve(port=%d, reset_halt=%s))"
+            % (port, bool(reset_halt))
+        )
+
+    def gdb_endpoint(self, listen_port: int = 0, gdb_port: int = 3335,
+                     reset_halt: bool = True,
+                     resume_window_ms: int = 200,
+                     on_listen: Optional[Callable] = None) -> tuple:
+        """Start the on-pod GDB binary server and a local RSP translator.
+
+        A worker thread runs the on-pod gdb_serve over the REPL; the main
+        thread builds a GdbServer that poll-connects to the pod debug socket
+        (port gdb_port), binds a local gdb-facing RSP listener, and serves one
+        gdb session. on_listen, if given, is called with (host, port) once the
+        listener is bound. Returns ('127.0.0.1', actual_listen_port) after gdb
+        detaches; the worker is then joined.
+
+        Mirrors flash_dut: the blocking on-pod server runs in a worker while
+        the host serves over a direct TCP socket.
+        """
+        from pod.gdbserver import GdbServer
+
+        result: dict = {}
+
+        def _run():
+            try:
+                result["out"] = self.exec(
+                    self._gdb_serve_cmd(gdb_port, reset_halt))
+            except Exception as exc:  # noqa: BLE001 - surfaced to caller
+                result["exc"] = exc
+
+        worker = threading.Thread(target=_run)
+        worker.start()
+        try:
+            server = GdbServer(
+                pod_addr=self.address,
+                pod_port=gdb_port,
+                listen_port=listen_port,
+                resume_window_ms=resume_window_ms,
+            )
+            bound = server.serve_forever(on_listen=on_listen)
+        finally:
+            worker.join()
+        if "exc" in result:
+            raise result["exc"]
+        return bound
+
     # ── stubbed methods (pending future phases) ──────────────────────────
 
     def usbip_attach(self) -> None:
@@ -271,13 +323,4 @@ class Pod:
         """
         raise NotImplementedError(
             "telemetry is not yet implemented - pending Phase 5 (INA228 telemetry, custom carrier)"
-        )
-
-    def gdb_endpoint(self) -> None:
-        """Return connection details for the on-pod GDB server.
-
-        Pending Phase 3: requires on-pod GDB server (workstream D3).
-        """
-        raise NotImplementedError(
-            "gdb_endpoint is not yet implemented - pending Phase 3 (on-pod GDB server)"
         )

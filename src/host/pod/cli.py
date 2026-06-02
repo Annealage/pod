@@ -12,8 +12,9 @@ Subcommands:
   mount <label> <dir> mount a host directory on the pod
   exec <label> <code> execute MicroPython code on the pod
   cp <label> <src> <dst>  copy a file to/from the pod
-  flash <label> <image> [--target T]  (not yet implemented - Phase 2/3)
-  reset <label> [--mode MODE]         (not yet implemented - Phase 2/3)
+  flash <label> <image> [--target T]  flash a DUT image via the pod
+  reset <label> [--mode MODE]         reset the DUT via the pod
+  gdb <label> [--listen-port N]       start a local GDB RSP server to the DUT
 
 Registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)
 """
@@ -59,9 +60,10 @@ def cmd_discover(args):
     for p in pods:
         usbip = f"  usbip={p.usbip_port}" if p.usbip_port else ""
         uart = f"  uart={p.uart_port}" if p.uart_port else ""
+        gdb = f"  gdb={p.gdb_port}" if p.gdb_port else ""
         carrier = f"  carrier={p.carrier_id}" if p.carrier_id else ""
         mp = f"  mp={p.mp_version}" if p.mp_version else ""
-        print(f"  {p.name}  {p.address}:{p.repl_port}{usbip}{uart}{carrier}{mp}")
+        print(f"  {p.name}  {p.address}:{p.repl_port}{usbip}{uart}{gdb}{carrier}{mp}")
     return 0
 
 
@@ -100,6 +102,7 @@ def cmd_register(args):
         "repl_port": args.repl_port,
         "usbip_port": args.usbip_port,
         "uart_port": args.uart_port,
+        "gdb_port": args.gdb_port,
         "carrier_id": args.carrier_id or "",
         "mp_version": args.mp_version or "",
         "last_seen": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -128,6 +131,7 @@ def cmd_info(args):
     print(f"REPL port:  {entry.get('repl_port', '(none)')}")
     print(f"USB/IP port:{entry.get('usbip_port') or '(none)'}")
     print(f"UART port:  {entry.get('uart_port') or '(none)'}")
+    print(f"GDB port:   {entry.get('gdb_port') or '(none)'}")
     print(f"Carrier:    {entry.get('carrier_id') or '(none)'}")
     print(f"MP version: {entry.get('mp_version') or '(none)'}")
     print(f"Last seen:  {entry.get('last_seen') or '(unknown)'}")
@@ -186,6 +190,24 @@ def cmd_reset(args):
     return 0 if result.get("ok") else 1
 
 
+def cmd_gdb(args):
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    gdb_port = args.gdb_port or entry.get("gdb_port") or 3335
+
+    def _announce(host, port):
+        print(f"target extended-remote {host}:{port}")
+
+    pod.gdb_endpoint(
+        listen_port=args.listen_port,
+        gdb_port=gdb_port,
+        reset_halt=not args.no_reset_halt,
+        resume_window_ms=args.resume_window_ms,
+        on_listen=_announce,
+    )
+    return 0
+
+
 # ── main ─────────────────────────────────────────────────────────────────
 
 
@@ -228,6 +250,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    dest="usbip_port", help="USB/IP TCP port")
     p.add_argument("--uart-port", type=int, default=None, metavar="PORT",
                    dest="uart_port", help="UART TCP port")
+    p.add_argument("--gdb-port", type=int, default=3335, metavar="PORT",
+                   dest="gdb_port", help="GDB debug TCP port (default: 3335)")
     p.add_argument("--carrier-id", default="", metavar="ID",
                    dest="carrier_id", help="Carrier board identifier")
     p.add_argument("--mp-version", default="", metavar="VER",
@@ -278,6 +302,22 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--mode", default="sysreset", choices=["sysreset", "halt"],
                    help="Reset method (default: sysreset)")
 
+    # gdb
+    p = sub.add_parser("gdb", help="Start a local GDB RSP server to the DUT")
+    p.add_argument("label")
+    p.add_argument("--listen-port", type=int, default=0, metavar="PORT",
+                   dest="listen_port",
+                   help="Local gdb-facing port (default: 0 = ephemeral)")
+    p.add_argument("--gdb-port", type=int, default=None, metavar="PORT",
+                   dest="gdb_port",
+                   help="Pod debug TCP port (default: registry or 3335)")
+    p.add_argument("--no-reset-halt", action="store_true",
+                   dest="no_reset_halt",
+                   help="Do not reset-and-halt the DUT on attach")
+    p.add_argument("--resume-window-ms", type=int, default=200, metavar="MS",
+                   dest="resume_window_ms",
+                   help="RESUME_WAIT window in ms (default: 200)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -296,6 +336,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "cp": cmd_cp,
         "flash": cmd_flash,
         "reset": cmd_reset,
+        "gdb": cmd_gdb,
     }[args.command]
 
     return handler(args)

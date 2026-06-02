@@ -6,7 +6,8 @@ a DUT through the pod's on-pod debug stack. It is the network-native sibling of
 `mpy-dev`, and the agent-facing frontend for the hardware iteration loop.
 
 Transport is `ampremote` (the `socket://` mpremote fork) for the REPL, plus
-direct TCP sockets for the binary flash/read streams. The on-pod side is
+direct TCP sockets for the binary flash/read streams (ports 3333 / 3334) and
+the GDB debug-command server (port 3335). The on-pod side is
 `annealage_pod.debug` (see `../../docs/rp2350/debug-stack.md`).
 
 ## Install
@@ -42,6 +43,7 @@ pod exec <label> "<code>"             run MicroPython on the pod, print stdout
 pod cp <label> <src> <dst>            copy a file (':path' = pod side)
 pod flash <label> <image> [--addr 0xADDR] [--target T]
 pod reset <label> [--mode sysreset|halt]
+pod gdb <label> [--listen-port N] [--gdb-port 3335] [--no-reset-halt] [--resume-window-ms 200]
 pod mcp                               start the MCP stdio server (alias: pod-mcp)
 ```
 
@@ -75,6 +77,7 @@ p.mount("/host/dir")                           # blocks until disconnected
 p.flash_dut("firmware.bin", addr=0x0)          # -> {'ok': True, 'bytes': N, ...}
 p.reset_dut(mode="sysreset")                   # 'sysreset' (run) or 'halt'
 p.read_dut(0x0, 4096, "dump.bin")              # explicit target read -> host file
+p.gdb_endpoint(listen_port=0)                  # local GDB RSP server; blocks until detach
 ```
 
 `flash_dut` / `read_dut` open a direct TCP connection to a pod receiver (ports
@@ -97,6 +100,7 @@ agent drives the hardware loop with the same verbs:
 | `flash_dut` | flash a DUT image (streamed into pod RAM, no pod FS) |
 | `reset_dut` | reset the DUT (`sysreset` / `halt`) |
 | `read_dut` | read DUT memory to a host file (streamed) |
+| `gdb_dut` | start a local GDB RSP server to the DUT and return its endpoint |
 
 The loop an agent runs: edit DUT firmware -> `flash_dut` -> `reset_dut` ->
 observe (`dut_exec`) -> repeat.
@@ -115,5 +119,8 @@ paths are validated against hardware, not in the unit tests.
 
 `discover` / `list` / `register` / `info` / `repl` / `mount` / `exec` / `cp` and
 `flash_dut` / `reset_dut` / `read_dut` are implemented and validated on an
-nRF52840 DUT. `usbip_attach` (Phase 4), `uart_stream` / `telemetry` (Phase 5),
-and `gdb_endpoint` (Phase 3) are stubbed and raise with the pending phase.
+nRF52840 DUT. `gdb` / `gdb_endpoint` (Phase 3) is implemented on the host side
+(RSP server, register map, breakpoint policy, run-control/interrupt, offline
+unit tests); live-hardware validation is the Phase 3 gate against the on-pod
+`dbgsrv`. `usbip_attach` (Phase 4) and `uart_stream` / `telemetry` (Phase 5)
+remain stubbed and raise with the pending phase.

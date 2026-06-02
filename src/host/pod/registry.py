@@ -8,6 +8,7 @@ Pod record keys:
   repl_port     - ampremote socket REPL port
   usbip_port    - USB/IP port (int or null)
   uart_port     - UART-over-TCP port (int or null)
+  gdb_port      - GDB debug-command server port (int or null)
   carrier_id    - carrier board identifier
   mp_version    - MicroPython version string
   last_seen     - ISO-8601 UTC timestamp of last discovery update
@@ -92,6 +93,7 @@ def reconcile(label: str, pod_info) -> dict:
         "repl_port": pod_info.repl_port,
         "usbip_port": pod_info.usbip_port,
         "uart_port": pod_info.uart_port,
+        "gdb_port": pod_info.gdb_port,
         "carrier_id": pod_info.carrier_id,
         "mp_version": pod_info.mp_version,
         "last_seen": datetime.now(timezone.utc).isoformat(timespec="seconds"),
