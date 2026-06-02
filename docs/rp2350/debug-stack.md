@@ -26,7 +26,8 @@ hardware-validated results, see `spike-findings.md` section 6.
 |---|---|
 | `swd_pio.SWDPio` | SWD bit transport on a PIO state machine; raw DP/AP read/write, plus inlined `read_drw_block` / `write_drw_block` for fast block transfer. |
 | `swd_dap.DebugPort` / `MEMAP` / `CortexM` | ADIv5 debug port (line bring-up, power, SELECT banking, sticky-error recovery, `resync`), MEM-AP (8/16/32-bit + 32-bit block with TAR auto-increment), and Cortex-M halt/resume/reset. |
-| `flash_nrf52.NRF52Flash` | nRF52 NVMC flash loader (erase / program / verify) driven through the MEM-AP, bounded-memory chunked. |
+| `flash_nrf52.NRF52Flash` | nRF52 NVMC flash loader (erase / program / verify) driven through the MEM-AP, bounded-memory chunked. The per-family native path. |
+| `flm.FLMFlasher` + `flm_<target>.py` | Generic CMSIS flash-algorithm runner: loads a vendor FLM blob into target RAM and calls its Init/EraseSector/ProgramPage. Works for any chip with a CMSIS pack. |
 | `swd_stream.DRWStreamer` | Experimental, opt-in PIO2 write-streamer (see below). |
 | `ops` | High-level entry points the host drives over the REPL. |
 
@@ -112,7 +113,36 @@ On the nRF52840 at 9.375 MHz: program ~2900 words/s, block read/verify ~7800
 words/s, end-to-end program+verify ~2246 words/s (8.77 KB/s). The write path is
 the bound; reads were the original bottleneck until `read_drw_block` was inlined.
 
-## Optional PIO write-streamer (experimental)
+## Generic CMSIS-FLM flashing
+
+The per-family native path (`flash_nrf52`) is fastest where it exists; the
+generic path runs a standard CMSIS flash algorithm on the target and works for
+any chip with a CMSIS pack. Target data (the FLM blob + entry points + RAM
+layout + flash geometry) is generated host-side and deployed with the package:
+
+```bash
+python tools/flm_extract.py --target target_nRF52840_xxAA \
+    --flash-base 0 --flash-size 0x100000 --page-size 0x1000 \
+    --out src/mpy/annealage_pod/debug/flm_nrf52840.py
+```
+
+Driving it on the pod:
+
+```python
+import annealage_pod.debug.swd_dap as dap, annealage_pod.debug.flm as flm
+import annealage_pod.debug.flm_nrf52840 as algo
+dp = dap.DebugPort(swdio=14, swclk=15, sm_id=4); dp.connect()
+ap = dap.MEMAP(dp); cm = dap.CortexM(ap)
+f = flm.FLMFlasher(ap, cm, algo.FLASH_ALGO)
+f.program(0x000FF000, open("img.bin", "rb").read(), erase=True, verify=True)
+```
+
+The runner loads the blob into target SRAM, then for each entry point sets the
+call frame (R0..R3 args, R9 = static_base, SP = begin_stack, LR = the blob's
+BKPT trampoline, PC = entry, xPSR Thumb) and resumes **with interrupts masked**
+(`C_MASKINTS`, set while halted then held across the resume; otherwise an
+interrupt vectors into the target's firmware and the algo never returns).
+Validated on the nRF52840 (FLM erase+program+verify, ~570 ms / 1 KB).
 
 `swd_stream.DRWStreamer` runs the whole AP-DRW write per FIFO word on PIO2 and is
 opt-in via `NRF52Flash(ap, cm, streamer=DRWStreamer(dp.swd))`. It measured ~3131
@@ -122,9 +152,10 @@ matter once other write-path work lands.
 
 ## Limitations
 
-- Flashing: only the nRF52 native-NVM path. RP-native (bootrom) and the generic
-  CMSIS-FLM loader are not yet built (RP-native needs an RP DUT wired; CMSIS-FLM
-  can be brought up on the nRF52840's own FLM).
+- Flashing: nRF52 native-NVM path and the generic CMSIS-FLM path both work
+  (validated on the nRF52840). RP-native (bootrom) flashing is not built yet and
+  needs an RP DUT wired to validate. Other CMSIS-FLM targets need their algo
+  extracted (`tools/flm_extract.py`) and validation on that silicon.
 - SWD clock tops out at 9.375 MHz reliably; >= 10 MHz needs PIO input-phase
   tuning.
 - `resume` + editing PIO modules accumulates PIO instruction memory; clear with

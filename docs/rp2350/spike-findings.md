@@ -122,7 +122,15 @@ and over the Wi-Fi socket REPL for the network proof.
   (the Phase 2 over-the-network milestone for this hardware). ~425 words/s
   (1.66 KB/s) at 9.375 MHz after block-write tuning. Full Phase 2 gate's
   RP-native and CMSIS-FLM targets stay hardware-blocked (no RP / STM32 DUT wired);
-  full-image streaming-from-file and an FLM general path are the next D2 work.
+  full-image streaming-from-file landed (host streams into pod RAM over TCP, no
+  pod filesystem).
+- **Generic CMSIS-FLM loader (D2.2)**: runs a standard CMSIS flash algorithm on
+  the target (load blob to SRAM, call Init/EraseSector/ProgramPage via core
+  registers + MEM-AP, resume with interrupts masked, BKPT-return). Validated on
+  the nRF52840 with the CMSIS-pack flash algorithm (FLM erase+program+verify, ~570 ms
+  / 1 KB), 3/3 deterministic. Generalises flashing to any CMSIS-pack target;
+  `tools/flm_extract.py` produces the on-VFS algo data. RP-native (bootrom) flash
+  remains, blocked on a wired RP DUT.
 - **PIO SWD clock (D1.1 partial)**: `clkdiv=8` = 9.375 MHz reliable (100/100 DPIDR
   clean); hard cliff at 12.5 MHz (input-sampling phase). Just under the >= 10 MHz
   gate target; needs PIO input-phase tuning. RP-target + multidrop (TARGETSEL)
