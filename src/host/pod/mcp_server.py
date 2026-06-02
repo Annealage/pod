@@ -18,6 +18,7 @@ even if the mcp package is absent. build_server() is only called
 from main().
 """
 
+import asyncio
 import sys
 from pod.discovery import discover_pods as _discover_pods
 from pod.registry import get_pod, load_registry
@@ -229,52 +230,38 @@ def build_server():
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):
+        # The handlers are blocking (zeroconf browse, ampremote subprocess,
+        # TCP streaming), so run them in a worker thread rather than on the
+        # event loop. Running the sync zeroconf browse on the loop returns no
+        # results (it needs its own thread to collect responses).
         try:
             if name == "discover_pods":
-                result = handle_discover_pods(
-                    timeout=arguments.get("timeout", 5.0)
-                )
-                return [TextContent(type="text", text=str(result))]
-
+                result = await asyncio.to_thread(
+                    handle_discover_pods, arguments.get("timeout", 5.0))
             elif name == "pod_info":
-                result = handle_pod_info(arguments["label"])
-                return [TextContent(type="text", text=str(result))]
-
+                result = await asyncio.to_thread(
+                    handle_pod_info, arguments["label"])
             elif name == "dut_exec":
-                result = handle_dut_exec(arguments["label"], arguments["code"])
-                return [TextContent(type="text", text=result)]
-
+                result = await asyncio.to_thread(
+                    handle_dut_exec, arguments["label"], arguments["code"])
             elif name == "mount_dir":
-                result = handle_mount_dir(arguments["label"], arguments["directory"])
-                return [TextContent(type="text", text=result)]
-
+                result = await asyncio.to_thread(
+                    handle_mount_dir, arguments["label"], arguments["directory"])
             elif name == "flash_dut":
-                result = handle_flash_dut(
-                    arguments["label"],
-                    arguments["image"],
-                    arguments.get("target"),
-                    arguments.get("addr", 0),
-                )
-                return [TextContent(type="text", text=str(result))]
-
+                result = await asyncio.to_thread(
+                    handle_flash_dut, arguments["label"], arguments["image"],
+                    arguments.get("target"), arguments.get("addr", 0))
             elif name == "reset_dut":
-                result = handle_reset_dut(
-                    arguments["label"],
-                    arguments.get("mode", "sysreset"),
-                )
-                return [TextContent(type="text", text=str(result))]
-
+                result = await asyncio.to_thread(
+                    handle_reset_dut, arguments["label"],
+                    arguments.get("mode", "sysreset"))
             elif name == "read_dut":
-                result = handle_read_dut(
-                    arguments["label"],
-                    arguments["addr"],
-                    arguments["length"],
-                    arguments["out_path"],
-                )
-                return [TextContent(type="text", text=str(result))]
-
+                result = await asyncio.to_thread(
+                    handle_read_dut, arguments["label"], arguments["addr"],
+                    arguments["length"], arguments["out_path"])
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
+            return [TextContent(type="text", text=str(result))]
 
         except NotImplementedError as exc:
             return [TextContent(type="text", text=f"Not implemented: {exc}")]
