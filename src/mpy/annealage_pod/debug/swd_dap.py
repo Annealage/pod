@@ -323,3 +323,22 @@ class CortexM:
 
     def cpuid(self):
         return self.ap.read32(CPUID)
+
+    # --- core register access (core must be halted) ---
+    # regsel: 0..15 = R0..R12, SP(13), LR(14), PC(15); 16 = xPSR; 17 = MSP;
+    # 18 = PSP. Uses DCRSR (REGSEL[6:0], REGWnR bit16) + DCRDR, gated on
+    # DHCSR.S_REGRDY. Needed by the CMSIS-FLM call frame and the GDB server.
+    def read_core_reg(self, regsel, timeout=50):
+        self.ap.write32(DCRSR, regsel & 0x7F)
+        for _ in range(timeout):
+            if self.read_dhcsr() & S_REGRDY:
+                return self.ap.read32(DCRDR)
+        raise TransferError("core reg %d read timeout" % regsel)
+
+    def write_core_reg(self, regsel, value, timeout=50):
+        self.ap.write32(DCRDR, value)
+        self.ap.write32(DCRSR, (regsel & 0x7F) | (1 << 16))
+        for _ in range(timeout):
+            if self.read_dhcsr() & S_REGRDY:
+                return
+        raise TransferError("core reg %d write timeout" % regsel)
