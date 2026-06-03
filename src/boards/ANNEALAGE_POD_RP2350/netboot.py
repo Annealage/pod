@@ -167,15 +167,19 @@ def start():
         return None
     pw = getattr(config, "WIFI_PASSWORD", "")
     port = getattr(config, "REPL_PORT", 8266)
-    # Best-effort initial connect. Even if it fails, the supervisor thread keeps
-    # retrying and the serve socket is already listening, so the pod becomes
-    # reachable the moment Wi-Fi comes up - it is never stranded by a bad boot.
-    wlan = connect(ssid, pw)
-    if wlan.isconnected():
-        print("netboot: Wi-Fi up", wlan.ifconfig()[0], "REPL on port", port)
-        _advertise_mdns(port)
-    else:
-        print("netboot: Wi-Fi not up yet; supervisor will keep retrying")
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    # Do NOT block boot on the connect: a slow or flaky AP would delay the REPL,
+    # and the REPL is the pod's only management channel. Kick off association and
+    # hand everything to the serve+supervise thread, which binds the REPL socket
+    # immediately, brings Wi-Fi up (retrying forever), and re-advertises mDNS the
+    # moment the link is up - so the pod is reachable as soon as it can be and is
+    # never stranded by a bad boot.
+    try:
+        wlan.connect(ssid, pw)
+    except Exception:
+        pass
+    print("netboot: Wi-Fi supervisor + REPL starting on port", port)
     import _thread
     _thread.start_new_thread(_serve_supervise, (port, wlan, ssid, pw))
-    return wlan.ifconfig()[0] if wlan.isconnected() else None
+    return None

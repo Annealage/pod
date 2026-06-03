@@ -437,7 +437,10 @@ class Pod:
             raise RuntimeError(
                 "could not connect to pod LA port %d: %r\n%s"
                 % (port, exc, getattr(exc, "stderr", "") or ""))
-        sock.settimeout(None)   # capture may wait on a trigger before sending
+        # Bound the wait so a pod that accepts but never sends (capture error,
+        # flaky link) raises instead of hanging the caller forever; generous
+        # enough to cover a trigger wait plus a large capture.
+        sock.settimeout(60)
         try:
             words, w, clkdiv, complete = struct.unpack(
                 "<IIII", self._recv_exact(sock, 16))
