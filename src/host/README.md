@@ -169,8 +169,9 @@ paths are validated against hardware, not in the unit tests.
 `flash_dut` / `reset_dut` / `read_dut`, and `gdb` / `gdb_endpoint` (Phase 3) are
 implemented and validated on an nRF52840 DUT. The DUT-facing peripherals
 (`i2c_target` / `i2c_target_regs` / `gpio` / `adc` / `release`, Phase 5) are
-implemented and host-unit-tested; the underlying `machine.I2CTarget` I2C target
-is hardware-proven (used to bench-test an nRF TWIM repeated-start fix), with
-end-to-end validation of the helper against the live pod tracked separately.
+implemented, host-unit-tested, and hardware-validated end-to-end on the pod + an
+nRF52840 controller: the pod presents the register file via the helper, the DUT
+reads it (`readfrom_mem`) and writes it (`writeto_mem`), and the host reads back
+what the DUT wrote.
 `usbip_attach` (Phase 4) and `uart_stream` / `telemetry` (Phase 5) remain
 stubbed and raise with the pending phase.
