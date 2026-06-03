@@ -126,27 +126,29 @@ small captures the REPL return path also works.
 - CLI `pod la <label> --pins 16-23 --rate 1e6 --depth 20000 [--trigger 16:rise]
   --out cap.vcd`; MCP tool `logic_analyse`.
 
-## Hardware-validation checklist (when the rig is free)
+## Hardware-validation checklist
 
-1. `rp2.DMA` present; PIO-RX DREQ-paced FIFO -> RAM ring works; measure the max
-   reliable sample rate.
-2. SWD full teardown (`remove_program` + pin release) frees PIO1, the LA claims
-   it, captures, then `to_swd()` + `ops.info()` round-trips cleanly (no leaked
-   instruction memory, DPIDR still reads).
-3. Capture correctness against a known signal (drive a pod GPIO at a known rate,
-   capture it, check the decoded VCD).
-4. Coexistence sanity: confirm whether the LA on PIO2 (streamer off) *could*
-   coexist with SWD on PIO1, to decide if the swap should be forced or optional.
+1. [x] `rp2.DMA` present in the pod build (2026-06-03). [ ] PIO-RX DREQ-paced
+   FIFO -> RAM ring works; measure the max reliable sample rate.
+2. [ ] SWD full teardown (`remove_program` + pin release) frees PIO1, the LA
+   claims it, captures, then `to_swd()` + `ops.info()` round-trips cleanly (no
+   leaked instruction memory, DPIDR still reads).
+3. [x] **Capture program correctness (polled path)**: a 1 kHz / 50% PWM on GP16
+   sampled at 100 kHz (PIO2 SM10, `in_(pins,1)` + autopush) decoded to exact
+   50-sample half-runs, 49.4% duty, est. 1000.0 Hz; polled drain is gap-free at
+   100 kHz (2026-06-03). [ ] DMA path + VCD decode of the same.
+4. [ ] Coexistence sanity: confirm whether the LA on PIO2 (streamer off) *could*
+   coexist with SWD on PIO1 (deferred; shipped behaviour is the swap regardless).
 
-## Open decisions (for review)
+## Decisions (settled 2026-06-03)
 
-1. **Mutual-exclusion model.** Always swap SWD out for the LA (simple, matches
-   the stated constraint), or let the arbiter allow LA-on-PIO2 + SWD-on-PIO1 to
-   coexist when the streamer is off and pins don't overlap (more flexible, more
-   states to test)? Leaning: arbiter enforces generically; default to swapping
-   SWD out, allow coexistence only once validated.
-2. **Output format.** VCD host-side (universal, recommended) vs sigrok native vs
-   raw + a separate decoder.
-3. **DMA dependency.** Commit to DMA (verify `rp2.DMA` first) with the polled
-   path as a labelled fallback - or ship polled-only first for a simpler initial
-   cut, add DMA after. Leaning: verify DMA, build it primary, keep the fallback.
+1. **Mutual-exclusion model: always swap SWD out.** Starting the LA fully tears
+   down the SWD PIO (`remove_program` + free GP14/15) and reclaims its block;
+   SWD rebuilds when the LA stops. The arbiter's whole-block claim model does
+   not preclude LA-on-PIO2 + SWD-on-PIO1 coexistence later, but the shipped
+   behaviour is the swap.
+2. **Output format: VCD**, decoded host-side. Opens in GTKWave / PulseView
+   (sigrok) / most viewers, no extra runtime dependency.
+3. **Capture transport: DMA primary, polled fallback.** `rp2.DMA` is confirmed
+   present on the pod build; the DMA ring is the real-rate path, with the
+   Python-polled FIFO read as a labelled degraded fallback.
