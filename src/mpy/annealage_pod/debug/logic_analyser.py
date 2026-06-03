@@ -156,8 +156,11 @@ class LogicAnalyser:
             # bound the wait: capture time + slack (a trigger may never fire)
             budget = int(words * 32 / self.width / actual * 1000) + 3000
             t0 = time.ticks_ms()
+            # sleep_ms(1) (not a tight `pass` spin): the CYW43 Wi-Fi driver is
+            # cooperatively scheduled, and a spin here starves it - the socket
+            # servicing stalls mid-capture, which wedged la_stream over Wi-Fi.
             while self.dma.active() and time.ticks_diff(time.ticks_ms(), t0) < budget:
-                pass
+                time.sleep_ms(1)
             complete = not self.dma.active()
         else:
             # Polled fallback: rate-limited, fine for slow signals.

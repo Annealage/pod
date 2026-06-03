@@ -150,14 +150,19 @@ small captures the REPL return path also works.
    CYW43 link up and Wi-Fi survived (before/after both connected, `.133`). So
    the capture does not disturb the management link.
 6. [ ] **Live Wi-Fi streaming round-trip via the host client** (`Pod.logic_analyse`
-   -> `la_stream` -> host receive -> VCD): not yet working. With A0 fixed Wi-Fi is
-   now reliable, but driving `la_stream` (which opens a data-port server and
-   accepts/sends) over the *ampremote management REPL* reproducibly fails to open
-   the data port and wedges the main REPL thread, while `la_capture` (no socket)
-   over USB works and Wi-Fi survives. So it is NOT a DMA/Wi-Fi coexistence issue;
-   it is a narrow interaction of running a socket-server accept on the dupterm'd
-   REPL thread. Needs focused debugging (compare against flash_stream/dump_stream,
-   which use the same exec-server-then-host-connects pattern).
+   -> `la_stream` -> host receive -> VCD): not yet working. Narrowed precisely:
+   `la_stream` binds 3336, the host connects, `netutil.accept` returns (so accept
+   is fine) - then it hangs in `capture()`, *after* accept, before the first send.
+   `la_capture` (same capture) works over USB *and* with Wi-Fi up but idle (the
+   coexistence test); the hang only appears when the capture runs while Wi-Fi is
+   **actively servicing sockets** (the dupterm'd management REPL on 8266 + the
+   data client on 3336). Changing the capture's busy-wait from a tight spin to
+   `sleep_ms(1)` did NOT resolve it. Leading hypothesis: contention between the
+   LA's DMA channel and the CYW43's DMA/PIO when Wi-Fi is mid-transfer. This is a
+   focused hardware-debug task (DMA channel allocation/arbitration, capture
+   vs active-Wi-Fi), and it matters because capturing while managed over Wi-Fi is
+   the production scenario. Workaround for now: `la_capture` over a quiescent
+   link, or capture into RAM and stream after the capture completes.
 7. [ ] Coexistence-with-SWD sanity (deferred; shipped behaviour is the swap).
 
 ## Decisions (settled 2026-06-03)
