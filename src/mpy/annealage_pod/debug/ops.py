@@ -12,7 +12,7 @@
 import struct
 import time
 
-from . import swd_dap, flash_nrf52
+from . import swd_dap, flash_nrf52, netutil
 
 _dp = None
 _ap = None
@@ -85,7 +85,7 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True):
     try:
         srv.bind(("0.0.0.0", port))
         srv.listen(1)
-        cl, _ = srv.accept()
+        cl, _ = netutil.accept(srv, 30)   # bounded + Ctrl-C-interruptible
 
         # erase the covered region once (host is connected; its stream buffers
         # in TCP while we erase)
@@ -144,7 +144,7 @@ def dump_stream(addr, length, port=3334, clkdiv=8):
     try:
         srv.bind(("0.0.0.0", port))
         srv.listen(1)
-        cl, _ = srv.accept()
+        cl, _ = netutil.accept(srv, 30)   # bounded + Ctrl-C-interruptible
         a = addr
         left = length
         while left > 0:
@@ -297,11 +297,9 @@ def la_stream(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
     try:
         srv.bind(("0.0.0.0", port))
         srv.listen(1)
-        srv.settimeout(accept_timeout)   # never block the REPL forever on accept
-        cl, _ = srv.accept()
+        cl, _ = netutil.accept(srv, accept_timeout)   # bounded + Ctrl-C-interruptible
         # Bound the data phase too: a half-open / flaky Wi-Fi connection could
-        # otherwise wedge sendall forever (same un-interruptible-blocking-call
-        # hazard as accept). A capture streams in well under this.
+        # otherwise wedge sendall forever. A capture streams in well under this.
         cl.settimeout(accept_timeout)
         r = a.capture(rate, depth, trigger)
         cl.sendall(_struct.pack("<IIII", r["words"], r["width"], r["clkdiv"],
