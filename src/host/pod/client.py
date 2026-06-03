@@ -302,6 +302,71 @@ class Pod:
             raise result["exc"]
         return bound
 
+    # ── DUT-facing peripherals (curated machine helpers, workstream E) ────
+
+    def i2c_target(self, addr: int = 0x42, regs=None, bus: int = 1,
+                   scl: int = 11, sda: int = 10, size: int = 256,
+                   name: str = "i2c_target") -> dict:
+        """Bring up a persistent hardware I2C target (register file) on the pod.
+
+        The pod becomes an I2C device at `addr` on hardware I2C `bus` (pins
+        scl/sda), backing a `size`-byte register file the DUT controller reads
+        and writes (e.g. readfrom_mem(addr, off, n)). `regs` seeds the file from
+        offset 0. The target persists until released. Bench default: I2C1,
+        SCL=GP11, SDA=GP10.
+        """
+        regs_arg = "None" if regs is None else repr([int(b) & 0xFF for b in regs])
+        code = (
+            "import annealage_pod.peripherals as p;"
+            "print(p.i2c_target(addr=%d, regs=%s, bus=%d, scl=%d, sda=%d,"
+            " size=%d, name=%r))"
+            % (addr, regs_arg, bus, scl, sda, size, name)
+        )
+        return _last_dict(self.exec(code))
+
+    def i2c_target_regs(self, off: int = 0, length: Optional[int] = None,
+                        write=None, name: str = "i2c_target") -> dict:
+        """Read or write the pod I2C target's register file from the host.
+
+        With `write` set (iterable of bytes), write it at `off` first; returns
+        the window [off:off+length] (length defaults to the rest of the file).
+        """
+        write_arg = "None" if write is None else repr([int(b) & 0xFF for b in write])
+        len_arg = "None" if length is None else str(int(length))
+        code = (
+            "import annealage_pod.peripherals as p;"
+            "print(p.i2c_target_regs(off=%d, length=%s, write=%s, name=%r))"
+            % (off, len_arg, write_arg, name)
+        )
+        return _last_dict(self.exec(code))
+
+    def peripheral_release(self, name: str = "*") -> dict:
+        """Release one named pod peripheral instance, or all of them with '*'."""
+        code = ("import annealage_pod.peripherals as p; print(p.release(%r))"
+                % name)
+        return _last_dict(self.exec(code))
+
+    def peripheral_list(self) -> dict:
+        """List the live named pod peripheral instances."""
+        code = "import annealage_pod.peripherals as p; print(p.instances())"
+        return _last_dict(self.exec(code))
+
+    def gpio(self, pin: int, value: Optional[int] = None, mode: str = "out",
+             pull: Optional[str] = None) -> dict:
+        """Read (value=None) or drive a pod GPIO; returns the resulting level."""
+        val_arg = "None" if value is None else str(int(bool(value)))
+        code = (
+            "import annealage_pod.peripherals as p;"
+            "print(p.gpio(%d, value=%s, mode=%r, pull=%r))"
+            % (pin, val_arg, mode, pull)
+        )
+        return _last_dict(self.exec(code))
+
+    def adc(self, pin: int) -> dict:
+        """Sample a pod ADC channel; returns raw u16 and a 3.3V-ref voltage."""
+        code = ("import annealage_pod.peripherals as p; print(p.adc(%d))" % pin)
+        return _last_dict(self.exec(code))
+
     # ── stubbed methods (pending future phases) ──────────────────────────
 
     def usbip_attach(self) -> None:

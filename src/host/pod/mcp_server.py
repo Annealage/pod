@@ -156,6 +156,48 @@ def handle_gdb_dut(label: str, listen_port: int = 0) -> dict:
     return {"endpoint": endpoint, "gdb_port": gdb_port, "label": label}
 
 
+# ── DUT-facing peripherals (curated machine helpers) ──────────────────────
+
+
+def _pod_for(label: str) -> Pod:
+    """Resolve a registry label to a Pod client, or raise KeyError."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    return Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+
+
+def handle_i2c_target(label: str, addr: int = 0x42, regs=None, bus: int = 1,
+                      scl: int = 11, sda: int = 10, size: int = 256,
+                      name: str = "i2c_target") -> dict:
+    """Bring up a persistent hardware I2C target (register file) on the pod."""
+    return _pod_for(label).i2c_target(addr=addr, regs=regs, bus=bus, scl=scl,
+                                      sda=sda, size=size, name=name)
+
+
+def handle_i2c_target_regs(label: str, off: int = 0, length=None, write=None,
+                           name: str = "i2c_target") -> dict:
+    """Read or write the pod I2C target's register file from the host."""
+    return _pod_for(label).i2c_target_regs(off=off, length=length, write=write,
+                                           name=name)
+
+
+def handle_peripheral_release(label: str, name: str = "*") -> dict:
+    """Release one named pod peripheral instance, or all with '*'."""
+    return _pod_for(label).peripheral_release(name=name)
+
+
+def handle_gpio(label: str, pin: int, value=None, mode: str = "out",
+                pull=None) -> dict:
+    """Read (value=None) or drive a pod GPIO."""
+    return _pod_for(label).gpio(pin, value=value, mode=mode, pull=pull)
+
+
+def handle_adc(label: str, pin: int) -> dict:
+    """Sample a pod ADC channel (raw u16 + 3.3V-ref volts)."""
+    return _pod_for(label).adc(pin)
+
+
 # ── MCP server construction ───────────────────────────────────────────────
 
 
@@ -301,6 +343,82 @@ def build_server():
                     "required": ["label"],
                 },
             ),
+            Tool(
+                name="i2c_target",
+                description=(
+                    "Bring up a persistent hardware I2C target on the pod: a "
+                    "register file the DUT controller reads/writes (e.g. "
+                    "readfrom_mem). Persists until released."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "addr": {"type": "integer", "description": "7-bit I2C address.", "default": 66},
+                        "regs": {"type": "array", "items": {"type": "integer"}, "description": "Initial register bytes from offset 0."},
+                        "bus": {"type": "integer", "description": "Hardware I2C bus id.", "default": 1},
+                        "scl": {"type": "integer", "description": "SCL GPIO.", "default": 11},
+                        "sda": {"type": "integer", "description": "SDA GPIO.", "default": 10},
+                        "size": {"type": "integer", "description": "Register file size in bytes.", "default": 256},
+                        "name": {"type": "string", "description": "Instance name.", "default": "i2c_target"},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="i2c_target_regs",
+                description="Read or write the pod I2C target's register file from the host.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "off": {"type": "integer", "description": "Register offset.", "default": 0},
+                        "length": {"type": "integer", "description": "Bytes to read (default: to end)."},
+                        "write": {"type": "array", "items": {"type": "integer"}, "description": "Bytes to write at off first."},
+                        "name": {"type": "string", "description": "Instance name.", "default": "i2c_target"},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="peripheral_release",
+                description="Release one named pod peripheral instance, or all with '*'.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "name": {"type": "string", "description": "Instance name or '*' for all.", "default": "*"},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="gpio",
+                description="Read (omit value) or drive a pod GPIO; returns the resulting level.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "pin": {"type": "integer", "description": "GPIO number."},
+                        "value": {"type": "integer", "description": "0/1 to drive; omit to read."},
+                        "mode": {"type": "string", "description": "Pin mode when driving.", "default": "out"},
+                        "pull": {"type": "string", "enum": ["up", "down"], "description": "Input pull (read only)."},
+                    },
+                    "required": ["label", "pin"],
+                },
+            ),
+            Tool(
+                name="adc",
+                description="Sample a pod ADC channel; returns raw u16 and a 3.3V-ref voltage.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "pin": {"type": "integer", "description": "ADC-capable GPIO number."},
+                    },
+                    "required": ["label", "pin"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -338,6 +456,30 @@ def build_server():
                 result = await asyncio.to_thread(
                     handle_gdb_dut, arguments["label"],
                     arguments.get("listen_port", 0))
+            elif name == "i2c_target":
+                result = await asyncio.to_thread(
+                    handle_i2c_target, arguments["label"],
+                    arguments.get("addr", 0x42), arguments.get("regs"),
+                    arguments.get("bus", 1), arguments.get("scl", 11),
+                    arguments.get("sda", 10), arguments.get("size", 256),
+                    arguments.get("name", "i2c_target"))
+            elif name == "i2c_target_regs":
+                result = await asyncio.to_thread(
+                    handle_i2c_target_regs, arguments["label"],
+                    arguments.get("off", 0), arguments.get("length"),
+                    arguments.get("write"), arguments.get("name", "i2c_target"))
+            elif name == "peripheral_release":
+                result = await asyncio.to_thread(
+                    handle_peripheral_release, arguments["label"],
+                    arguments.get("name", "*"))
+            elif name == "gpio":
+                result = await asyncio.to_thread(
+                    handle_gpio, arguments["label"], arguments["pin"],
+                    arguments.get("value"), arguments.get("mode", "out"),
+                    arguments.get("pull"))
+            elif name == "adc":
+                result = await asyncio.to_thread(
+                    handle_adc, arguments["label"], arguments["pin"])
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
             return [TextContent(type="text", text=str(result))]

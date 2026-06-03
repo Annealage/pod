@@ -154,3 +154,85 @@ class TestNotImplementedStubs:
         with pytest.raises(NotImplementedError) as exc_info:
             pod.telemetry()
         assert "Phase 5" in str(exc_info.value)
+
+
+class TestPeripherals:
+    @staticmethod
+    def _code(fake_runner):
+        # exec argv is [ampremote, connect, target, exec, <code>]
+        return fake_runner.call_args[0][0][4]
+
+    def test_i2c_target_code(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'name': 'i2c_target', 'addr': 66, 'bus': 1, "
+                   "'scl': 11, 'sda': 10, 'size': 256}\n",
+            returncode=0)
+        result = pod_fake.i2c_target(addr=0x42, regs=[0xAB, 0xCD])
+        code = self._code(fake_runner)
+        assert "annealage_pod.peripherals" in code
+        assert "p.i2c_target(" in code
+        assert "addr=66" in code
+        assert "[171, 205]" in code
+        assert "scl=11" in code and "sda=10" in code
+        assert result["ok"] is True and result["addr"] == 66
+
+    def test_i2c_target_no_regs(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(stdout="{'ok': True}\n", returncode=0)
+        pod_fake.i2c_target()
+        assert "regs=None" in self._code(fake_runner)
+
+    def test_i2c_target_regs_write(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'regs': [1, 2]}\n", returncode=0)
+        result = pod_fake.i2c_target_regs(off=4, write=[1, 2])
+        code = self._code(fake_runner)
+        assert "i2c_target_regs(" in code
+        assert "off=4" in code
+        assert "write=[1, 2]" in code
+        assert result["regs"] == [1, 2]
+
+    def test_i2c_target_regs_read(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'regs': [171, 205]}\n", returncode=0)
+        pod_fake.i2c_target_regs(off=0, length=2)
+        code = self._code(fake_runner)
+        assert "write=None" in code
+        assert "length=2" in code
+
+    def test_gpio_read(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'pin': 5, 'value': 1}\n", returncode=0)
+        result = pod_fake.gpio(5)
+        code = self._code(fake_runner)
+        assert "p.gpio(5" in code
+        assert "value=None" in code
+        assert result["value"] == 1
+
+    def test_gpio_drive(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'pin': 5, 'value': 0}\n", returncode=0)
+        pod_fake.gpio(5, value=0)
+        assert "value=0" in self._code(fake_runner)
+
+    def test_adc(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'pin': 26, 'u16': 32768, 'volts': 1.65}\n",
+            returncode=0)
+        result = pod_fake.adc(26)
+        assert "p.adc(26)" in self._code(fake_runner)
+        assert result["u16"] == 32768
+
+    def test_peripheral_release(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'released': ['i2c_target']}\n", returncode=0)
+        result = pod_fake.peripheral_release("i2c_target")
+        code = self._code(fake_runner)
+        assert "p.release(" in code and "i2c_target" in code
+        assert result["released"] == ["i2c_target"]
+
+    def test_peripheral_list(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'instances': []}\n", returncode=0)
+        result = pod_fake.peripheral_list()
+        assert "p.instances()" in self._code(fake_runner)
+        assert result["instances"] == []

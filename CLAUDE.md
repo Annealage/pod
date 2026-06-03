@@ -31,6 +31,10 @@ and naming conventions.
   (`annealage_pod.debug`) - the layered SWD / DAP / nRF52-flash modules, the
   high-level `ops` entry points, hardware wiring, deployment, and the
   no-filesystem streaming flash/read.
+- `docs/rp2350/peripherals.md`: the pod's DUT-facing peripherals
+  (`annealage_pod.peripherals`) - the thin machine-passthrough philosophy and
+  the curated helpers (hardware I2C target / GPIO / ADC), distinct from the SWD
+  debug stack.
 - `src/host/README.md`: usage of the host `pod` tooling - the CLI, the `Pod`
   Python client, the MCP server, and the discover/register/flash/reset/read
   workflow over Wi-Fi.

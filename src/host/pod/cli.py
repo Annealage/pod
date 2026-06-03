@@ -208,6 +208,51 @@ def cmd_gdb(args):
     return 0
 
 
+def cmd_i2c_target(args):
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    regs = [int(x, 0) for x in args.regs] if args.regs else None
+    result = pod.i2c_target(addr=int(args.addr, 0), regs=regs, bus=args.bus,
+                            scl=args.scl, sda=args.sda, name=args.name)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_i2c_regs(args):
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    write = [int(x, 0) for x in args.write] if args.write else None
+    result = pod.i2c_target_regs(off=args.off, length=args.length, write=write,
+                                 name=args.name)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_gpio(args):
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    value = None if args.value is None else int(args.value, 0)
+    result = pod.gpio(args.pin, value=value, pull=args.pull)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_adc(args):
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    result = pod.adc(args.pin)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_release(args):
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    result = pod.peripheral_release(name=args.name)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
 # ── main ─────────────────────────────────────────────────────────────────
 
 
@@ -318,6 +363,47 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    dest="resume_window_ms",
                    help="RESUME_WAIT window in ms (default: 200)")
 
+    # i2c-target
+    p = sub.add_parser("i2c-target",
+                       help="Bring up a hardware I2C target (register file) on the pod")
+    p.add_argument("label")
+    p.add_argument("--addr", default="0x42", help="7-bit I2C address (default: 0x42)")
+    p.add_argument("--regs", nargs="*", metavar="BYTE",
+                   help="Initial register bytes from offset 0 (e.g. 0xAB 0xCD)")
+    p.add_argument("--bus", type=int, default=1, help="Hardware I2C bus id (default: 1)")
+    p.add_argument("--scl", type=int, default=11, help="SCL GPIO (default: 11)")
+    p.add_argument("--sda", type=int, default=10, help="SDA GPIO (default: 10)")
+    p.add_argument("--name", default="i2c_target", help="Instance name")
+
+    # i2c-regs
+    p = sub.add_parser("i2c-regs",
+                       help="Read/write the pod I2C target register file")
+    p.add_argument("label")
+    p.add_argument("--off", type=int, default=0, help="Register offset (default: 0)")
+    p.add_argument("--length", type=int, default=None,
+                   help="Bytes to read (default: to end)")
+    p.add_argument("--write", nargs="*", metavar="BYTE",
+                   help="Bytes to write at off first")
+    p.add_argument("--name", default="i2c_target", help="Instance name")
+
+    # gpio
+    p = sub.add_parser("gpio", help="Read or drive a pod GPIO")
+    p.add_argument("label")
+    p.add_argument("pin", type=int, help="GPIO number")
+    p.add_argument("--value", default=None, help="0/1 to drive; omit to read")
+    p.add_argument("--pull", default=None, choices=["up", "down"],
+                   help="Input pull (read only)")
+
+    # adc
+    p = sub.add_parser("adc", help="Sample a pod ADC channel")
+    p.add_argument("label")
+    p.add_argument("pin", type=int, help="ADC-capable GPIO number")
+
+    # release
+    p = sub.add_parser("release", help="Release pod peripheral instance(s)")
+    p.add_argument("label")
+    p.add_argument("--name", default="*", help="Instance name or '*' for all")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -337,6 +423,11 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "flash": cmd_flash,
         "reset": cmd_reset,
         "gdb": cmd_gdb,
+        "i2c-target": cmd_i2c_target,
+        "i2c-regs": cmd_i2c_regs,
+        "gpio": cmd_gpio,
+        "adc": cmd_adc,
+        "release": cmd_release,
     }[args.command]
 
     return handler(args)
