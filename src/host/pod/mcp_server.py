@@ -198,6 +198,17 @@ def handle_adc(label: str, pin: int) -> dict:
     return _pod_for(label).adc(pin)
 
 
+def handle_logic_analyse(label: str, base_pin: int, width: int = 1,
+                         rate: int = 1000000, depth: int = 8000, trigger=None,
+                         out_path: str = "capture.vcd", sm_id: int = 10,
+                         names=None) -> dict:
+    """Capture DUT pins with the pod logic analyser and write a VCD file."""
+    trig = tuple(trigger) if trigger else None
+    return _pod_for(label).logic_analyse(
+        base_pin=base_pin, width=width, rate=rate, depth=depth, trigger=trig,
+        out_path=out_path, sm_id=sm_id, names=names)
+
+
 # ── MCP server construction ───────────────────────────────────────────────
 
 
@@ -419,6 +430,29 @@ def build_server():
                     "required": ["label", "pin"],
                 },
             ),
+            Tool(
+                name="logic_analyse",
+                description=(
+                    "Capture DUT pins with the pod's PIO logic analyser and write "
+                    "a VCD file. Swaps SWD out for the capture (mutually exclusive), "
+                    "then restores it lazily."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "base_pin": {"type": "integer", "description": "Lowest GPIO sampled."},
+                        "width": {"type": "integer", "description": "Contiguous pins to sample (1..32).", "default": 1},
+                        "rate": {"type": "integer", "description": "Sample rate in Hz.", "default": 1000000},
+                        "depth": {"type": "integer", "description": "Samples to capture.", "default": 8000},
+                        "trigger": {"type": "array", "items": {}, "description": "[pin, cond], cond in rise/fall/high/low; omit for immediate."},
+                        "out_path": {"type": "string", "description": "Output VCD path.", "default": "capture.vcd"},
+                        "sm_id": {"type": "integer", "description": "PIO2 state machine id.", "default": 10},
+                        "names": {"type": "array", "items": {"type": "string"}, "description": "Channel names, low pin first."},
+                    },
+                    "required": ["label", "base_pin"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -480,6 +514,13 @@ def build_server():
             elif name == "adc":
                 result = await asyncio.to_thread(
                     handle_adc, arguments["label"], arguments["pin"])
+            elif name == "logic_analyse":
+                result = await asyncio.to_thread(
+                    handle_logic_analyse, arguments["label"], arguments["base_pin"],
+                    arguments.get("width", 1), arguments.get("rate", 1000000),
+                    arguments.get("depth", 8000), arguments.get("trigger"),
+                    arguments.get("out_path", "capture.vcd"),
+                    arguments.get("sm_id", 10), arguments.get("names"))
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
             return [TextContent(type="text", text=str(result))]

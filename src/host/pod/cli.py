@@ -253,6 +253,31 @@ def cmd_release(args):
     return 0 if result.get("ok") else 1
 
 
+def _parse_pins(spec):
+    """'16' -> (16, 1); '16-23' -> (16, 8)  (base, width)."""
+    if "-" in spec:
+        a, b = spec.split("-", 1)
+        a, b = int(a, 0), int(b, 0)
+        return a, b - a + 1
+    return int(spec, 0), 1
+
+
+def cmd_la(args):
+    entry = _require_pod(args.label)
+    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    base, width = _parse_pins(args.pins)
+    trigger = None
+    if args.trigger:
+        pin_s, cond = args.trigger.split(":", 1)
+        trigger = (int(pin_s, 0), cond)
+    names = args.names.split(",") if args.names else None
+    result = pod.logic_analyse(
+        base_pin=base, width=width, rate=int(float(args.rate)), depth=args.depth,
+        trigger=trigger, out_path=args.out, sm_id=args.sm_id, names=names)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
 # ── main ─────────────────────────────────────────────────────────────────
 
 
@@ -404,6 +429,22 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("label")
     p.add_argument("--name", default="*", help="Instance name or '*' for all")
 
+    # la (logic analyser)
+    p = sub.add_parser("la", help="Logic-analyse DUT pins (capture -> VCD)")
+    p.add_argument("label")
+    p.add_argument("--pins", default="16",
+                   help="Pin or range: 16 (1 ch) or 16-23 (base-last)")
+    p.add_argument("--rate", default="1e6", help="Sample rate Hz (default: 1e6)")
+    p.add_argument("--depth", type=int, default=8000,
+                   help="Samples to capture (default: 8000)")
+    p.add_argument("--trigger", default=None,
+                   help="pin:cond, cond in rise/fall/high/low (default: immediate)")
+    p.add_argument("--out", default="capture.vcd", help="Output VCD path")
+    p.add_argument("--names", default=None,
+                   help="Comma-separated channel names (low pin first)")
+    p.add_argument("--sm-id", type=int, default=10, dest="sm_id",
+                   help="PIO2 state machine id (default: 10)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -428,6 +469,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "gpio": cmd_gpio,
         "adc": cmd_adc,
         "release": cmd_release,
+        "la": cmd_la,
     }[args.command]
 
     return handler(args)

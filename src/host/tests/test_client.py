@@ -236,3 +236,44 @@ class TestPeripherals:
         result = pod_fake.peripheral_list()
         assert "p.instances()" in self._code(fake_runner)
         assert result["instances"] == []
+
+
+class _FakeSock:
+    """Serves a byte buffer via recv() in <= `split`-byte chunks; b'' at EOF."""
+
+    def __init__(self, data, split=3):
+        self.data = data
+        self.pos = 0
+        self.split = split
+
+    def recv(self, n):
+        end = min(self.pos + min(n, self.split), len(self.data))
+        chunk = self.data[self.pos:end]
+        self.pos = end
+        return chunk
+
+
+class TestLogicAnalyser:
+    def test_la_stream_cmd_basic(self):
+        cmd = Pod._la_stream_cmd(16, 1, 1000000, 8000, None, 3336, 10)
+        assert "la_stream" in cmd
+        assert "16" in cmd
+        assert "width=1" in cmd
+        assert "rate=1000000" in cmd
+        assert "depth=8000" in cmd
+        assert "trigger=None" in cmd
+        assert "port=3336" in cmd
+        assert "sm_id=10" in cmd
+
+    def test_la_stream_cmd_trigger(self):
+        cmd = Pod._la_stream_cmd(16, 8, 2000000, 4000, (16, "rise"), 3336, 10)
+        assert "width=8" in cmd
+        assert "rate=2000000" in cmd
+        assert "trigger=(16, 'rise')" in cmd
+
+    def test_recv_exact_assembles(self):
+        assert Pod._recv_exact(_FakeSock(b"abcdef", split=2), 6) == b"abcdef"
+
+    def test_recv_exact_eof(self):
+        with pytest.raises(EOFError):
+            Pod._recv_exact(_FakeSock(b"abc", split=2), 6)

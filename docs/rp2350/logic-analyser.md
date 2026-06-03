@@ -1,7 +1,10 @@
 # RP2350 pod: PIO logic analyser + PIO arbiter
 
-**Status: DESIGN (Track 2, pre-implementation).** Converts to the usage doc once
-built and hardware-validated. This is the proposal to review before code lands.
+**Status: implemented; mostly hardware-validated.** The capture engine, the
+SWD<->LA swap, the VCD decoder, and the bounded (non-wedging) socket teardown are
+validated (see the checklist). The one remaining gap is the live Wi-Fi streaming
+round-trip (la_stream -> host -> VCD), blocked by the pod's Wi-Fi reconnect
+reliability (the same fragility as the A0 socket-REPL issue), not by the LA code.
 
 Two coupled pieces:
 
@@ -128,17 +131,27 @@ small captures the REPL return path also works.
 
 ## Hardware-validation checklist
 
-1. [x] `rp2.DMA` present in the pod build (2026-06-03). [ ] PIO-RX DREQ-paced
-   FIFO -> RAM ring works; measure the max reliable sample rate.
-2. [ ] SWD full teardown (`remove_program` + pin release) frees PIO1, the LA
-   claims it, captures, then `to_swd()` + `ops.info()` round-trips cleanly (no
-   leaked instruction memory, DPIDR still reads).
-3. [x] **Capture program correctness (polled path)**: a 1 kHz / 50% PWM on GP16
-   sampled at 100 kHz (PIO2 SM10, `in_(pins,1)` + autopush) decoded to exact
-   50-sample half-runs, 49.4% duty, est. 1000.0 Hz; polled drain is gap-free at
-   100 kHz (2026-06-03). [ ] DMA path + VCD decode of the same.
-4. [ ] Coexistence sanity: confirm whether the LA on PIO2 (streamer off) *could*
-   coexist with SWD on PIO1 (deferred; shipped behaviour is the swap regardless).
+1. [x] `rp2.DMA` present, and the PIO-RX DREQ-paced FIFO -> RAM ring works: a
+   1 kHz PWM captured at **1 MHz via DMA** decoded to exact 500-sample
+   half-runs, 48.8% duty, 1000.0 Hz (PIO2 SM10, RXF`0x50400028`, DREQ 22).
+   Polled fallback also gap-free at 100 kHz. (2026-06-03)
+2. [x] SWD full teardown (`SWDPio.release`: `remove_program` + SM free) frees
+   PIO1: `ops.info` (DPIDR `0x2ba01477`) -> `la_capture` swap -> `ops.info`
+   rebuild -> second swap -> `ops.info` again, all clean. Leak-free across
+   repeated swaps. (2026-06-03)
+3. [x] Capture correctness: validated polled (100 kHz) and DMA (1 MHz); the LA
+   module's `capture()` recovers the signal with immediate and rising-edge
+   triggers. VCD decoder unit-tested (`tests/test_vcd.py`).
+4. [x] Socket teardown is non-wedging: `srv.settimeout`/`cl.settimeout` bound
+   both `accept` and the data phase, so a missing/flaky host connection raises
+   `ETIMEDOUT` and frees the REPL instead of hanging (confirmed: a minimal
+   listener with no client raised ETIMEDOUT cleanly).
+5. [ ] **Live Wi-Fi streaming round-trip** (`la_stream` -> host receive -> VCD):
+   blocked. The pod's Wi-Fi does not reliably reconnect after a cold boot
+   (`status -1`, no IP), so the host cannot reach the data port. The capture,
+   swap, wire framing, and decoder are each validated; only the end-to-end Wi-Fi
+   transfer is unproven, gated on the pod Wi-Fi/socket-REPL reliability work (A0).
+6. [ ] Coexistence sanity (deferred; shipped behaviour is the swap regardless).
 
 ## Decisions (settled 2026-06-03)
 

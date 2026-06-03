@@ -15,6 +15,7 @@ Stubbed methods raise NotImplementedError with the phase they're pending:
 import ast
 import os
 import socket
+import struct
 import threading
 import time
 import subprocess as _subprocess
@@ -366,6 +367,92 @@ class Pod:
         """Sample a pod ADC channel; returns raw u16 and a 3.3V-ref voltage."""
         code = ("import annealage_pod.peripherals as p; print(p.adc(%d))" % pin)
         return _last_dict(self.exec(code))
+
+    # ── DUT logic analyser (PIO capture on the pod, workstream E / Track 2) ─
+
+    SYS_HZ = 150_000_000   # pod PIO clock; rate = SYS_HZ / clkdiv
+
+    @staticmethod
+    def _la_stream_cmd(base_pin: int, width: int, rate: int, depth: int,
+                       trigger, port: int, sm_id: int) -> str:
+        """Build the on-pod la_stream invocation (pure, for testability)."""
+        trig = "None"
+        if trigger is not None:
+            trig = "(%d, %r)" % (int(trigger[0]), str(trigger[1]))
+        return (
+            "import annealage_pod.debug.ops as o;"
+            "print(o.la_stream(%d, width=%d, rate=%d, depth=%d, trigger=%s,"
+            " port=%d, sm_id=%d))"
+            % (base_pin, width, int(rate), depth, trig, port, sm_id)
+        )
+
+    @staticmethod
+    def _recv_exact(sock, n: int) -> bytes:
+        """Read exactly n bytes from sock or raise EOFError."""
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise EOFError(
+                    "pod closed mid-capture (%d/%d bytes)" % (len(buf), n))
+            buf += chunk
+        return bytes(buf)
+
+    def logic_analyse(self, base_pin: int, width: int = 1, rate: int = 1000000,
+                      depth: int = 8000, trigger=None, out_path: str = "capture.vcd",
+                      port: int = 3336, sm_id: int = 10, names=None) -> dict:
+        """Capture DUT pins with the pod logic analyser and write VCD to out_path.
+
+        Swaps SWD out on the pod, captures `depth` samples of `width` contiguous
+        pins from `base_pin` at ~`rate` Hz (optional trigger=(pin, cond) with cond
+        in 'rise'/'fall'/'high'/'low'), streams the raw capture over TCP, and
+        decodes it to VCD. SWD is restored lazily on the pod's next debug op.
+        Returns {ok, out_path, width, rate, clkdiv, words, complete, samples}.
+        """
+        from pod import vcd
+
+        result: dict = {}
+
+        def _run():
+            try:
+                result["out"] = self.exec(self._la_stream_cmd(
+                    base_pin, width, rate, depth, trigger, port, sm_id))
+            except Exception as exc:  # noqa: BLE001 - surfaced to caller
+                result["exc"] = exc
+
+        worker = threading.Thread(target=_run)
+        worker.start()
+        sock = None
+        for _ in range(150):
+            if "exc" in result:
+                break
+            try:
+                sock = socket.create_connection((self.address, port), timeout=5)
+                break
+            except OSError:
+                time.sleep(0.1)
+        if sock is None:
+            worker.join()
+            exc = result.get("exc")
+            raise RuntimeError(
+                "could not connect to pod LA port %d: %r\n%s"
+                % (port, exc, getattr(exc, "stderr", "") or ""))
+        sock.settimeout(None)   # capture may wait on a trigger before sending
+        try:
+            words, w, clkdiv, complete = struct.unpack(
+                "<IIII", self._recv_exact(sock, 16))
+            raw = self._recv_exact(sock, words * 4)
+        finally:
+            sock.close()
+        worker.join()
+        if "exc" in result:
+            raise result["exc"]
+        rate_actual = self.SYS_HZ / clkdiv
+        samples = vcd.decode_to_vcd(raw, words, w, rate_actual, out_path,
+                                    names=names)
+        return {"ok": True, "out_path": out_path, "width": w,
+                "rate": rate_actual, "clkdiv": clkdiv, "words": words,
+                "complete": bool(complete), "samples": samples}
 
     # ── stubbed methods (pending future phases) ──────────────────────────
 

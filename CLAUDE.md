@@ -35,6 +35,10 @@ and naming conventions.
   (`annealage_pod.peripherals`) - the thin machine-passthrough philosophy and
   the curated helpers (hardware I2C target / GPIO / ADC), distinct from the SWD
   debug stack.
+- `docs/rp2350/logic-analyser.md`: the PIO logic analyser
+  (`annealage_pod.debug.logic_analyser`) + the PIO arbiter that swaps PIO blocks
+  between SWD and the analyser. DMA capture / swap / VCD decode validated; the
+  live Wi-Fi streaming round-trip is Wi-Fi-reliability-blocked.
 - `src/host/README.md`: usage of the host `pod` tooling - the CLI, the `Pod`
   Python client, the MCP server, and the discover/register/flash/reset/read
   workflow over Wi-Fi.

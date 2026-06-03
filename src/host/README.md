@@ -49,6 +49,7 @@ pod i2c-regs <label> [--off 0] [--length N] [--write 0xAB ...]   read/write the 
 pod gpio <label> <pin> [--value 0|1] [--pull up|down]            read or drive a pod GPIO
 pod adc <label> <pin>                                            sample a pod ADC channel
 pod release <label> [--name '*']                                 release pod peripheral instance(s)
+pod la <label> [--pins 16-23] [--rate 1e6] [--depth N] [--trigger 16:rise] [--out cap.vcd]
 pod mcp                               start the MCP stdio server (alias: pod-mcp)
 ```
 
@@ -148,6 +149,7 @@ agent drives the hardware loop with the same verbs:
 | `gpio` | read or drive a pod GPIO |
 | `adc` | sample a pod ADC channel |
 | `peripheral_release` | release a named pod peripheral instance, or all |
+| `logic_analyse` | PIO-capture DUT pins (swaps SWD out) and write a VCD file |
 
 The loop an agent runs: edit DUT firmware -> `flash_dut` -> `reset_dut` ->
 observe (`dut_exec`, or have the pod present an `i2c_target` / `gpio` the DUT
@@ -173,5 +175,10 @@ implemented, host-unit-tested, and hardware-validated end-to-end on the pod + an
 nRF52840 controller: the pod presents the register file via the helper, the DUT
 reads it (`readfrom_mem`) and writes it (`writeto_mem`), and the host reads back
 what the DUT wrote.
+The PIO logic analyser (`logic_analyse` / `pod la`, Track 2) is implemented and
+its pieces are hardware-validated (DMA capture at 1 MHz, the SWD<->LA swap, the
+VCD decoder, non-wedging socket teardown); the live Wi-Fi capture round-trip is
+pending on the pod's Wi-Fi reconnect reliability (see
+`../../docs/rp2350/logic-analyser.md`).
 `usbip_attach` (Phase 4) and `uart_stream` / `telemetry` (Phase 5) remain
 stubbed and raise with the pending phase.

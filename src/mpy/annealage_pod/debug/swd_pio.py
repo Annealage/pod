@@ -124,6 +124,22 @@ class SWDPio:
     def deinit(self):
         self.sm.active(0)
 
+    def release(self):
+        # Full teardown so this PIO block is reclaimable (e.g. by the logic
+        # analyser swap): stop the SM and clear the block's instruction memory.
+        # The SM is freed when the last reference is dropped (the caller drops
+        # it), so a later SWDPio re-creates it cleanly; remove_program stops the
+        # swd_prog leaking instruction memory across repeated swaps (see the
+        # PIO-instruction-memory caveat in dev-notes.md).
+        try:
+            self.sm.active(0)
+        except Exception:
+            pass
+        try:
+            rp2.PIO(self.sm_id // 4).remove_program()
+        except Exception:
+            pass
+
     # --- bit primitives (LSB-first) -------------------------------------
     def write_bits(self, value, n):
         self.sm.put((n - 1) << 1 | SEL_OUTPUT)
