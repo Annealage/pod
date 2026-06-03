@@ -2,18 +2,27 @@
 #
 # Brings up CYW43 Wi-Fi and exposes the MicroPython REPL on a TCP socket via
 # os.dupterm, so the pod is reachable over Wi-Fi (ampremote socket://). This is
-# required because the native USB controller is the DUT host port, leaving no
-# USB-CDC REPL on the pod.
+# the pod's ONLY management channel: the native USB controller is the DUT host
+# port, so there is no USB-CDC REPL to fall back to. It therefore has to be
+# resilient - a flaky Wi-Fi link or a churning client must never leave the pod
+# unreachable until a power-cycle.
 #
 # Credentials and port come from a config.py on the filesystem (NOT frozen, NOT
 # committed) so they change without a firmware rebuild. See config.example.py.
 #
-# After Wi-Fi is up it also advertises a browsable mDNS service
-# (_annealage-pod._tcp) via the native lwIP responder (network.mdns_add_service)
-# so host tooling discovers the pod by service type rather than a hardcoded IP.
+# Resilience (one background thread does both jobs; rp2 gives one extra thread):
+#   - Wi-Fi supervisor: reconnect on drop, keep retrying if the boot connect
+#     failed, re-advertise mDNS on (re)connect. (connect-once at boot is not
+#     enough; a cold-boot CYW43 failure or a later drop would strand the pod.)
+#   - REPL serve loop: poll-based (non-blocking) accept so the loop stays
+#     responsive and is Ctrl-C-interruptible; on a new client it detaches and
+#     closes the previous one so a reconnecting host always gets a clean slot;
+#     the loop is exception-guarded so a transient error can never kill the
+#     pod's only management channel.
 
 import network
 import socket
+import select
 import os
 import sys
 import time
@@ -40,17 +49,79 @@ def connect(ssid, pw, timeout=15, retries=4):
     return wlan
 
 
-def _serve(port):
+def _serve_supervise(port, wlan, ssid, pw):
+    # One background thread: serve the REPL socket AND keep Wi-Fi up. Both jobs
+    # are non-blocking so neither starves the other, and the whole loop is
+    # exception-guarded so it never dies.
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", port))
     s.listen(1)
+    s.setblocking(False)
+    poller = select.poll()
+    poller.register(s, select.POLLIN)
+    cur = None
+    was_up = wlan.isconnected()
+    next_wifi = time.ticks_add(time.ticks_ms(), 5000)
+    # Allow the first down-check to re-associate immediately, then rate-limit.
+    last_attempt = time.ticks_add(time.ticks_ms(), -20000)
     while True:
         try:
-            cl, _ = s.accept()
-        except Exception:
-            break
-        os.dupterm(cl)
+            # --- serve: accept in 500 ms slices (non-blocking, interruptible) -
+            if poller.poll(500):
+                try:
+                    cli, addr = s.accept()
+                except OSError:
+                    cli = None
+                if cli is not None:
+                    # Evict any previous client first, so a reconnecting host
+                    # always lands on a clean REPL slot (covers the case where
+                    # the old client died without the REPL noticing the EOF).
+                    try:
+                        os.dupterm(None)
+                    except Exception:
+                        pass
+                    if cur is not None:
+                        try:
+                            cur.close()
+                        except Exception:
+                            pass
+                    cur = cli
+                    try:
+                        os.dupterm(cli)
+                        print("netboot: REPL client", addr)
+                    except Exception:
+                        try:
+                            cli.close()
+                        except Exception:
+                            pass
+                        cur = None
+            # --- supervise: keep Wi-Fi connected ----------------------------
+            if time.ticks_diff(time.ticks_ms(), next_wifi) >= 0:
+                next_wifi = time.ticks_add(time.ticks_ms(), 5000)
+                up = wlan.isconnected()
+                if up and not was_up:
+                    try:
+                        print("netboot: Wi-Fi (re)connected", wlan.ifconfig()[0])
+                        _advertise_mdns(port)
+                    except Exception:
+                        pass
+                elif not up:
+                    # Non-blocking re-association, rate-limited so we don't keep
+                    # restarting an in-progress association every cycle.
+                    if time.ticks_diff(time.ticks_ms(), last_attempt) > 15000:
+                        last_attempt = time.ticks_ms()
+                        try:
+                            wlan.connect(ssid, pw)
+                        except Exception:
+                            pass
+                was_up = up
+        except Exception as e:
+            try:
+                sys.print_exception(e)
+            except Exception:
+                pass
+            time.sleep_ms(200)
 
 
 def _advertise_mdns(repl_port):
@@ -96,13 +167,15 @@ def start():
         return None
     pw = getattr(config, "WIFI_PASSWORD", "")
     port = getattr(config, "REPL_PORT", 8266)
+    # Best-effort initial connect. Even if it fails, the supervisor thread keeps
+    # retrying and the serve socket is already listening, so the pod becomes
+    # reachable the moment Wi-Fi comes up - it is never stranded by a bad boot.
     wlan = connect(ssid, pw)
-    if not wlan.isconnected():
-        print("netboot: Wi-Fi connect failed for SSID", ssid)
-        return None
-    ip = wlan.ifconfig()[0]
-    print("netboot: Wi-Fi up", ip, "REPL on port", port)
+    if wlan.isconnected():
+        print("netboot: Wi-Fi up", wlan.ifconfig()[0], "REPL on port", port)
+        _advertise_mdns(port)
+    else:
+        print("netboot: Wi-Fi not up yet; supervisor will keep retrying")
     import _thread
-    _thread.start_new_thread(_serve, (port,))
-    _advertise_mdns(port)
-    return ip
+    _thread.start_new_thread(_serve_supervise, (port, wlan, ssid, pw))
+    return wlan.ifconfig()[0] if wlan.isconnected() else None
