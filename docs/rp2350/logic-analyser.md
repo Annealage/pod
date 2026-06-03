@@ -146,12 +146,19 @@ small captures the REPL return path also works.
    both `accept` and the data phase, so a missing/flaky host connection raises
    `ETIMEDOUT` and frees the REPL instead of hanging (confirmed: a minimal
    listener with no client raised ETIMEDOUT cleanly).
-5. [ ] **Live Wi-Fi streaming round-trip** (`la_stream` -> host receive -> VCD):
-   blocked. The pod's Wi-Fi does not reliably reconnect after a cold boot
-   (`status -1`, no IP), so the host cannot reach the data port. The capture,
-   swap, wire framing, and decoder are each validated; only the end-to-end Wi-Fi
-   transfer is unproven, gated on the pod Wi-Fi/socket-REPL reliability work (A0).
-6. [ ] Coexistence sanity (deferred; shipped behaviour is the swap regardless).
+5. [x] DMA capture coexists with active Wi-Fi: `la_capture` (DMA) ran with the
+   CYW43 link up and Wi-Fi survived (before/after both connected, `.133`). So
+   the capture does not disturb the management link.
+6. [ ] **Live Wi-Fi streaming round-trip via the host client** (`Pod.logic_analyse`
+   -> `la_stream` -> host receive -> VCD): not yet working. With A0 fixed Wi-Fi is
+   now reliable, but driving `la_stream` (which opens a data-port server and
+   accepts/sends) over the *ampremote management REPL* reproducibly fails to open
+   the data port and wedges the main REPL thread, while `la_capture` (no socket)
+   over USB works and Wi-Fi survives. So it is NOT a DMA/Wi-Fi coexistence issue;
+   it is a narrow interaction of running a socket-server accept on the dupterm'd
+   REPL thread. Needs focused debugging (compare against flash_stream/dump_stream,
+   which use the same exec-server-then-host-connects pattern).
+7. [ ] Coexistence-with-SWD sanity (deferred; shipped behaviour is the swap).
 
 ## Decisions (settled 2026-06-03)
 
