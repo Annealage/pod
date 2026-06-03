@@ -28,12 +28,25 @@ import sys
 import time
 
 
+def _pm_none(wlan):
+    # Disable CYW43 Wi-Fi power-save so the radio stays active. Without this the
+    # link drops on idle and re-associates with a new DHCP IP - the source of the
+    # Wi-Fi flapping (unreachable IP, REPL going away) seen during bring-up.
+    # Validated: with PM_NONE, 0 disconnect-seconds and a single stable IP over a
+    # 25s window; without it the IP churned across the session.
+    try:
+        wlan.config(pm=network.WLAN.PM_NONE)
+    except Exception:
+        pass
+
+
 def connect(ssid, pw, timeout=15, retries=4):
     # Cold-boot CYW43 often drops the first connect attempt; retry with a
     # disconnect between tries. Without this the frozen firmware can come up
     # unreachable (no USB-CDC REPL to fall back to).
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
+    _pm_none(wlan)
     for _ in range(retries):
         if wlan.isconnected():
             return wlan
@@ -101,6 +114,7 @@ def _serve_supervise(port, wlan, ssid, pw):
                 next_wifi = time.ticks_add(time.ticks_ms(), 5000)
                 up = wlan.isconnected()
                 if up and not was_up:
+                    _pm_none(wlan)   # reconnect may have reset power-save
                     try:
                         print("netboot: Wi-Fi (re)connected", wlan.ifconfig()[0])
                         _advertise_mdns(port)
@@ -169,6 +183,7 @@ def start():
     port = getattr(config, "REPL_PORT", 8266)
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
+    _pm_none(wlan)
     # Do NOT block boot on the connect: a slow or flaky AP would delay the REPL,
     # and the REPL is the pod's only management channel. Kick off association and
     # hand everything to the serve+supervise thread, which binds the REPL socket
