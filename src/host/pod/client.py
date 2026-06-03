@@ -154,6 +154,11 @@ class Pod:
             raise RuntimeError(
                 "could not connect to pod flash port %d: %r\n%s"
                 % (port, exc, detail))
+        # Connect used a short timeout; the transfer itself is paced by the pod
+        # (it erases the whole region before reading the socket, ~85 ms/page, so
+        # the initial quiet can be tens of seconds for a large image). Block for
+        # the data phase rather than timing out mid-erase.
+        sock.settimeout(None)
         try:
             with open(image, "rb") as f:
                 while True:
@@ -226,6 +231,7 @@ class Pod:
             raise RuntimeError(
                 "could not connect to pod dump port %d: %r\n%s"
                 % (port, exc, getattr(exc, "stderr", "") or ""))
+        sock.settimeout(None)   # transfer paced by the pod, do not time out
         got = 0
         try:
             with open(out_path, "wb") as f:
