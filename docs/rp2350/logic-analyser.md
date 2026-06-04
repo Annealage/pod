@@ -279,7 +279,13 @@ it); if a channel is flat/noisy, check that pin's wire and the shared ground.
    showed PIO2 SM0 enabled (CYW43) and PIO0 idle: the LA's `sm_id=10` was PIO2,
    the live Wi-Fi block. Moving the LA to PIO0 fixed it. The "DMA contention"
    hypothesis in the prior note was wrong; it was PIO-block aliasing with CYW43.
-7. [ ] LA(PIO0)+SWD(PIO1) simultaneous coexistence: now possible (independent
+7. [x] Real multi-channel DUT capture: an nRF52840 dongle drove 50 kHz / 25 kHz
+   PWM onto pod GP11 / GP10; a 2-channel capture (`base_pin=10, width=2`, 1 MHz,
+   depth 8000) over Wi-Fi decoded to **50.1 kHz / 25.0 kHz** - exact, channels
+   correctly mapped (low pin = ch0), `complete=True`. Confirms the DUT-wiring
+   guide end-to-end (external signal source, real pins, decode fidelity).
+   (2026-06-05)
+8. [ ] LA(PIO0)+SWD(PIO1) simultaneous coexistence: now possible (independent
    blocks) but not yet validated; `la_capture`/`la_stream` still swap SWD out
    first. A follow-up could drop the swap to capture DUT pins mid-debug-session.
 
