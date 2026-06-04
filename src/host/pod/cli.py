@@ -442,8 +442,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--out", default="capture.vcd", help="Output VCD path")
     p.add_argument("--names", default=None,
                    help="Comma-separated channel names (low pin first)")
-    p.add_argument("--sm-id", type=int, default=10, dest="sm_id",
-                   help="PIO2 state machine id (default: 10)")
+    p.add_argument("--sm-id", type=int, default=0, dest="sm_id",
+                   help="PIO0 state machine id (default: 0; PIO2 is CYW43 Wi-Fi)")
 
     args = parser.parse_args()
 

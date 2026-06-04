@@ -64,9 +64,9 @@ ergonomics, not because they need lifecycle management.
 ## Coexistence
 
 The I2C target uses a hardware I2C instance and its two pins; it doesn't touch
-PIO, so it coexists with the SWD debug stack (PIO1) and Wi-Fi (PIO0) without
-arbitration. The forthcoming logic analyser is a PIO consumer and will instead
-time-share PIO blocks and pins with SWD through a runtime PIO arbiter.
+PIO, so it coexists with the SWD debug stack (PIO1) and Wi-Fi (PIO2 on the Pico
+2 W) without arbitration. The logic analyser is a PIO consumer on PIO0 (the free
+block) and is tracked, with SWD and Wi-Fi, through the runtime PIO arbiter.
 
 ## Deployment
 

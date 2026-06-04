@@ -142,7 +142,12 @@ and over the Wi-Fi socket REPL for the network proof.
   clean); hard cliff at 12.5 MHz (input-sampling phase). Just under the >= 10 MHz
   gate target; needs PIO input-phase tuning. RP-target + multidrop (TARGETSEL)
   remain blocked (no RP DUT wired).
-- **PIO/core coexistence (D1.2 partial)**: CYW43 Wi-Fi (PIO0 SM0-3) + PIO SWD
-  (PIO1 SM4) running together, 300/300 MEM-AP read-pairs clean while commands flow
-  over Wi-Fi; Wi-Fi stays connected and mDNS keeps answering throughout. The
+- **PIO/core coexistence (D1.2 partial)**: CYW43 Wi-Fi + PIO SWD (PIO1 SM4)
+  running together, 300/300 MEM-AP read-pairs clean while commands flow over
+  Wi-Fi; Wi-Fi stays connected and mDNS keeps answering throughout. The
   USB-host leg of the three-way test is deferred until a USB DUT is available.
+  Note: CYW43 actually runs on **PIO2 SM0** on this Pico 2 W (confirmed
+  2026-06-04 by reading `PIO->CTRL`), not PIO0 as earlier notes assumed - it
+  claims a free SM reaching its WL pins. SWD (PIO1) never collided with it
+  regardless. The logic analyser, originally placed on PIO2, hard-wedged the
+  chip until moved to PIO0; see `logic-analyser.md`.

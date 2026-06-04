@@ -1,45 +1,54 @@
 # RP2350 pod: PIO logic analyser + PIO arbiter
 
-**Status: implemented; mostly hardware-validated.** The capture engine, the
-SWD<->LA swap, the VCD decoder, and the bounded (non-wedging) socket teardown are
-validated (see the checklist). The one remaining gap is the live Wi-Fi streaming
-round-trip (la_stream -> host -> VCD), blocked by the pod's Wi-Fi reconnect
-reliability (the same fragility as the A0 socket-REPL issue), not by the LA code.
+**Status: implemented and hardware-validated, including the live Wi-Fi
+round-trip.** The capture engine, the VCD decoder, the bounded (non-wedging)
+socket teardown, and the full `Pod.logic_analyse` over Wi-Fi (capture -> host ->
+VCD) are validated. The earlier "la_stream hangs over Wi-Fi" wedge was root-caused
+and fixed: the LA had been placed on **PIO2**, which on the RP2350 Pico 2 W is the
+live **CYW43 Wi-Fi** block (not PIO0, as an RP2040 carryover assumption had it).
+Building the LA state machine on PIO2 corrupted the running CYW43 SM and
+hard-wedged the chip whenever Wi-Fi was actively servicing a socket. The LA now
+runs on **PIO0** (the free block); the real client streams reliably over Wi-Fi.
+See the PIO map below and the bisection write-up in the checklist.
 
 Two coupled pieces:
 
 1. A PIO **logic analyser** (LA): sample a set of DUT pins at a configurable
    rate into a RAM ring buffer, with a trigger, then stream the capture to the
    host and decode it to a standard waveform format.
-2. A runtime **PIO arbiter** so the LA and the SWD debug stack can each claim
-   PIO blocks / SMs / pins on demand without colliding. SWD and the LA do not
-   run at the same time (see the budget below); the arbiter makes swapping
-   between them safe and explicit.
+2. A runtime **PIO arbiter** so the LA, the SWD debug stack, and CYW43 Wi-Fi
+   never collide on a PIO block. It reserves PIO2 (Wi-Fi) and records the LA
+   (PIO0) and SWD (PIO1) claims (see the budget below). The LA and SWD are on
+   independent blocks; `la_capture`/`la_stream` still swap SWD out first as a
+   conservative default.
 
-## Why an arbiter: the PIO budget
+## The PIO budget (corrected for the RP2350 Pico 2 W)
 
-The RP2350 has 3 PIO blocks (4 SMs each, 32 instruction words each):
+The RP2350 has 3 PIO blocks (4 SMs each, 32 instruction words each). The actual
+owners, read off the live `PIO->CTRL` registers on the pod:
 
-| Block | Current owner | Notes |
+| Block | Owner | Notes |
 |---|---|---|
-| PIO0 | CYW43 Wi-Fi (SM0-3) | permanent, off-limits |
-| PIO1 | SWD transport (SM0, `swd_prog` ~28 instr) | owns GP14/GP15 |
-| PIO2 | optional DRW write-streamer (off by default), else free | |
+| PIO0 | **logic analyser** (free block) | LA `LogicAnalyser(sm_id=0)` default |
+| PIO1 | SWD transport (`swd_prog` ~28 instr) | owns GP14/GP15 |
+| PIO2 | **CYW43 Wi-Fi (SM0)** | permanent, off-limits, hard-wedges if touched |
 
-Usable blocks for {SWD, DRW-streamer, LA, future SWO/I2C-SPI-bitbang} are PIO1
-and PIO2. A useful LA wants a whole block: instruction space, one SM, a DMA
-channel, and ideally room to grow a trigger/timestamp engine. With SWD on PIO1
-and the streamer occasionally on PIO2, the LA has no guaranteed free block, so
-running it means freeing one - and SWD is the one to swap out, since you capture
-signals when you are *not* single-stepping over SWD. Hence SWD and the LA are
-mutually exclusive.
+Important: on the RP2350 Pico 2 W the CYW43 driver claims a free SM that can
+reach its high-numbered WL pins (`pio_claim_free_sm_and_add_program_for_gpio_range`
+in the pico-sdk), which lands on **PIO2 SM0** - NOT PIO0 as on the RP2040. This
+was confirmed by reading the PIO enable registers (PIO2 `CTRL=0x1`, SM0 running;
+PIO0/PIO1 idle). Building a state machine on PIO2 while Wi-Fi is live corrupts
+the running CYW43 SM and hard-wedges the whole chip (REPL dead, Ctrl-C dead,
+recover only by power-cycle). So **the LA must use PIO0** and PIO2 is reserved.
 
-The swap has to be **clean**, and today it is not: `SWDPio.deinit()` only stops
-the SM (`active(0)`). It leaves `swd_prog` resident in PIO instruction memory
-and GP14/GP15 bound to PIO. A real release must also remove the program
-(`rp2.PIO(n).remove_program(...)`) and return the pins, or the LA cannot claim
-the block (and re-`_ensure`-ing SWD later would re-add the program and leak
-instruction memory, per the `dev-notes.md` resume caveat).
+The arbiter reserves PIO2 for `cyw43` and records LA (PIO0) and SWD (PIO1)
+claims so a consumer cannot silently stomp a live one. Because the LA (PIO0) and
+SWD (PIO1) are now on independent blocks, they can in principle run at the same
+time; `la_capture`/`la_stream` still close any SWD session first as a
+conservative default (clean DUT state), but the mutual-exclusion is a policy
+choice, not a hardware constraint. A clean SWD release (`SWDPio.release()`:
+`active(0)` + `remove_program` + free pins) is still used so repeated
+setup/teardown does not leak PIO instruction memory.
 
 ## PIO arbiter
 
@@ -49,7 +58,7 @@ program-space claims, so no two consumers fight over the same silicon.
 ```python
 # One process-wide arbiter instance.
 class PioArbiter:
-    # Static map of what is permanently reserved (PIO0 = CYW43).
+    # Static map of what is permanently reserved (PIO2 = CYW43 Wi-Fi).
     def claim(self, owner, block, n_sms=1, pins=(), instrs=0): ...
         # Grant (block, SMs, pins) to `owner`, or raise PioConflict naming the
         # current holder. Records the claim.
@@ -133,7 +142,9 @@ small captures the REPL return path also works.
 
 1. [x] `rp2.DMA` present, and the PIO-RX DREQ-paced FIFO -> RAM ring works: a
    1 kHz PWM captured at **1 MHz via DMA** decoded to exact 500-sample
-   half-runs, 48.8% duty, 1000.0 Hz (PIO2 SM10, RXF`0x50400028`, DREQ 22).
+   half-runs, 48.8% duty, 1000.0 Hz. (This early capture-engine check ran on PIO2
+   SM10, RXF `0x50400028`, DREQ 22 - before the PIO2/CYW43 collision was found;
+   production is PIO0 SM0, RXF `0x50200020`, DREQ 4, validated in item 6.)
    Polled fallback also gap-free at 100 kHz. (2026-06-03)
 2. [x] SWD full teardown (`SWDPio.release`: `remove_program` + SM free) frees
    PIO1: `ops.info` (DPIDR `0x2ba01477`) -> `la_capture` swap -> `ops.info`
@@ -149,29 +160,34 @@ small captures the REPL return path also works.
 5. [x] DMA capture coexists with active Wi-Fi: `la_capture` (DMA) ran with the
    CYW43 link up and Wi-Fi survived (before/after both connected, `.133`). So
    the capture does not disturb the management link.
-6. [ ] **Live Wi-Fi streaming round-trip via the host client** (`Pod.logic_analyse`
-   -> `la_stream` -> host receive -> VCD): not yet working. Narrowed precisely:
-   `la_stream` binds 3336, the host connects, `netutil.accept` returns (so accept
-   is fine) - then it hangs in `capture()`, *after* accept, before the first send.
-   `la_capture` (same capture) works over USB *and* with Wi-Fi up but idle (the
-   coexistence test); the hang only appears when the capture runs while Wi-Fi is
-   **actively servicing sockets** (the dupterm'd management REPL on 8266 + the
-   data client on 3336). Changing the capture's busy-wait from a tight spin to
-   `sleep_ms(1)` did NOT resolve it. Leading hypothesis: contention between the
-   LA's DMA channel and the CYW43's DMA/PIO when Wi-Fi is mid-transfer. This is a
-   focused hardware-debug task (DMA channel allocation/arbitration, capture
-   vs active-Wi-Fi), and it matters because capturing while managed over Wi-Fi is
-   the production scenario. Workaround for now: `la_capture` over a quiescent
-   link, or capture into RAM and stream after the capture completes.
-7. [ ] Coexistence-with-SWD sanity (deferred; shipped behaviour is the swap).
+6. [x] **Live Wi-Fi streaming round-trip via the host client** (`Pod.logic_analyse`
+   -> `la_stream` -> host receive -> VCD): working and reliable on PIO0. The real
+   client completes in <1s per capture (3/3 back-to-back, words=250, complete=True,
+   valid VCD) over an active Wi-Fi link. (2026-06-04)
+
+   Root-cause write-up (the earlier "hangs over Wi-Fi"): an out-of-band USB-CDC
+   observer + a tight-step bisection found the wedge was the `rp2.StateMachine(...)`
+   construction inside `capture()` - and only when run tightly (no yields) while
+   the Wi-Fi REPL connection was being serviced. A fully-instrumented run (a print
+   between every step) always completed, because each print yields and forces a
+   Wi-Fi-servicing window - a classic Heisenbug. The decisive evidence:
+   `probe_trunc(2)` (no StateMachine) completed; `probe_trunc(3)` (+StateMachine)
+   wedged; `probe_raw(0,9)` (full setup on PIO0) completed. Reading `PIO->CTRL`
+   showed PIO2 SM0 enabled (CYW43) and PIO0 idle: the LA's `sm_id=10` was PIO2,
+   the live Wi-Fi block. Moving the LA to PIO0 fixed it. The "DMA contention"
+   hypothesis in the prior note was wrong; it was PIO-block aliasing with CYW43.
+7. [ ] LA(PIO0)+SWD(PIO1) simultaneous coexistence: now possible (independent
+   blocks) but not yet validated; `la_capture`/`la_stream` still swap SWD out
+   first. A follow-up could drop the swap to capture DUT pins mid-debug-session.
 
 ## Decisions (settled 2026-06-03)
 
-1. **Mutual-exclusion model: always swap SWD out.** Starting the LA fully tears
-   down the SWD PIO (`remove_program` + free GP14/15) and reclaims its block;
-   SWD rebuilds when the LA stops. The arbiter's whole-block claim model does
-   not preclude LA-on-PIO2 + SWD-on-PIO1 coexistence later, but the shipped
-   behaviour is the swap.
+1. **Mutual-exclusion model: swap SWD out (conservative default).** Starting the
+   LA closes any SWD session first (`SWDPio.release`: `remove_program` + free
+   GP14/15); SWD rebuilds lazily on the next debug op. The LA (PIO0) and SWD
+   (PIO1) are on independent blocks so they *could* run together; the swap is a
+   policy choice for a clean DUT state, not a hardware requirement, and could be
+   dropped to enable capturing DUT pins mid-debug-session (item 7).
 2. **Output format: VCD**, decoded host-side. Opens in GTKWave / PulseView
    (sigrok) / most viewers, no extra runtime dependency.
 3. **Capture transport: DMA primary, polled fallback.** `rp2.DMA` is confirmed

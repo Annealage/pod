@@ -25,7 +25,7 @@ def _ensure(clkdiv=8):
     global _dp, _ap, _cm, _flash, _fpb
     if _dp is None:
         from . import pio_arbiter
-        pio_arbiter.claim("swd", 1)   # PIO1 (PIO0 = Wi-Fi, PIO2 = analyser)
+        pio_arbiter.claim("swd", 1)   # PIO1 (PIO2 = CYW43 Wi-Fi, PIO0 = analyser)
         _dp = swd_dap.DebugPort(swdio=14, swclk=15, sm_id=4, clkdiv=clkdiv)
         _ap = swd_dap.MEMAP(_dp)
         _cm = swd_dap.CortexM(_ap)
@@ -246,17 +246,20 @@ def close():
     return {"ok": True}
 
 
-# -- Logic analyser (Track 2): swap SWD out, capture, leave SWD down ---------
-# The analyser and SWD never run at once. la_capture / la_stream close the SWD
-# session first (which releases PIO1 via the arbiter), run the capture on PIO2,
-# then release the analyser. SWD is restored lazily: the next debug op re-runs
-# _ensure and rebuilds it.
+# -- Logic analyser (Track 2): capture DUT pins on PIO0 -----------------------
+# The analyser runs on PIO0 (the free block; SWD is PIO1, CYW43 Wi-Fi is PIO2).
+# It must never touch PIO2: building a state machine there while Wi-Fi is live
+# corrupts the running CYW43 SM and hard-wedges the chip (the bug that made
+# la_stream hang over Wi-Fi). la_capture / la_stream still close the SWD session
+# first as a conservative default - PIO0 and PIO1 are independent so they could
+# coexist, but a live debug session and a capture are rarely wanted at once, and
+# closing guarantees a defined DUT state. SWD is restored lazily on the next op.
 
 _la_last = None   # last capture buffer, kept for in-pod inspection
 
 
 def la_capture(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
-               sm_id=10):
+               sm_id=0):
     # Capture into pod RAM and return a summary (the buffer is kept in _la_last
     # rather than shipped over the REPL). Use la_stream for the host path.
     global _la_last
@@ -274,7 +277,7 @@ def la_capture(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
 
 
 def la_stream(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
-              port=3336, sm_id=10, accept_timeout=20):
+              port=3336, sm_id=0, accept_timeout=20):
     # Capture and stream the raw packed words to the host over TCP, no pod FS.
     # Wire: a 16-byte little-endian header (words, width, clkdiv, complete) then
     # words*4 bytes of samples. The host computes rate = 150e6 / clkdiv.

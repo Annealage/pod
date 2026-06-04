@@ -5,9 +5,11 @@
 # program and sampling were validated on the rig (a 1 kHz PWM recovered exactly
 # at 100 kHz polled and 1 MHz DMA); see docs/rp2350/logic-analyser.md.
 #
-# PIO budget: the LA runs on PIO2 (SM10 by default; PIO0=Wi-Fi, PIO1=SWD). The
-# `ops` layer swaps SWD out via the PIO arbiter before a capture so the two are
-# never live at once, per the settled design.
+# PIO budget: the LA runs on PIO0 (SM0 by default). On the RP2350 Pico 2 W,
+# CYW43 Wi-Fi runs on PIO2 and SWD on PIO1, so PIO0 is the free block. Building
+# a state machine on PIO2 while Wi-Fi is live hard-wedges the chip (it corrupts
+# the running CYW43 SM), which is why the LA must NOT use PIO2 - see
+# docs/rp2350/logic-analyser.md.
 #
 # DMA register facts, validated on this silicon (RP2350):
 #   PIO block base = 0x50200000 + block*0x100000   (PIO0/1/2)
@@ -76,13 +78,15 @@ class LogicAnalyser:
     """A PIO logic analyser on one PIO state machine, DMA into a RAM buffer.
 
     base_pin: lowest GPIO sampled; width: number of contiguous GPIOs (1..32).
-    sm_id 8..11 are PIO2 (10 is the validated default; 8 is externally claimed).
+    sm_id 0..3 are PIO0, the free block (0 is the validated default). Do NOT use
+    PIO2 (sm_id 8..11): that is the live CYW43 Wi-Fi block and touching it wedges
+    the chip. PIO1 (4..7) is the SWD transport.
     """
 
     # Cap the capture buffer so a request cannot exhaust pod RAM.
     MAX_WORDS = 20000   # 80 KB
 
-    def __init__(self, base_pin, width=1, sm_id=10):
+    def __init__(self, base_pin, width=1, sm_id=0):
         if not (1 <= width <= 32):
             raise ValueError("width must be 1..32")
         self.base_pin = base_pin

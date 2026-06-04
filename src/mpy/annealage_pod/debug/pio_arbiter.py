@@ -1,21 +1,23 @@
 # PIO block-claim bookkeeping for the pod (Track 2).
 #
-# Three PIO blocks (0/1/2), 4 SMs and 32 instruction words each. PIO0 is
-# permanently CYW43 Wi-Fi. The SWD debug stack (PIO1) and the logic analyser
-# (PIO2) each claim a block; this records claims so a second consumer cannot
-# silently stomp a live one, and so the "swap SWD out for the analyser" policy
-# is explicit and inspectable.
+# Three PIO blocks (0/1/2), 4 SMs and 32 instruction words each. On the RP2350
+# Pico 2 W, CYW43 Wi-Fi runs on PIO2 (SM0) - it claims a free SM that can reach
+# its high-numbered WL pins, which lands on PIO2, NOT PIO0 as on the RP2040.
+# Touching PIO2 (building a state machine there) while Wi-Fi is live corrupts
+# the CYW43 SM and hard-wedges the chip, so PIO2 is reserved and off-limits.
+# The SWD debug stack uses PIO1; the logic analyser uses PIO0 (free). This
+# records claims so a second consumer cannot silently stomp a live one.
 #
 # This is bookkeeping only - it does not tear down PIO programs itself. The
-# owners do that in their own release() (SWDPio.release / LogicAnalyser.release),
-# and `ops` drives the swap. Block 0 (Wi-Fi) is never claimable.
+# owners do that in their own release() (SWDPio.release / LogicAnalyser.release).
+# Block 2 (Wi-Fi) is never claimable.
 
 
 class PioConflict(Exception):
     pass
 
 
-_RESERVED = {0: "cyw43"}     # block -> permanent owner
+_RESERVED = {2: "cyw43"}     # block -> permanent owner (PIO2 = CYW43 Wi-Fi)
 _claims = {}                 # block -> owner
 
 

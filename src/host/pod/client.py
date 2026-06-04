@@ -400,7 +400,7 @@ class Pod:
 
     def logic_analyse(self, base_pin: int, width: int = 1, rate: int = 1000000,
                       depth: int = 8000, trigger=None, out_path: str = "capture.vcd",
-                      port: int = 3336, sm_id: int = 10, names=None) -> dict:
+                      port: int = 3336, sm_id: int = 0, names=None) -> dict:
         """Capture DUT pins with the pod logic analyser and write VCD to out_path.
 
         Swaps SWD out on the pod, captures `depth` samples of `width` contiguous

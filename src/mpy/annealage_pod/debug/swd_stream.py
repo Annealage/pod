@@ -21,11 +21,18 @@
 # via the normal DP/AP path, then verifies the written region and checks the
 # DP CTRL/STAT sticky bits, so a dropped write is caught.
 #
-# It lives on PIO2 (general SWD is PIO1, CYW43 is PIO0) because it does not fit
-# alongside the general program in one block's 32-instruction memory. PIO1 and
-# PIO2 cannot both drive GP14/GP15 at once, so the GPIO function mux is switched
-# between them around each burst (the discovered funcsel values are read back
-# from the pads, not hard-coded).
+# It needs its own PIO block (general SWD is PIO1) because it does not fit
+# alongside the general program in one block's 32-instruction memory. The two
+# blocks cannot both drive GP14/GP15 at once, so the GPIO function mux is
+# switched between them around each burst (the discovered funcsel values are
+# read back from the pads, not hard-coded).
+#
+# WARNING (RP2350 Pico 2 W): CYW43 Wi-Fi runs on PIO2, so the streamer must use
+# PIO0 (the free block), NOT PIO2 - building a state machine on PIO2 while Wi-Fi
+# is live hard-wedges the chip. This path is off by default (NRF52Flash is
+# constructed with streamer=None) and is UNVALIDATED on the RP2350-with-Wi-Fi
+# config; the default sm_id below is set to PIO0 accordingly but not yet
+# hardware-checked. See docs/rp2350/logic-analyser.md for the PIO map.
 
 import rp2
 import time
@@ -122,10 +129,11 @@ def _drw_write_request():
 class DRWStreamer:
     # Wraps the general transport's pins on a second PIO block. The general
     # SWDPio (PIO1) does setup and verify; this drives the DRW write burst.
-    def __init__(self, swd, sm_id=9):
-        # sm_id 8..11 = PIO2 (PIO0 is CYW43, PIO1 is the general SWD transport).
-        # SM 8 (PIO2 SM0) is claimed by an external resource on this build, so
-        # default to SM 9. Shares the SWDIO/SWCLK pins with `swd` (PIO1).
+    def __init__(self, swd, sm_id=1):
+        # sm_id 0..3 = PIO0, the free block (PIO1 is the general SWD transport,
+        # PIO2 is the live CYW43 Wi-Fi block and MUST be avoided - see the module
+        # header warning). Default to PIO0 SM1. Shares SWDIO/SWCLK with `swd`
+        # (PIO1) via funcsel switching. UNVALIDATED on RP2350-with-Wi-Fi.
         self.swd = swd
         self.swdio = swd.swdio
         self.swclk = swd.swclk

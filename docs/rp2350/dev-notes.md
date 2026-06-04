@@ -169,3 +169,35 @@ that is a separate, deliberate operation, not part of the flash path.
   sampling phase is the limit. Reaching the >= 10 MHz gate target needs input-
   phase PIO tuning (add a settle cycle / restructure the read), not just a lower
   clkdiv.
+
+## 8. CYW43 Wi-Fi is on PIO2, not PIO0 - never build a PIO SM on PIO2
+
+On the RP2350 Pico 2 W the CYW43 wireless SPI runs on **PIO2 SM0**, not PIO0 as
+on the RP2040. The pico-sdk claims a free SM that can reach the high-numbered WL
+pins (`pio_claim_free_sm_and_add_program_for_gpio_range`), which lands on PIO2.
+Confirm on a live pod by reading the PIO enable registers (CTRL bit per SM):
+
+```python
+import machine
+for blk, b in ((0,0x50200000),(1,0x50300000),(2,0x50400000)):
+    print('PIO%d CTRL=0x%08x' % (blk, machine.mem32[b]))   # PIO2 CTRL=0x1 => SM0 live
+```
+
+Constructing a `rp2.StateMachine` on PIO2 (or otherwise touching its instruction
+memory / SMs) while Wi-Fi is actively servicing a socket **corrupts the running
+CYW43 SM and hard-wedges the whole chip**: the REPL dies, Ctrl-C does nothing,
+and only a power-cycle (`uhubctl -l 3-1 -p 3 -a cycle`) recovers it. The wedge is
+timing-sensitive - it needs the tight, un-yielded SM-construction sequence to
+coincide with Wi-Fi activity, so adding `print`/`sleep_ms` between steps masks it
+(a Heisenbug). The logic analyser originally defaulted to PIO2 (`sm_id=10`) and
+hung exactly this way over Wi-Fi; it now uses **PIO0** (`sm_id=0`).
+
+PIO block map for the pod: **PIO0 = free** (logic analyser), **PIO1 = SWD**,
+**PIO2 = CYW43 Wi-Fi (off-limits)**. Any new PIO consumer (SWO, I2C/SPI bitbang,
+the optional DRW write-streamer) must use PIO0 or PIO1, never PIO2.
+
+To debug a tight-sequence wedge like this, drive the suspect path over the Wi-Fi
+REPL and watch the pod over the USB-CDC REPL out-of-band (the two REPLs share the
+main thread, so a Ctrl-C on one interrupts the other - but passive reads and
+single-checkpoint / truncation probes localise the wedging call without the
+yields that mask it).

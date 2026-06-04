@@ -255,7 +255,7 @@ class _FakeSock:
 
 class TestLogicAnalyser:
     def test_la_stream_cmd_basic(self):
-        cmd = Pod._la_stream_cmd(16, 1, 1000000, 8000, None, 3336, 10)
+        cmd = Pod._la_stream_cmd(16, 1, 1000000, 8000, None, 3336, 0)
         assert "la_stream" in cmd
         assert "16" in cmd
         assert "width=1" in cmd
@@ -263,10 +263,10 @@ class TestLogicAnalyser:
         assert "depth=8000" in cmd
         assert "trigger=None" in cmd
         assert "port=3336" in cmd
-        assert "sm_id=10" in cmd
+        assert "sm_id=0" in cmd
 
     def test_la_stream_cmd_trigger(self):
-        cmd = Pod._la_stream_cmd(16, 8, 2000000, 4000, (16, "rise"), 3336, 10)
+        cmd = Pod._la_stream_cmd(16, 8, 2000000, 4000, (16, "rise"), 3336, 0)
         assert "width=8" in cmd
         assert "rate=2000000" in cmd
         assert "trigger=(16, 'rise')" in cmd

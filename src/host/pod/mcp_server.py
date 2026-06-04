@@ -200,7 +200,7 @@ def handle_adc(label: str, pin: int) -> dict:
 
 def handle_logic_analyse(label: str, base_pin: int, width: int = 1,
                          rate: int = 1000000, depth: int = 8000, trigger=None,
-                         out_path: str = "capture.vcd", sm_id: int = 10,
+                         out_path: str = "capture.vcd", sm_id: int = 0,
                          names=None) -> dict:
     """Capture DUT pins with the pod logic analyser and write a VCD file."""
     trig = tuple(trigger) if trigger else None
@@ -447,7 +447,7 @@ def build_server():
                         "depth": {"type": "integer", "description": "Samples to capture.", "default": 8000},
                         "trigger": {"type": "array", "items": {}, "description": "[pin, cond], cond in rise/fall/high/low; omit for immediate."},
                         "out_path": {"type": "string", "description": "Output VCD path.", "default": "capture.vcd"},
-                        "sm_id": {"type": "integer", "description": "PIO2 state machine id.", "default": 10},
+                        "sm_id": {"type": "integer", "description": "PIO0 state machine id (PIO2 is CYW43 Wi-Fi).", "default": 0},
                         "names": {"type": "array", "items": {"type": "string"}, "description": "Channel names, low pin first."},
                     },
                     "required": ["label", "base_pin"],
