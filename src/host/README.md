@@ -176,9 +176,9 @@ nRF52840 controller: the pod presents the register file via the helper, the DUT
 reads it (`readfrom_mem`) and writes it (`writeto_mem`), and the host reads back
 what the DUT wrote.
 The PIO logic analyser (`logic_analyse` / `pod la`, Track 2) is implemented and
-its pieces are hardware-validated (DMA capture at 1 MHz, the SWD<->LA swap, the
-VCD decoder, non-wedging socket teardown); the live Wi-Fi capture round-trip is
-pending on the pod's Wi-Fi reconnect reliability (see
-`../../docs/rp2350/logic-analyser.md`).
+hardware-validated end-to-end, including the live Wi-Fi capture round-trip
+(capture -> stream -> VCD, reliable on PIO0; the earlier hang was the LA running
+on PIO2, the CYW43 Wi-Fi block, now fixed). For DUT wiring and usage, see
+"Using the logic analyser" in `../../docs/rp2350/logic-analyser.md`.
 `usbip_attach` (Phase 4) and `uart_stream` / `telemetry` (Phase 5) remain
 stubbed and raise with the pending phase.

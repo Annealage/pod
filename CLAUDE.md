@@ -36,9 +36,10 @@ and naming conventions.
   the curated helpers (hardware I2C target / GPIO / ADC), distinct from the SWD
   debug stack.
 - `docs/rp2350/logic-analyser.md`: the PIO logic analyser
-  (`annealage_pod.debug.logic_analyser`) + the PIO arbiter that swaps PIO blocks
-  between SWD and the analyser. DMA capture / swap / VCD decode validated; the
-  live Wi-Fi streaming round-trip is Wi-Fi-reliability-blocked.
+  (`annealage_pod.debug.logic_analyser`) + the PIO arbiter. Validated end-to-end
+  including the live Wi-Fi capture round-trip (LA on PIO0; the earlier hang was
+  the LA colliding with CYW43 Wi-Fi on PIO2). Includes DUT wiring + usage and the
+  authoritative PIO block map (`pio_arbiter.PIO_MAP`).
 - `src/host/README.md`: usage of the host `pod` tooling - the CLI, the `Pod`
   Python client, the MCP server, and the discover/register/flash/reset/read
   workflow over Wi-Fi.

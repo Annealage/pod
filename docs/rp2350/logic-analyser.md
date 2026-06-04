@@ -53,22 +53,20 @@ setup/teardown does not leak PIO instruction memory.
 `annealage_pod/debug/pio_arbiter.py` - the single owner of PIO block / SM / pin /
 program-space claims, so no two consumers fight over the same silicon.
 
-```python
-# One process-wide arbiter instance.
-class PioArbiter:
-    # Static map of what is permanently reserved (PIO2 = CYW43 Wi-Fi).
-    def claim(self, owner, block, n_sms=1, pins=(), instrs=0): ...
-        # Grant (block, SMs, pins) to `owner`, or raise PioConflict naming the
-        # current holder. Records the claim.
-    def release(self, owner): ...
-        # Drop `owner`'s claim (caller has already torn its program/pins down).
-    def holder(self, block): ...        # who owns a block, or None
-    def status(self): ...               # {block: owner, ...} for introspection
+It is a module (not a class) of process-wide bookkeeping:
 
-# Higher-level: the SWD<->LA swap the user asked for.
-def to_logic_analyser(...):   # ensure SWD is fully torn down, claim its block + pins for the LA
-def to_swd():                 # tear the LA down, let ops._ensure rebuild SWD
+```python
+PIO_MAP                  # authoritative block -> {owner, sm, reserved, note} (source of truth)
+claim(owner, block)      # grant a block to `owner`; raise PioConflict if held/reserved; idempotent per owner
+release(owner)           # drop every block claimed by `owner` (caller has torn its program/pins down)
+holder(block)            # who owns a block (claimed or reserved), or None
+status()                 # {block: owner, ...} snapshot (reserved + claimed)
 ```
+
+There is no separate `to_logic_analyser`/`to_swd` entry point; `ops` drives the
+swap directly. `ops.la_capture`/`la_stream` call `ops.close()` (which releases
+the `swd` claim and frees PIO1) then `claim("la", 0)`; `ops._ensure` claims PIO1
+for `swd` and `ops.close()` releases it.
 
 Integration points:
 - `ops` (SWD) registers its PIO1 claim through the arbiter in `_ensure`, and its
@@ -131,10 +129,117 @@ small captures the REPL return path also works.
 
 - `pod/vcd.py`: decode raw packed samples -> VCD (GTKWave / PulseView / sigrok
   read VCD). Inputs: width, sample rate, channel names; output: a `.vcd` file.
-- `Pod.logic_analyse(pins, rate, depth, trigger=..., out='cap.vcd')` orchestrates
-  the swap (to_logic_analyser), capture, stream, decode, restore (to_swd).
+- `Pod.logic_analyse(base_pin, width, rate, depth, trigger=..., out_path='cap.vcd',
+  names=...)` invokes `ops.la_stream` over the REPL, connects the data socket,
+  receives the header + packed words, and decodes to VCD. The pod side runs the
+  SWD swap, capture, and stream; SWD rebuilds lazily on the next debug op.
 - CLI `pod la <label> --pins 16-23 --rate 1e6 --depth 20000 [--trigger 16:rise]
   --out cap.vcd`; MCP tool `logic_analyse`.
+
+## Using the logic analyser
+
+One capture: it samples a contiguous block of pod GPIOs into RAM, streams the
+packed words to the host, and writes a `.vcd` you open in GTKWave / PulseView
+(sigrok). It runs on PIO0; starting a capture first closes any live SWD debug
+session (the conservative swap), so do captures and single-stepping as separate
+steps.
+
+**Pin model.** A capture is defined by `base_pin` (the lowest GPIO) and `width`
+(how many *contiguous* GPIOs). Channel k samples `GP(base_pin + k)`:
+
+| `--pins` | base_pin | width | channels |
+|---|---|---|---|
+| `16` | 16 | 1 | ch0 = GP16 |
+| `16-19` | 16 | 4 | ch0=GP16, ch1=GP17, ch2=GP18, ch3=GP19 |
+
+So the pins you wire must be a contiguous run; pick `base_pin`/`width` to cover
+them. `--names CLK,MOSI,MISO,CS` labels channels low-pin-first in the VCD.
+
+**Which pod pins to use.** Capture pins must be free header GPIOs in the
+`base_pin .. base_pin+width-1` range (PIO0 addresses GP0-GP31, so keep
+`base_pin + width <= 32`). On the pod:
+
+- Free for capture: **GP16-GP22** and **GP26-GP28** (also GP0-GP9 if unused).
+- Avoid **GP14/GP15** (SWD SWDIO/SWCLK), and **GP10/GP11** if the I2C target
+  peripheral is in use.
+- **GP23/24/25/29 are not on the header** - they are the internal CYW43 Wi-Fi
+  pins (PIO2), so you cannot and must not touch them.
+
+`GP16-GP21` is the recommended default block (contiguous, clear of SWD and I2C).
+
+**Capture parameters.**
+
+- `rate` (Hz): actual rate is `150e6 / clkdiv` (clkdiv 1..65535), so ~2.3 kHz to
+  150 MHz; the result reports the *actual* rate after clkdiv rounding. Choose at
+  least ~4-10x the fastest edge you need to resolve.
+- `depth` (samples): bounded by an 80 KB buffer. `words = ceil(depth*width/32)`
+  must be `<= 20000`, i.e. `depth <= 640000/width` (640k @ width 1, 80k @ width
+  8). Over that, depth is silently clamped and `depth` in the result is the
+  actual.
+- `trigger=(pin, cond)`, `cond` in `rise`/`fall`/`high`/`low`: capture waits for
+  the condition then runs; omit for immediate. `complete=False` in the result
+  means the trigger never fired within the time budget.
+
+**Invoking.**
+
+```bash
+# CLI: capture an SPI bus on GP16-19, 2 MHz, start on CS falling
+pod la mypod --pins 16-19 --rate 2e6 --depth 8000 --trigger 19:fall \
+    --names CLK,MOSI,MISO,CS --out spi.vcd
+```
+
+```python
+# Python client
+from pod.client import Pod
+pod = Pod(address="192.168.0.133")
+r = pod.logic_analyse(base_pin=16, width=4, rate=2_000_000, depth=8000,
+                      trigger=(19, "fall"), names=["CLK", "MOSI", "MISO", "CS"],
+                      out_path="spi.vcd")
+# r: {ok, out_path, width, rate, clkdiv, words, complete, samples}
+```
+
+The MCP tool `logic_analyse` takes the same fields (`base_pin`, `width`, `rate`,
+`depth`, `trigger=[pin, cond]`, `out_path`, `names`). Open the `.vcd` with
+`gtkwave spi.vcd` or in PulseView.
+
+## Wiring the analyser to a DUT (electrical)
+
+The capture pins are plain RP2350 GPIO inputs. The two rules that protect the
+pod and give clean captures:
+
+- **3.3V logic only.** RP2350 GPIOs are **not 5V tolerant**. Drive a pod capture
+  pin only with 0-3.3V signals. For 5V (or other) logic, put a level shifter or
+  a resistor divider in line - never connect a >3.3V signal directly.
+- **Common ground is mandatory.** Tie a pod `GND` pin to the DUT ground, or the
+  samples are meaningless (and you risk the pins). Keep capture leads short for
+  fast edges.
+
+Inputs are high-impedance with no pull configured, so a wired-but-undriven or
+unconnected channel reads noise. Only capture channels you have actually wired
+(set `width` to the number of connected signals), or expect junk on the rest.
+
+## Guiding a user to wire it up (agent checklist)
+
+When helping a user set up a capture, walk them through:
+
+1. **Identify the signals** to observe on the DUT and their logic voltage.
+   Confirm each is <= 3.3V; if higher, tell them to add a level shifter before
+   touching a pod pin.
+2. **Pick a contiguous pod GPIO block** for the channels from the free set
+   (default `GP16-GP21`; avoid GP14/15 and GP10/11-if-I2C). The lowest pin is
+   `base_pin`, the count is `width`; channel order is low-pin-first.
+3. **Wire it:** each DUT signal to its pod `GPn`, and a **pod GND to DUT GND**
+   (shared reference, not optional). Short leads for MHz signals.
+4. **Choose a trigger** if the event is sparse (e.g. CS falling, or a clock
+   edge), otherwise immediate.
+5. **Pick rate and depth:** rate >= ~4-10x the fastest edge; keep
+   `ceil(depth*width/32) <= 20000` words.
+6. **Run** `pod la <label> --pins <base-last> --rate <Hz> --depth <n>
+   [--trigger <pin>:<cond>] --names <a,b,...> --out cap.vcd`, then open
+   `cap.vcd` in GTKWave/PulseView. Map the names to the wired signals.
+
+If `complete=False`, the trigger never fired (check the trigger pin/edge or wire
+it); if a channel is flat/noisy, check that pin's wire and the shared ground.
 
 ## Hardware-validation checklist
 
