@@ -32,7 +32,7 @@
 # is live hard-wedges the chip. This path is off by default (NRF52Flash is
 # constructed with streamer=None) and is UNVALIDATED on the RP2350-with-Wi-Fi
 # config; the default sm_id below is set to PIO0 accordingly but not yet
-# hardware-checked. See docs/rp2350/logic-analyser.md for the PIO map.
+# hardware-checked. Authoritative block map: annealage_pod.debug.pio_arbiter.PIO_MAP.
 
 import rp2
 import time

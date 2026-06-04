@@ -24,22 +24,20 @@ Two coupled pieces:
 
 ## The PIO budget (corrected for the RP2350 Pico 2 W)
 
-The RP2350 has 3 PIO blocks (4 SMs each, 32 instruction words each). The actual
-owners, read off the live `PIO->CTRL` registers on the pod:
-
-| Block | Owner | Notes |
-|---|---|---|
-| PIO0 | **logic analyser** (free block) | LA `LogicAnalyser(sm_id=0)` default |
-| PIO1 | SWD transport (`swd_prog` ~28 instr) | owns GP14/GP15 |
-| PIO2 | **CYW43 Wi-Fi (SM0)** | permanent, off-limits, hard-wedges if touched |
+The RP2350 has 3 PIO blocks (4 SMs each, 32 instruction words each). The
+**authoritative block map lives in code at `annealage_pod.debug.pio_arbiter.PIO_MAP`**
+(the single source of truth; this doc and others point there rather than
+restating it). In summary: **PIO0 = logic analyser** (free block, `sm_id=0`),
+**PIO1 = SWD** (owns GP14/GP15), **PIO2 = CYW43 Wi-Fi** (reserved, off-limits).
 
 Important: on the RP2350 Pico 2 W the CYW43 driver claims a free SM that can
 reach its high-numbered WL pins (`pio_claim_free_sm_and_add_program_for_gpio_range`
 in the pico-sdk), which lands on **PIO2 SM0** - NOT PIO0 as on the RP2040. This
 was confirmed by reading the PIO enable registers (PIO2 `CTRL=0x1`, SM0 running;
-PIO0/PIO1 idle). Building a state machine on PIO2 while Wi-Fi is live corrupts
-the running CYW43 SM and hard-wedges the whole chip (REPL dead, Ctrl-C dead,
-recover only by power-cycle). So **the LA must use PIO0** and PIO2 is reserved.
+PIO0/PIO1 idle; the recipe is in `PIO_MAP`'s comment). Building a state machine on
+PIO2 while Wi-Fi is live corrupts the running CYW43 SM and hard-wedges the whole
+chip (REPL dead, Ctrl-C dead, recover only by power-cycle). So **the LA must use
+PIO0** and PIO2 is reserved.
 
 The arbiter reserves PIO2 for `cyw43` and records LA (PIO0) and SWD (PIO1)
 claims so a consumer cannot silently stomp a live one. Because the LA (PIO0) and

@@ -194,7 +194,9 @@ hung exactly this way over Wi-Fi; it now uses **PIO0** (`sm_id=0`).
 
 PIO block map for the pod: **PIO0 = free** (logic analyser), **PIO1 = SWD**,
 **PIO2 = CYW43 Wi-Fi (off-limits)**. Any new PIO consumer (SWO, I2C/SPI bitbang,
-the optional DRW write-streamer) must use PIO0 or PIO1, never PIO2.
+the optional DRW write-streamer) must use PIO0 or PIO1, never PIO2. The
+authoritative map (and the live-register verification recipe) is in code at
+`annealage_pod.debug.pio_arbiter.PIO_MAP` - check it before adding a consumer.
 
 To debug a tight-sequence wedge like this, drive the suspect path over the Wi-Fi
 REPL and watch the pod over the USB-CDC REPL out-of-band (the two REPLs share the

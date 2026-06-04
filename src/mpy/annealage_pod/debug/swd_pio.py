@@ -97,7 +97,8 @@ class SWDPio:
         # clkdiv=8 -> 9.375 MHz SWCLK, validated 100/100 clean on the nRF52840
         # (12.5 MHz fails: input-sampling phase limit). See spike-findings.md.
         # sm_id 4..7 = PIO1. (CYW43 Wi-Fi runs on PIO2, not PIO0, on the RP2350
-        # Pico 2 W; PIO0 is free and used by the logic analyser.)
+        # Pico 2 W; PIO0 is free and used by the logic analyser. Authoritative
+        # block map: annealage_pod.debug.pio_arbiter.PIO_MAP.)
         # Enable the SWDIO pad pull-up BEFORE StateMachine() grabs the pin;
         # reconfiguring the Pin to SIO afterwards would disconnect PIO from the
         # pad (a real bug found in bring-up), so do not.
