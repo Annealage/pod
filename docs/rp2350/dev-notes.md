@@ -203,3 +203,28 @@ REPL and watch the pod over the USB-CDC REPL out-of-band (the two REPLs share th
 main thread, so a Ctrl-C on one interrupts the other - but passive reads and
 single-checkpoint / truncation probes localise the wedging call without the
 yields that mask it).
+
+## 9. Backup UART REPL via the pico-probe (for when USB is host)
+
+Once the native USB is taken for the DUT host, the USB-CDC REPL is gone and Wi-Fi
+is the only management channel. As an out-of-band backup, the board enables a
+UART REPL (`MICROPY_HW_ENABLE_UART_REPL (1)` in `mpconfigboard.h`): a REPL on
+**UART0, GP0 = TX / GP1 = RX, 115200**. It is a separate stdio path, not the
+single `os.dupterm` slot (which the Wi-Fi socket REPL uses), so USB-CDC + UART0 +
+Wi-Fi all give a REPL at once, and UART0 survives USB switching to host mode.
+
+The pico-probe already exposes a USB-UART bridge as a second CDC interface
+(`/dev/serial/by-id/usb-Raspberry_Pi_Debugprobe_*-if01`), so one probe gives both
+SWD programming and the backup REPL. The debugprobe bridge is uart1 on the probe
+at **GP4 = TX, GP5 = RX**. Cross-wire to the pod:
+
+| Pod UART0 | wire | Probe bridge |
+|---|---|---|
+| GP0 (TX) | -> | GP5 (RX) |
+| GP1 (RX) | <- | GP4 (TX) |
+| GND | -- | GND (already common via the SWD link) |
+
+Then `mpremote connect <the probe -if01 by-id> resume` is a REPL into the pod.
+(GP0/GP1 are now reserved for this REPL and are not available as DUT/LA capture
+pins. The probe-side bridge pins are GP4/GP5 on stock debugprobe firmware, not
+GP0/GP1 - verify against your probe build, or reflash it to remap.)

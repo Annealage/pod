@@ -21,6 +21,16 @@
 // Native USB host for the DUT.
 #define MICROPY_HW_USB_HOST (1)
 
+// Backup REPL on UART0 (GP0 = TX, GP1 = RX, 115200), always-on alongside the
+// Wi-Fi socket REPL and the USB-CDC REPL. It is a separate stdio path, not the
+// single os.dupterm slot (which Wi-Fi uses), and it survives the native USB
+// switching to host mode (when there is no USB-CDC). Intended out-of-band route:
+// the pico-probe's USB-UART bridge, crossed pod GP0/GP1 <-> probe GP5/GP4 (the
+// debugprobe bridge is uart1 on GP4 = TX / GP5 = RX), so one probe gives both
+// SWD programming and a backup REPL. GP0/GP1 are therefore reserved for the REPL
+// and must not be used as DUT/LA pins. See docs/rp2350/dev-notes.md.
+#define MICROPY_HW_ENABLE_UART_REPL (1)
+
 #define MICROPY_HW_PIN_EXT_COUNT    CYW43_WL_GPIO_COUNT
 
 int mp_hal_is_pin_reserved(int n);

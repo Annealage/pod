@@ -159,7 +159,8 @@ them. `--names CLK,MOSI,MISO,CS` labels channels low-pin-first in the VCD.
 `base_pin .. base_pin+width-1` range (PIO0 addresses GP0-GP31, so keep
 `base_pin + width <= 32`). On the pod:
 
-- Free for capture: **GP16-GP22** and **GP26-GP28** (also GP0-GP9 if unused).
+- Free for capture: **GP16-GP22** and **GP26-GP28** (also GP2-GP9 if unused).
+  GP0/GP1 are the backup UART REPL (not available as capture pins).
 - Avoid **GP14/GP15** (SWD SWDIO/SWCLK), and **GP10/GP11** if the I2C target
   peripheral is in use.
 - **GP23/24/25/29 are not on the header** - they are the internal CYW43 Wi-Fi
