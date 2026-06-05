@@ -250,10 +250,13 @@ def close():
 # The analyser runs on PIO0 (the free block; SWD is PIO1, CYW43 Wi-Fi is PIO2).
 # It must never touch PIO2: building a state machine there while Wi-Fi is live
 # corrupts the running CYW43 SM and hard-wedges the chip (the bug that made
-# la_stream hang over Wi-Fi). la_capture / la_stream still close the SWD session
-# first as a conservative default - PIO0 and PIO1 are independent so they could
-# coexist, but a live debug session and a capture are rarely wanted at once, and
-# closing guarantees a defined DUT state. SWD is restored lazily on the next op.
+# la_stream hang over Wi-Fi).
+#
+# la_capture / la_stream do NOT close the SWD session: PIO0 (LA) and PIO1 (SWD)
+# are independent blocks and coexist (hardware-validated - all three of LA/SWD/
+# Wi-Fi held at once, SWD reads unchanged across a capture), so a capture can run
+# mid-debug-session without losing halt/breakpoint state. Call close() explicitly
+# if you do want to tear the SWD session down (e.g. to free PIO1 or resume the DUT).
 
 _la_last = None   # last capture buffer, kept for in-pod inspection
 
@@ -264,7 +267,6 @@ def la_capture(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
     # rather than shipped over the REPL). Use la_stream for the host path.
     global _la_last
     from . import logic_analyser, pio_arbiter
-    close()
     pio_arbiter.claim("la", sm_id // 4)
     a = logic_analyser.LogicAnalyser(base_pin, width=width, sm_id=sm_id)
     try:
@@ -289,7 +291,6 @@ def la_stream(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
     import socket
     import struct as _struct
     from . import logic_analyser, pio_arbiter
-    close()
     pio_arbiter.claim("la", sm_id // 4)
     a = logic_analyser.LogicAnalyser(base_pin, width=width, sm_id=sm_id)
     err = None

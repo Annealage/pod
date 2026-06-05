@@ -19,8 +19,8 @@ Two coupled pieces:
 2. A runtime **PIO arbiter** so the LA, the SWD debug stack, and CYW43 Wi-Fi
    never collide on a PIO block. It reserves PIO2 (Wi-Fi) and records the LA
    (PIO0) and SWD (PIO1) claims (see the budget below). The LA and SWD are on
-   independent blocks; `la_capture`/`la_stream` still swap SWD out first as a
-   conservative default.
+   independent blocks and run concurrently; `la_capture`/`la_stream` leave any
+   SWD session up (call `ops.close()` manually to tear it down).
 
 ## The PIO budget (corrected for the RP2350 Pico 2 W)
 
@@ -41,12 +41,12 @@ PIO0** and PIO2 is reserved.
 
 The arbiter reserves PIO2 for `cyw43` and records LA (PIO0) and SWD (PIO1)
 claims so a consumer cannot silently stomp a live one. Because the LA (PIO0) and
-SWD (PIO1) are now on independent blocks, they can in principle run at the same
-time; `la_capture`/`la_stream` still close any SWD session first as a
-conservative default (clean DUT state), but the mutual-exclusion is a policy
-choice, not a hardware constraint. A clean SWD release (`SWDPio.release()`:
-`active(0)` + `remove_program` + free pins) is still used so repeated
-setup/teardown does not leak PIO instruction memory.
+SWD (PIO1) are on independent blocks, they run at the same time (validated):
+`la_capture`/`la_stream` leave any SWD session up, so a capture can run
+mid-debug-session without losing halt/breakpoint state. Tear SWD down explicitly
+with `ops.close()` when you want to free PIO1 or resume the DUT. A clean SWD
+release (`SWDPio.release()`: `active(0)` + `remove_program` + free pins) is used
+there so repeated setup/teardown does not leak PIO instruction memory.
 
 ## PIO arbiter
 
@@ -63,10 +63,10 @@ holder(block)            # who owns a block (claimed or reserved), or None
 status()                 # {block: owner, ...} snapshot (reserved + claimed)
 ```
 
-There is no separate `to_logic_analyser`/`to_swd` entry point; `ops` drives the
-swap directly. `ops.la_capture`/`la_stream` call `ops.close()` (which releases
-the `swd` claim and frees PIO1) then `claim("la", 0)`; `ops._ensure` claims PIO1
-for `swd` and `ops.close()` releases it.
+There is no separate `to_logic_analyser`/`to_swd` entry point. `ops._ensure`
+(SWD) claims PIO1 for `swd`; `ops.la_capture`/`la_stream` claim PIO0 for `la`
+(both can be held at once). Neither tears the other down; `ops.close()` releases
+the `swd` claim and frees PIO1 when you call it explicitly.
 
 Integration points:
 - `ops` (SWD) registers its PIO1 claim through the arbiter in `_ensure`, and its
@@ -131,8 +131,8 @@ small captures the REPL return path also works.
   read VCD). Inputs: width, sample rate, channel names; output: a `.vcd` file.
 - `Pod.logic_analyse(base_pin, width, rate, depth, trigger=..., out_path='cap.vcd',
   names=...)` invokes `ops.la_stream` over the REPL, connects the data socket,
-  receives the header + packed words, and decodes to VCD. The pod side runs the
-  SWD swap, capture, and stream; SWD rebuilds lazily on the next debug op.
+  receives the header + packed words, and decodes to VCD. The pod side captures
+  on PIO0 and leaves any SWD session untouched.
 - CLI `pod la <label> --pins 16-23 --rate 1e6 --depth 20000 [--trigger 16:rise]
   --out cap.vcd`; MCP tool `logic_analyse`.
 
@@ -140,9 +140,9 @@ small captures the REPL return path also works.
 
 One capture: it samples a contiguous block of pod GPIOs into RAM, streams the
 packed words to the host, and writes a `.vcd` you open in GTKWave / PulseView
-(sigrok). It runs on PIO0; starting a capture first closes any live SWD debug
-session (the conservative swap), so do captures and single-stepping as separate
-steps.
+(sigrok). It runs on PIO0 and leaves any live SWD session up (PIO1), so you can
+capture DUT pins while halted at a breakpoint; call `pod`'s close path / `ops.close()`
+only when you want to end the SWD session.
 
 **Pin model.** A capture is defined by `base_pin` (the lowest GPIO) and `width`
 (how many *contiguous* GPIOs). Channel k samples `GP(base_pin + k)`:
@@ -290,19 +290,20 @@ it); if a channel is flat/noisy, check that pin's wire and the shared ground.
    an LA capture on PIO0 left SWD fully intact - fresh FICR reads (part `0x52840`,
    flash/ram, `ficr0`) identical before and after, `dpidr` unchanged, capture
    `complete=True`. The arbiter held all three blocks at once
-   (`{0:'la', 1:'swd', 2:'cyw43'}`) and Wi-Fi stayed up. So the swap in
-   `la_capture`/`la_stream` is not required; dropping its `ops.close()` would let
-   an agent capture DUT pins mid-debug-session without losing halt/breakpoint
-   state (pending - it changes a validated default). (2026-06-05)
+   (`{0:'la', 1:'swd', 2:'cyw43'}`) and Wi-Fi stayed up. On the back of this the
+   auto-swap was removed: `la_capture`/`la_stream` no longer call `ops.close()`,
+   so a capture leaves the SWD session up (validated on the real `la_stream` path:
+   `ops.info` before/after a capture identical, `swd_intact=True`). Call
+   `ops.close()` manually to end the session. (2026-06-05)
 
 ## Decisions (settled 2026-06-03)
 
-1. **Mutual-exclusion model: swap SWD out (conservative default).** Starting the
-   LA closes any SWD session first (`SWDPio.release`: `remove_program` + free
-   GP14/15); SWD rebuilds lazily on the next debug op. The LA (PIO0) and SWD
-   (PIO1) are on independent blocks so they *could* run together; the swap is a
-   policy choice for a clean DUT state, not a hardware requirement, and could be
-   dropped to enable capturing DUT pins mid-debug-session (item 7).
+1. **No auto-swap: LA and SWD coexist.** The LA (PIO0) and SWD (PIO1) are on
+   independent blocks and run concurrently (item 8), so `la_capture`/`la_stream`
+   leave any SWD session up - a capture can run mid-debug-session without losing
+   halt/breakpoint state. `ops.close()` (`SWDPio.release`: `remove_program` + free
+   GP14/15) stays available to tear SWD down explicitly; it is also what keeps
+   repeated SWD setup/teardown from leaking PIO instruction memory.
 2. **Output format: VCD**, decoded host-side. Opens in GTKWave / PulseView
    (sigrok) / most viewers, no extra runtime dependency.
 3. **Capture transport: DMA primary, polled fallback.** `rp2.DMA` is confirmed
