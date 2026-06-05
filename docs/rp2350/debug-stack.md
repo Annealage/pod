@@ -78,6 +78,20 @@ machines). All functions take an optional `clkdiv` (default 8).
   resets and catches the reset vector.
 - `close() -> {ok}` - resume the target and drop the cached session.
 
+### Recovering a wedged DUT (do this before a power-cycle)
+
+When the DUT is unresponsive or suspected wedged - hung firmware, a stuck
+peripheral, or a `soft_reset` that left its USB/serial enumerated-but-dead - the
+first thing to try is a **SWD system reset through the pod**: `ops.reset()` /
+`pod reset <label>` / the `reset_dut` MCP tool. SYSRESETREQ re-inits the core
+*and* peripherals (including the USB controller), so a target whose USB-CDC/REPL
+wedged re-enumerates cleanly with no physical replug or power-cycle. Use
+`mode="halt"` if you want to catch it at the reset vector instead of running.
+Only fall back to a physical power-cycle if the reset itself errors (e.g. SWD not
+connected). Validated: an nRF52840 whose USB-CDC REPL hung after a `machine.soft_reset()`
+came straight back after `ops.reset(mode="sysreset")` (a soft reset only re-inits
+the VM; the full system reset is what re-cycles USB).
+
 Driving it from the host REPL (USB-CDC for development):
 
 ```bash

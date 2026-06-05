@@ -87,7 +87,12 @@ def handle_flash_dut(label: str, image: str, target: str = None,
 
 
 def handle_reset_dut(label: str, mode: str = "sysreset") -> dict:
-    """Reset the DUT via the pod ('sysreset' to run, 'halt' to catch reset)."""
+    """Reset the DUT via the pod ('sysreset' to run, 'halt' to catch reset).
+
+    Also the first recovery step for an unresponsive/wedged DUT: a SWD system
+    reset re-inits the core and peripherals (incl. USB), so a hung target
+    re-enumerates cleanly without a physical power-cycle.
+    """
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
@@ -300,7 +305,17 @@ def build_server():
             ),
             Tool(
                 name="reset_dut",
-                description="Reset the DUT via the on-pod debug probe.",
+                description=(
+                    "Reset the DUT via the on-pod debug probe (SWD SYSRESETREQ). "
+                    "FIRST thing to try when the DUT is unresponsive or suspected "
+                    "wedged (hung firmware, a soft-reset that left its USB/serial "
+                    "hung, a stuck peripheral): a system reset re-inits the core "
+                    "AND peripherals (incl. USB), so a target whose USB-CDC/REPL "
+                    "wedged re-enumerates cleanly - no physical replug/power-cycle "
+                    "needed. Use mode 'sysreset' to reset and run, 'halt' to reset "
+                    "and catch the reset vector for debugging. Only fall back to a "
+                    "physical power-cycle if the reset itself reports an error "
+                    "(e.g. SWD not connected)."),
                 inputSchema={
                     "type": "object",
                     "properties": {

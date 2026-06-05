@@ -149,11 +149,18 @@ agent drives the hardware loop with the same verbs:
 | `gpio` | read or drive a pod GPIO |
 | `adc` | sample a pod ADC channel |
 | `peripheral_release` | release a named pod peripheral instance, or all |
-| `logic_analyse` | PIO-capture DUT pins (swaps SWD out) and write a VCD file |
+| `logic_analyse` | PIO-capture DUT pins on PIO0 (coexists with a live SWD session) and write a VCD file |
 
 The loop an agent runs: edit DUT firmware -> `flash_dut` -> `reset_dut` ->
 observe (`dut_exec`, or have the pod present an `i2c_target` / `gpio` the DUT
 exercises) -> repeat.
+
+**DUT unresponsive / suspected wedged?** First try `reset_dut` (`pod reset
+<label>`): a SWD system reset re-inits the target's core *and* peripherals
+(including USB), so a DUT whose USB/serial hung (e.g. after a `soft_reset`)
+re-enumerates cleanly with no physical replug or power-cycle. Use `--mode halt`
+to catch the reset vector. Only resort to a physical power-cycle if the reset
+itself errors (SWD not connected). See `../../docs/rp2350/debug-stack.md`.
 
 ## Tests
 
