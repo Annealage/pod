@@ -285,9 +285,15 @@ it); if a channel is flat/noisy, check that pin's wire and the shared ground.
    correctly mapped (low pin = ch0), `complete=True`. Confirms the DUT-wiring
    guide end-to-end (external signal source, real pins, decode fidelity).
    (2026-06-05)
-8. [ ] LA(PIO0)+SWD(PIO1) simultaneous coexistence: now possible (independent
-   blocks) but not yet validated; `la_capture`/`la_stream` still swap SWD out
-   first. A follow-up could drop the swap to capture DUT pins mid-debug-session.
+8. [x] LA(PIO0) + SWD(PIO1) + CYW43(PIO2) simultaneous coexistence: validated.
+   With a live SWD session on PIO1 (nRF52840 target, DPIDR `0x2ba01477`), running
+   an LA capture on PIO0 left SWD fully intact - fresh FICR reads (part `0x52840`,
+   flash/ram, `ficr0`) identical before and after, `dpidr` unchanged, capture
+   `complete=True`. The arbiter held all three blocks at once
+   (`{0:'la', 1:'swd', 2:'cyw43'}`) and Wi-Fi stayed up. So the swap in
+   `la_capture`/`la_stream` is not required; dropping its `ops.close()` would let
+   an agent capture DUT pins mid-debug-session without losing halt/breakpoint
+   state (pending - it changes a validated default). (2026-06-05)
 
 ## Decisions (settled 2026-06-03)
 
