@@ -228,3 +228,9 @@ Then `mpremote connect <the probe -if01 by-id> resume` is a REPL into the pod.
 (GP0/GP1 are now reserved for this REPL and are not available as DUT/LA capture
 pins. The probe-side bridge pins are GP4/GP5 on stock debugprobe firmware, not
 GP0/GP1 - verify against your probe build, or reflash it to remap.)
+
+Validated end-to-end (2026-06-08): a full REPL into the pod over the bridge, and
+it survives host mode - `machine.USBHost().active(True)` drops the USB-CDC REPL
+while the UART REPL keeps working (used it to run `machine.reset()` and recover).
+Note `machine.USBHost().active(False)` does NOT re-enumerate the USB-CDC device;
+a `machine.reset()` is needed to return to USB-CDC dev mode.
