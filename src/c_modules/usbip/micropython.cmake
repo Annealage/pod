@@ -1,27 +1,36 @@
 # mpy-pod usbip user C module.
 #
-# Phase 2 (WS-A): TCP/3240 listener, USB/IP protocol multiplexer with
-# real-USB (via usbhost stub) and synthetic (virtual_device_t) backends.
+# TCP/3240 USB/IP server. Two transports, selected by target:
+#   - ESP32-S3 : FreeRTOS tasks + lwIP BSD sockets (usbip_server.c), with the
+#     synthetic CMSIS-DAP virtual-device multiplexer.
+#   - RP2350   : lwIP-RAW callback state machine (usbip_server_rp2.c), forwarding
+#     the DUT only (busid 1); no synthetic device.
+# The protocol codec (usbip_proto.c) and the device-record/registry types
+# (virtual_device.c) are platform-neutral and shared by both.
 
 add_library(usermod_usbip INTERFACE)
 
-target_sources(usermod_usbip INTERFACE
-    ${CMAKE_CURRENT_LIST_DIR}/modusbip.c
-    ${CMAKE_CURRENT_LIST_DIR}/usbip_server.c
-    ${CMAKE_CURRENT_LIST_DIR}/usbip_proto.c
-    ${CMAKE_CURRENT_LIST_DIR}/virtual_device.c
-)
+if(PICO_SDK_PATH)
+    # RP2350 pod (lwIP-RAW transport, forwarder-only).
+    target_sources(usermod_usbip INTERFACE
+        ${CMAKE_CURRENT_LIST_DIR}/modusbip_rp2.c
+        ${CMAKE_CURRENT_LIST_DIR}/usbip_server_rp2.c
+        ${CMAKE_CURRENT_LIST_DIR}/usbip_proto.c
+        ${CMAKE_CURRENT_LIST_DIR}/virtual_device.c
+    )
+else()
+    # ESP32-S3 (FreeRTOS + BSD sockets transport).
+    target_sources(usermod_usbip INTERFACE
+        ${CMAKE_CURRENT_LIST_DIR}/modusbip.c
+        ${CMAKE_CURRENT_LIST_DIR}/usbip_server.c
+        ${CMAKE_CURRENT_LIST_DIR}/usbip_proto.c
+        ${CMAKE_CURRENT_LIST_DIR}/virtual_device.c
+    )
+endif()
 
 target_include_directories(usermod_usbip INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/..
 )
-
-# IDF lwIP, FreeRTOS, esp_event and esp_log headers are made
-# available to user C modules by the MicroPython esp32 port build,
-# so an explicit target_link_libraries against idf::lwip etc. is
-# unnecessary and triggers the IDF component-resolver to walk the
-# full optional-component graph (including paths that may not exist
-# in this IDF tree). Keep the link declaration on `usermod` only.
 
 target_link_libraries(usermod INTERFACE usermod_usbip)
