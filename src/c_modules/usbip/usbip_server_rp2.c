@@ -81,17 +81,22 @@
 #define USBIP_TX_CHUNK_SLOTS 12
 #endif
 
-/* URB inflight records and their OUT-staging / IN-capacity data buffers come
- * from static pools too (the URB intake runs at PendSV in the recv callback, and
- * must not touch libc malloc). A URB carries at most one data buffer (IN xor
- * OUT). The RP2350 host is full-speed, so 2 KiB covers control re-enumeration and
- * FS bulk/interrupt reads; a larger URB is rejected with -EMSGSIZE by the submit
- * validator (s_max_transfer is set to this cap). */
+/* URB inflight records and their data buffers come from static pools (the URB
+ * intake runs at PendSV in the recv callback and must not touch libc malloc).
+ * Two separately-sized pools: a larger header pool (a queued URB costs only a
+ * header; cdc-acm keeps ~16 bulk-IN read URBs pending, plus interrupt + control
+ * + writes) and a smaller data-buffer pool (claimed lazily at submit, ~one per
+ * concurrently-submitted endpoint). The RP2350 host is full-speed, so 2 KiB
+ * covers control re-enumeration and FS bulk/interrupt; a larger URB is rejected
+ * with -EMSGSIZE by the submit validator (s_max_transfer is set to this cap). */
 #ifndef USBIP_URB_BUF_CAP
 #define USBIP_URB_BUF_CAP 2048
 #endif
 #ifndef USBIP_URB_SLOTS
-#define USBIP_URB_SLOTS 4
+#define USBIP_URB_SLOTS 24
+#endif
+#ifndef USBIP_URB_DATA_SLOTS
+#define USBIP_URB_DATA_SLOTS 8
 #endif
 
 /* tcp_poll fires every POLL_INTERVAL * 500ms. A conn that has neither received
@@ -138,7 +143,7 @@ typedef struct inflight_urb {
     struct inflight_urb   *next;      /* pend-FIFO link (NULL when inflight/free) */
     usbip_decoded_header_t hdr;
     char                   busid[USBIP_BUSID_SIZE];
-    uint8_t                ep_idx;    /* flow-control lane: 0=EPX (ctrl+bulk), else interrupt EP's own */
+    uint8_t                ep_idx;    /* flow-control lane: 0=EP0/control (EPX), else the EP's own */
     uint8_t                ep_addr;   /* full EP address for backend submit/cancel */
     bool                   is_control;
     uint8_t               *out_buf;   /* OUT data stage (URB-data pool; NULL for IN) */
@@ -196,10 +201,10 @@ typedef struct conn_state {
     size_t          rx_out_have;   /* bytes accumulated into pending_out_buf */
 
     /* In-flight URB per flow-control lane (NULL = lane idle); a CMD_SUBMIT for a
-     * busy lane queues on pend_head, preserving per-lane FIFO order. Lane 0 is the
-     * shared EPX (all control + bulk, serialised by the hardware); each interrupt
-     * EP has its own lane, so an interrupt-IN that pends forever blocks only its
-     * own lane, not control / bulk on EPX. */
+     * busy lane queues on pend_head, preserving per-lane FIFO order. Lane 0 is
+     * EP0/control (the shared EPX register); every other endpoint (bulk and
+     * interrupt) has its own dedicated async hardware endpoint and its own lane,
+     * so a URB that pends forever blocks only its own lane. */
     inflight_urb_t *inflight[32];
     inflight_urb_t *pend_head;
     inflight_urb_t *pend_tail;
@@ -325,15 +330,15 @@ static void urb_release(inflight_urb_t *u)
     }
 }
 
-static uint8_t s_urb_data[USBIP_URB_SLOTS][USBIP_URB_BUF_CAP];
-static bool    s_urb_data_used[USBIP_URB_SLOTS];
+static uint8_t s_urb_data[USBIP_URB_DATA_SLOTS][USBIP_URB_BUF_CAP];
+static bool    s_urb_data_used[USBIP_URB_DATA_SLOTS];
 
 static uint8_t *urb_buf_alloc(size_t len)
 {
     if (len > USBIP_URB_BUF_CAP) {
         return NULL;
     }
-    for (size_t i = 0; i < USBIP_URB_SLOTS; i++) {
+    for (size_t i = 0; i < USBIP_URB_DATA_SLOTS; i++) {
         if (!s_urb_data_used[i]) {
             s_urb_data_used[i] = true;
             return s_urb_data[i];
@@ -347,7 +352,7 @@ static void urb_buf_release(uint8_t *p)
     if (p == NULL) {
         return;
     }
-    for (size_t i = 0; i < USBIP_URB_SLOTS; i++) {
+    for (size_t i = 0; i < USBIP_URB_DATA_SLOTS; i++) {
         if (s_urb_data[i] == p) {
             s_urb_data_used[i] = false;
             return;
@@ -1073,15 +1078,13 @@ static bool intake_dispatch(conn_state_t *conn,
     u->is_control = (hdr->ep == 0);
     u->ep_addr    = u->is_control ? 0
         : (uint8_t)(hdr->ep | (hdr->direction == USBIP_DIR_IN ? 0x80u : 0x00u));
-    /* Flow-control lane. The RP2040/RP2350 host has ONE shared hardware endpoint
-     * (EPX) for all control + bulk transfers, so they serialise on lane 0;
-     * submitting a second EPX transfer while one is in flight panics the HCD.
-     * Interrupt endpoints have dedicated hardware, so each gets its own lane - an
-     * interrupt-IN that pends (e.g. a CDC notification) never blocks EPX. */
-    bool is_interrupt = !u->is_control &&
-        usbhost_is_interrupt_endpoint(conn->busid, hdr->ep,
-                                      hdr->direction == USBIP_DIR_IN);
-    u->ep_idx = is_interrupt ? ep_index(u->ep_addr) : 0;
+    /* Flow-control lane (depth=1 per lane). On the RP2040/RP2350 host only EP0
+     * (control) uses the shared EPX register; every other endpoint - bulk AND
+     * interrupt - gets its own dedicated async hardware endpoint and polls
+     * concurrently (hcd_rp2040.c _hw_endpoint_allocate). So each non-control EP
+     * gets its own lane: a bulk-IN read that pends (device NAKing until the DUT
+     * has data) blocks only its own lane, never control or bulk-OUT. */
+    u->ep_idx = u->is_control ? 0 : ep_index(u->ep_addr);
     if (hdr->direction == USBIP_DIR_IN && hdr->transfer_buffer_length > 0) {
         u->in_capacity = (size_t)hdr->transfer_buffer_length;
     }

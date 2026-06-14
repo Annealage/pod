@@ -42,8 +42,7 @@
  * tuh_xfer_t setup/buflen UNION hazard (control: set ONLY xfer.setup); MPS
  * no-fallback (an IN with no cached MPS is refused, never silently rounded to
  * 64); the [setup(8)|data] buffer layout with IN-copy clamps (control reads from
- * buf+8, bulk from buf+0; clamp to both payload_len and in_capacity); the DWC2
- * tuh_edpt_close+tuh_edpt_open channel-recovery on abort (never close EP0).
+ * buf+8, bulk from buf+0; clamp to both payload_len and in_capacity).
  */
 
 #include "usbhost.h"
@@ -87,7 +86,7 @@
  * a transfer that needs more is refused with -EMSGSIZE. BUF_CAP carries the
  * control [setup(8)|data] layout plus an MPS-rounding margin. */
 #ifndef USBHOST_URB_SLOTS
-#define USBHOST_URB_SLOTS 4
+#define USBHOST_URB_SLOTS 8
 #endif
 #ifndef USBHOST_BUF_CAP
 #define USBHOST_BUF_CAP (8 + 2048 + 64)
@@ -927,9 +926,9 @@ int usbhost_submit_async(const char busid[USBIP_BUSID_SIZE],
  * Abort the in-flight URB on an EP. MUST be called from the main-thread
  * tuh_task context. Simplified from the esp32 original: no CAS arbitration
  * (completion and cancel never interleave), no usbh_edpt_busy probe, no synth
- * counters, no done_sem branch. Reduces to: abort, clear current_inflight,
- * deliver -ECONNRESET to the user cb, then close+open the EP (DWC2 channel
- * recovery, never EP0).
+ * counters, no done_sem branch. Reduces to: abort the hardware endpoint (real
+ * EP_ABORT quiesce on rp2350), clear current_inflight, deliver -ECONNRESET to
+ * the user cb. The endpoint stays configured for the next forwarded transfer.
  * ------------------------------------------------------------------------- */
 
 void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr)
@@ -986,36 +985,11 @@ void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr)
         }
     }
 
-    /* DWC2 channel reset: after tuh_edpt_abort_xfer the channel can stay
-     * half-allocated and subsequent tuh_edpt_xfer calls return false. Close+open
-     * forces a clean teardown + re-allocation. EP0 control is excluded; it is
-     * opened implicitly at SetAddress and tuh_edpt_close on EP0 is undefined. */
-    if (ep_addr != 0) {
-        usbhost_ep_t ep_cache;
-        memset(&ep_cache, 0, sizeof(ep_cache));
-        bool found = false;
-        for (uint8_t i = 0; i < s_state.devices[slot].num_endpoints; i++) {
-            if (s_state.devices[slot].endpoints[i].address == ep_addr) {
-                ep_cache = s_state.devices[slot].endpoints[i];
-                found = true;
-                break;
-            }
-        }
-        if (found) {
-            bool close_ok = tuh_edpt_close(dev_addr, ep_addr);
-            tusb_desc_endpoint_t ep_desc;
-            memset(&ep_desc, 0, sizeof(ep_desc));
-            ep_desc.bLength             = 7;
-            ep_desc.bDescriptorType     = 0x05;
-            ep_desc.bEndpointAddress    = ep_cache.address;
-            ep_desc.bmAttributes.xfer   = ep_cache.attributes & 0x03;
-            ep_desc.wMaxPacketSize      = ep_cache.max_packet_size;
-            ep_desc.bInterval           = ep_cache.interval;
-            bool open_ok = tuh_edpt_open(dev_addr, &ep_desc);
-            USBHOST_DBG("ep_reset ep=0x%02x close=%d open=%d",
-                        ep_addr, (int)close_ok, (int)open_ok);
-        }
-    }
+    /* The hardware endpoint is genuinely quiesced by hcd_edpt_abort_xfer above
+     * (EP_ABORT handshake + buffer-control clear) and stays configured, so the
+     * next forwarded read re-arms it cleanly. No close+open teardown is needed;
+     * doing so leaked a duplicate ep_pool slot per cancel because rp2's
+     * hcd_edpt_close is a no-op. */
 }
 
 /* -------------------------------------------------------------------------

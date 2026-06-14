@@ -1,21 +1,7 @@
-# micropython-branch-manager (mbm) configuration for the Annealage Pod build.
-# Install: uv tool install micropython-branch-manager   Usage: mbm rebase -s src/micropython
-#
-# Composes src/micropython into the integration branch `tessera` from:
-#   - machine-usbhost : native USB host (machine.USBHost) + shared TinyUSB host
-#                       infra. Carries the mp_usbh.h forward-decl fix folded in.
-#                       Pins nothing: pico-sdk, tinyusb, and micropython-lib all
-#                       inherit micropython master (the older lib pins it used to
-#                       carry were squashed out; the CDCInterface timeout fix it
-#                       once pinned belongs in a separate micropython-lib PR).
-#   - network-mdns    : expose lwIP's mDNS responder services on the network
-#                       module (network.mdns_add_service / remove_service /
-#                       announce). The real upstream-PR-candidate feature.
-#   - tinyusb-host-no-werror : temporary - stop treating the latent
-#                       unused-variable in vendored TinyUSB cdc_host.c as an
-#                       error (surfaces only when CFG_TUH_CDC_LINE_CODING/
-#                       CONTROL_ON_ENUM are unset). Drop once the TinyUSB PR
-#                       (`(void) idx;`) merges and lib/tinyusb is re-pinned.
+# micropython-branch-manager (mbm)
+# Install: pip install micropython-branch-manager
+#          or: uv tool install micropython-branch-manager
+# Usage:   mbm --help
 
 [[submodules]]
 path = "src/micropython"
@@ -35,3 +21,14 @@ title = "extmod/network: expose lwIP mDNS responder services (network.mdns_add_s
 name = "tinyusb-host-no-werror"
 pr_url = ""
 title = "rp2/tinyusb: do not -Werror unused-variable on vendored TinyUSB host sources"
+
+[[submodules.branches]]
+name = "tinyusb-rp2-host-abort"
+pr_url = "https://github.com/andrewleech/micropython/tree/tinyusb-rp2-host-abort"
+title = "lib/tinyusb: bump to rp2 host endpoint abort/close fix (hathach/tinyusb#3702)"
+
+[[submodules.branches]]
+name = "manifest_c_module"
+pr_url = "https://github.com/micropython/micropython/pull/18229"
+pr_number = 18229
+title = "Add c_module() manifest function for user C modules"
