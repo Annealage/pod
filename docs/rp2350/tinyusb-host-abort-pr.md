@@ -209,3 +209,27 @@ To land it: force-push `edpt-abort-master` to `andrewleech:rp2-host-edpt-abort`
 (updates PR #3702, with a comment that it is a reimplementation against the
 refactored driver) or open a fresh PR; the GenAI disclosure goes in the PR
 description. Pending maintainer sign-off; nothing pushed.
+
+### Validated and reviewed (2026-06-16)
+
+Hardware validation: PASS on real RP2350. A test firmware (`raspberry_pi_pico2`,
+based on `examples/host/bare_api`, linking the actual `hcd_rp2040.c`) was flashed to
+the pod over the both-cores-halted OpenOCD path and run against the nRF52840-class CDC
+device (f055:9802) on the pod's USB host port: 5x abort-then-resubmit of an active
+bulk-IN read (the original panic repro) - each `tuh_edpt_abort_xfer` returned true,
+resubmit OK, NO panic; 3x close+reopen, each OK. The pod was restored afterward
+(online, filesystem intact). Scope: the single-endpoint test exercises the active-EPX
+abort (STOP_TRANS) and close paths; the multi-EP promote branch and abort of an
+in-flight mid-packet transfer remain for the maintainer's broader testing.
+
+Principal review: PASS, no blockers or reachable majors. The cheap
+merge-recommended items are applied in commit `b414cc7d8`: RP2350 NAK-stop latch
+clear on the abort-promote branch (MINOR-3), `close` self-disarm hardening (MINOR-1),
+and the toggle / IDLE-guard / invariant comments (MINOR-2, NITs). Behaviour on the
+validated paths is unchanged; recompiled warning-free. For the PR description: the
+`hcd.h` abort contract comment is stale vs the dwc2/rp2040 reality (abort acts on
+in-flight transfers and returns true) - flag it for the maintainer rather than
+diverge from the dwc2 peer (MINOR-4).
+
+Branch `edpt-abort-master`: `6dae50c88` (impl, hardware-validated) + `b414cc7d8`
+(review fixes). Still pending maintainer sign-off + the push.
