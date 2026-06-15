@@ -33,6 +33,7 @@ _i2c = None
 def _local_i2c():
     global _i2c
     if _i2c is None and I2C is not None:
+        _pinmap.assert_esp32_carrier("carrier")
         _i2c = I2C(0, sda=Pin(_pinmap.LOCAL_I2C_SDA), scl=Pin(_pinmap.LOCAL_I2C_SCL), freq=400_000)
     return _i2c
 

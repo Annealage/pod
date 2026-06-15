@@ -48,6 +48,10 @@ class _Relay:
 
     def set(self, on):
         """Drive the relay to `on` (True = closed). Returns True iff state changed."""
+        # The relay GPIOs (GP1-GP7) are ESP32-S3 carrier numbers; on the RP2350
+        # they are unported and overlap other pod functions, so refuse to drive a
+        # relay rather than silently toggle a do-nothing software pin.
+        _pinmap.assert_esp32_carrier("relays")
         prior = bool(self._pin.value())
         new = bool(on)
         if prior == new:
@@ -82,9 +86,12 @@ class _RelayBank:
         self._pins = {}
         self._relays = {}
         for n in _RELAY_NUMBERS:
-            if Pin is not None:
+            if Pin is not None and not _pinmap._IS_RP2350:
                 p = Pin(_pinmap.RELAY_GPIO[n], Pin.OUT, value=0)
             else:
+                # Unix port (Pin is None) and RP2350 both get a software-only pin
+                # so import-time succeeds; on the RP2350 the relay GPIOs are
+                # unported ESP32-S3 numbers and _Relay.set() refuses to drive them.
                 p = _SoftPin(_pinmap.RELAY_GPIO[n], value=0)
             self._pins[n] = p
             self._relays[n] = _Relay(n, p)

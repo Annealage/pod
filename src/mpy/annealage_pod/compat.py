@@ -94,6 +94,7 @@ _led_state = {"active": False, "error": False}
 def _led_pin(idx):
     if machine is None or not hasattr(machine, "Pin"):
         return None
+    _pinmap.assert_esp32_carrier("compat status LEDs")
     gpio = _pinmap.LED_STATUS_1 if idx == 0 else _pinmap.LED_STATUS_2
     return machine.Pin(gpio, machine.Pin.OUT, value=0)
 

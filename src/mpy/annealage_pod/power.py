@@ -45,6 +45,7 @@ def _local_i2c():
     """Return the lazily-initialised local I2C bus (or None on Unix)."""
     global _i2c
     if _i2c is None and I2C is not None:
+        _pinmap.assert_esp32_carrier("power")
         _i2c = I2C(0, sda=Pin(_pinmap.LOCAL_I2C_SDA), scl=Pin(_pinmap.LOCAL_I2C_SCL), freq=400_000)
     return _i2c
 
@@ -80,14 +81,18 @@ class _Rail:
         self._ina = None
         self._last_off_ms = None
         self._cycle_count = 0
-        if Pin is not None:
-            self._pin = Pin(en_gpio, Pin.OUT, value=0)
-        else:
-            # Software-only pin so unit tests on the Unix port can
-            # drive on()/off()/cycle() and read is_on() back.
+        if Pin is None or _pinmap._IS_RP2350:
+            # Unix port (Pin is None) and RP2350 both get a software-only pin so
+            # that importing `power` (and `dut`, which imports it) does not eagerly
+            # construct a hardware Pin. On the RP2350 the enable GPIOs (GP40/GP41)
+            # are unported ESP32-S3 carrier numbers; deferring keeps `power`
+            # importable (so the GP13 nRST path in `dut` stays usable) while the
+            # guard in on() refuses to actually drive an ESP32-S3 GPIO.
             from .relays import _SoftPin
 
             self._pin = _SoftPin(en_gpio, value=0)
+        else:
+            self._pin = Pin(en_gpio, Pin.OUT, value=0)
 
     def _ina_or_none(self):
         if self._ina is None and I2C is not None:
@@ -112,6 +117,10 @@ class _Rail:
 
     def on(self):
         """Energise the rail."""
+        # The enable GPIO is an ESP32-S3 carrier number; on the RP2350 it is
+        # unported, so refuse to "energise" rather than silently toggle a
+        # software-only pin that drives nothing.
+        _pinmap.assert_esp32_carrier("power.{}.on".format(self._name))
         self._pin.value(1)
 
     def off(self):
