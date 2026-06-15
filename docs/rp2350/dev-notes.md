@@ -32,10 +32,21 @@ Always address devices and probes by their stable identity, never by a
 usually attached at once; a bare `grep MicroPython | head -1` will pick the wrong
 board.
 
-## 2. Flashing RP2350 MicroPython over SWD with probe-rs
+## 2. Flashing RP2350 MicroPython over SWD
 
-The MicroPython RP2350 `.uf2` is multi-section. `probe-rs download
---binary-format uf2` mis-handles it:
+**Use `make flash` (OpenOCD) - it halts BOTH cores first.** probe-rs `download`
+halts only core0; if core1 is running (the netboot drives XIP from flash), an
+erase interrupted while core1 reads flash wedges the external QSPI chip into
+continuous-read mode, which no SWD reset clears - only a power cycle does (this
+bricked the pod once; see the flash-XIP-wedge investigation). OpenOCD's rp2350
+`reset init` halts cm0 AND cm1 before any flash access, so `make flash` (which
+runs `openocd ... program firmware.elf verify reset`) is safe even while the pod
+is live, and it flashes the ELF directly so no UF2 flatten is needed. The
+probe-rs route below (`make flash-probe-rs`) is a fallback; use it only from a
+clean/bootrom state with no running netboot.
+
+The probe-rs route also needs a UF2 workaround. The MicroPython RP2350 `.uf2` is
+multi-section. `probe-rs download --binary-format uf2` mis-handles it:
 
 ```
 WARN probe_rs::flashing::loader: More than 1 section found in UF2 file. Using first section.

@@ -33,20 +33,17 @@ After the unplug/replug (or BOOTSEL-held power-on):
 - The half-erased image will not boot, so the pod will not come up on Wi-Fi until
   reflashed. That is expected.
 
-## 2. Make the flash path safe BEFORE reflashing (prevent a re-brick)
+## 2. Make the flash path safe BEFORE reflashing (prevent a re-brick) - DONE
 
-The brick's root cause was flashing while core1 ran XIP. Do not repeat it:
-
-- Before `probe-rs download`, get the target into a clean, non-XIP-executing
-  state. Cleanest options, in order:
-  1. Once the single-core runtime (section 5) lands there is no core1 mutator, so
-     the hazard is structurally gone - this is the real fix.
-  2. Until then, reset the chip into the bootrom (or BOOTSEL) before flashing, or
-     halt BOTH cores, so neither core is executing from flash during the erase.
-- Action item: harden the top-level `Makefile` `flash` target (and note it in
-  `dev-notes.md`) so it resets/halts before `probe-rs download`. Today `make
-  flash` does `probe-rs download` then `probe-rs reset` with no pre-halt - that is
-  what let core1 keep running. See `pod-rp2350-flash-xip-wedge` "Prevention".
+The brick's root cause was flashing while core1 ran XIP. Fixed 2026-06-16:
+`make flash` now runs OpenOCD `program firmware.elf verify reset`, whose rp2350
+`reset init` halts BOTH cores (cm0 and cm1) before any flash access, so neither
+core executes from flash during the erase. Validated on the live pod (both cores
+halted, `Verified OK`, clean reboot, no wedge). The old probe-rs path (halts only
+core0) is kept as `make flash-probe-rs` for use only from a clean/bootrom state.
+The single-core runtime (section 5) is still the structural fix that removes the
+core1 mutator entirely. See `dev-notes.md` section 2 and the
+`pod-rp2350-flash-xip-wedge` memory.
 
 ## 3. Integrate the native_async_repl consolidated SHA
 
