@@ -150,3 +150,29 @@ and `hcd_int_enable(rhport);` immediately before the function's closing brace.
 
 Steps 3-4 need the bricked pod back (see `plan/resume-after-power-cycle.md`).
 Nothing is pushed to the public PR without maintainer sign-off.
+
+### Rebase reality (2026-06-15) - supersedes step 1 above
+
+Checked out the `andrewleech/tinyusb` fork and fetched upstream: the branch base is
+**1264 commits behind** a master that **refactored the rp2040 host driver**, not
+just moved it. On master:
+
+- `hcd_edpt_abort_xfer` and `hcd_edpt_close` are STILL unimplemented (`return
+  false; // TODO`), so the PR is still wanted.
+- `ep->active` is gone, replaced by `ep->state` (`EPSTATE_IDLE/ACTIVE/PENDING/
+  PENDING_SETUP`). `epx` is now a pointer (`hw_endpoint_t *epx`) with round-robin
+  preemption, not a fixed struct, so `ep == &epx` is invalid. The abort primitive
+  is now `sie_stop_xfer()` / `USB_SIE_CTRL_STOP_TRANS`, and completion runs through
+  `xfer_complete_isr` / `epx_next_pending` / `epx_save_context` with ping-pong
+  double-buffering and interrupt-per-buf.
+
+Consequence: a rebase is NOT viable - our two commits target removed structures and
+the @claude review (and the verified fixes above) are against the old code, moot
+on master. The upstream PR needs a **rewrite** of abort/close against the new
+EPSTATE + `sie_stop_xfer` driver. The verified fixes above DO still apply to the
+pod's pinned (old) micropython-vendored tinyusb (the copy the pod firmware builds,
+where the carried fix `71b6230` lives) - so they are useful for the pod even though
+they do not fit upstream master. The pod's functionality is not at risk: it carries
+the working fix against its pinned tinyusb regardless of upstream. Direction pending
+(rewrite against new master / hold the PR / coordinate with the upstream refactor
+author).
