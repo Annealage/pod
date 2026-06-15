@@ -73,6 +73,42 @@ GP23/24/25/29 are **not on the header** - they are internal CYW43 Wi-Fi pins
 | GP20-GP22 | 26,27,29 | free (general / logic-analyser capture) | - |
 | GP26-GP28 | 31,32,34 | ADC0/1/2 (analog in) | VERIFIED |
 
+Pinout (USB connector at the top; physical pin 1 is top-left, pin 40 top-right,
+pin 20 bottom-left, pin 21 bottom-right, as on the board). `[V]` = VERIFIED pod
+function, `[S]` = SUGGESTED (untested), no tag = free/general or a power/ground
+pin. `LA` marks the logic-analyser default capture block (GP16-GP21), which
+overlaps the suggested SPI0 pins.
+
+```text
+                                  +---========---+
+                                  |    | USB |    |
+   [V] UART REPL TX   GP0  - |  1   '-----'   40 | -  VBUS
+   [V] UART REPL RX   GP1  - |  2             39 | -  VSYS
+                      GND  - |  3             38 | -  GND
+                      GP2  - |  4             37 | -  3V3_EN
+                      GP3  - |  5             36 | -  3V3(OUT)
+   [S] DUT UART TX    GP4  - |  6             35 | -  ADC_VREF
+   [S] DUT UART RX    GP5  - |  7             34 | -  GP28  ADC2       [V]
+                      GND  - |  8             33 | -  GND
+                      GP6  - |  9             32 | -  GP27  ADC1       [V]
+                      GP7  - | 10             31 | -  GP26  ADC0       [V]
+                      GP8  - | 11             30 | -  RUN
+                      GP9  - | 12             29 | -  GP22
+                      GND  - | 13             28 | -  GND
+   [V] I2C SDA        GP10 - | 14             27 | -  GP21         LA
+   [V] I2C SCL        GP11 - | 15             26 | -  GP20         LA
+                      GP12 - | 16             25 | -  GP19  SPI0 MOSI  [S] LA
+   [S] DUT nRST       GP13 - | 17             24 | -  GND
+                      GND  - | 18             23 | -  GP18  SPI0 SCK   [S] LA
+   [V] SWDIO          GP14 - | 19             22 | -  GP17  SPI0 CS    [S] LA
+   [V] SWCLK          GP15 - | 20             21 | -  GP16  SPI0 MISO  [S] LA
+                                  +--------------+
+```
+
+GP16-GP21 are the contiguous logic-analyser default capture block; the suggested
+SPI0 functions (MISO GP16, CS GP17, SCK GP18, MOSI GP19) sit inside it, so use SPI0
+or the default-block analyser one at a time, or move the analyser to GP2-GP9.
+
 Header pin numbers are the standard Raspberry Pi Pico 40-pin layout (identical on
 the Pico 2 W); confirm against the official Pico 2 W pinout diagram. Power pins of
 note: `3V3(OUT)` = pin 36, `GND` = pins 3/8/13/18/23/28/33/38, `VSYS` = pin 39,
@@ -170,20 +206,22 @@ GP4 = TX / GP5 = RX):
 So one pico-probe gives both SWD programming and a backup console. Details:
 `src/boards/ANNEALAGE_POD_RP2350/README.md` and `dev-notes.md`.
 
-### 5g. DUT reset (nRST) - SUGGESTED (untested)
+### 5g. DUT reset (nRST) - GP13 (assigned in code, untested)
 
-No RP2350 DUT-reset pin is assigned in firmware yet. **Suggested: GP13 (header pin
-17)** - it is free and sits next to the SWD cluster (GP14/GP15) at the bottom-left
-of the header, so SWDIO/SWCLK/RESET form one tidy 3-wire debug group.
+The RP2350 DUT-reset pin is **GP13 (header pin 17)**, set in `_pinmap.NRST` on the
+RP2350. It is free and sits next to the SWD cluster (GP14/GP15) at the bottom-left
+of the header, so SWDIO/SWCLK/RESET form one tidy 3-wire debug group. It has not
+been exercised on hardware yet.
 
 | Pod | DUT |
 |---|---|
-| GP13 (open-drain, suggested) | nRESET |
+| GP13 (open-drain) | nRESET |
 | GND | GND |
 
-Drive it open-drain with a pull-up, pulse low to reset. **Do not** use the value
-currently in `_pinmap.NRST` (GP14) - that is leftover ESP32-S3 carrier code and
-GP14 is SWDIO on this board (see Open decisions).
+Drive it open-drain with a pull-up, pulse low to reset. `_pinmap.NRST` resolves to
+GP13 on the RP2350 (`sys.platform == "rp2"`) and stays GP14 on the ESP32-S3
+carrier, so the earlier collision (the ESP32-S3 value 14 equals SWDIO on this
+board) is fixed; see Open decisions.
 
 ### 5h. DUT UART bridge - SUGGESTED (untested)
 
@@ -272,12 +310,12 @@ The guide is complete for the VERIFIED interfaces. These items block writing the
 full guide and need a hardware decision plus a firmware change before the
 SUGGESTED sections can be promoted to VERIFIED:
 
-- **DUT nRST pin.** Assign a real free GP (suggested GP13) and fix `dut.py` /
-  `_pinmap.py`. Today `_pinmap.NRST = 14` is the ESP32-S3 carrier value and
-  collides with SWDIO (GP14) on the RP2350; the whole `_pinmap` /
-  `power` / `relays` / `dut` / `carrier` cluster is unported ESP32-S3 carrier code
-  and should be quarantined or ported so `pod reset --mode nrst` cannot drive the
-  SWD line once `plan/phase-5` wires it up.
+- **DUT nRST pin.** Done in code (needs a hardware test). `_pinmap.NRST` is now
+  GP13 on the RP2350 (GP14 only on the ESP32-S3 carrier), so it can no longer
+  collide with SWDIO, and the unported `power` / `relays` / `carrier` / `compat`
+  cluster now refuses to drive its ESP32-S3 GPIOs on the RP2350 rather than
+  seizing the wrong line. Still unexercised: validate `pod reset --mode nrst` on
+  GP13 once `plan/phase-5` wires it up.
 - **DUT UART pins.** Assign UART1 (suggested GP4/GP5) or a PIO UART.
 - **DUT SPI pins.** Assign SPI0 (suggested GP16-GP19) or a PIO SPI.
 - **USB-host physical setup.** Specify the connector/cable, VBUS source for a
