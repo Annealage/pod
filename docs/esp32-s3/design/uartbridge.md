@@ -258,7 +258,7 @@ documented but not exercised in this WS.
 - `src/c_modules/uartbridge/moduartbridge.c` -- MP binding.
 - `src/c_modules/uartbridge/micropython.cmake` -- build glue.
 - `test/unit/uartbridge/` -- protocol-level unit tests.
-- `docs/design/uartbridge.md` -- this file.
+- `docs/esp32-s3/design/uartbridge.md` -- this file.
 
 ## 9. Open items deferred to Phase 3
 

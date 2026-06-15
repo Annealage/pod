@@ -15,8 +15,10 @@ hardware-validated results, see `spike-findings.md` section 6.
 - Pod `GP14` = SWDIO, `GP15` = SWCLK, common GND to the target.
 - Default SWCLK is `clkdiv=8` = 9.375 MHz (validated 100/100 clean on an
   nRF52840; 12.5 MHz fails, the PIO input-sampling phase is the limit).
-- PIO allocation: CYW43 Wi-Fi uses PIO0, the SWD transport uses PIO1 SM4, the
-  optional write-streamer uses PIO2.
+- PIO allocation (authoritative map: `annealage_pod.debug.pio_arbiter.PIO_MAP`):
+  CYW43 Wi-Fi runs on PIO2 (reserved, never claimable), the SWD transport uses
+  PIO1 SM4, and the logic analyser plus the optional write-streamer use PIO0 (the
+  free block). Do not build a state machine on PIO2 - it hard-wedges Wi-Fi.
 - Validated target: nRF52840 (PCA10059). Other Cortex-M targets work at the
   DP/AP/MEM-AP level; flashing currently has only the nRF52 native-NVM path.
 
@@ -28,7 +30,7 @@ hardware-validated results, see `spike-findings.md` section 6.
 | `swd_dap.DebugPort` / `MEMAP` / `CortexM` | ADIv5 debug port (line bring-up, power, SELECT banking, sticky-error recovery, `resync`), MEM-AP (8/16/32-bit + 32-bit block with TAR auto-increment), and Cortex-M halt/resume/reset. |
 | `flash_nrf52.NRF52Flash` | nRF52 NVMC flash loader (erase / program / verify) driven through the MEM-AP, bounded-memory chunked. The per-family native path. |
 | `flm.FLMFlasher` + `flm_<target>.py` | Generic CMSIS flash-algorithm runner: loads a vendor FLM blob into target RAM and calls its Init/EraseSector/ProgramPage. Works for any chip with a CMSIS pack. |
-| `swd_stream.DRWStreamer` | Experimental, opt-in PIO2 write-streamer (see below). |
+| `swd_stream.DRWStreamer` | Experimental, opt-in PIO0 write-streamer (see below). |
 | `dbgsrv` (pod) + `pod.gdbserver` (host) | GDB debugging: a binary debug-command server on the pod (port 3335) plus a host GDB RSP translator, so host `gdb` debugs a DUT through the pod. FPB hardware breakpoints live in `CortexM`. |
 | `ops` | High-level entry points the host drives over the REPL. |
 
@@ -159,7 +161,7 @@ BKPT trampoline, PC = entry, xPSR Thumb) and resumes **with interrupts masked**
 interrupt vectors into the target's firmware and the algo never returns).
 Validated on the nRF52840 (FLM erase+program+verify, ~570 ms / 1 KB).
 
-`swd_stream.DRWStreamer` runs the whole AP-DRW write per FIFO word on PIO2 and is
+`swd_stream.DRWStreamer` runs the whole AP-DRW write per FIFO word on PIO0 and is
 opt-in via `NRF52Flash(ap, cm, streamer=DRWStreamer(dp.swd))`. It measured ~3131
 vs ~2934 words/s (~7%) for a second PIO block, GP14/15 funcsel switching, and a
 per-burst DP resync, so it is disabled by default. Kept because the margin may

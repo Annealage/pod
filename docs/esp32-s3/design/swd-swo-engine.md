@@ -76,7 +76,7 @@ would not replace the per-frame engine here.
 
 ### 2.1 Pin binding
 
-Per `docs/spec-appendix-A-pinmap.md` §A.5.1:
+Per `docs/esp32-s3/spec-appendix-A-pinmap.md` §A.5.1:
 
 | GPIO | Role          | Routing                                |
 |-----:|:--------------|:---------------------------------------|
@@ -328,9 +328,9 @@ runs a smoke loopback on real hardware.
 
 ## 7. References
 
-- `docs/spec.md` §4.6 (SWD backend), §4.7 (SWO pipeline)
-- `docs/architecture.md` §3 (concurrency), §4.3 (SWO data flow)
-- `docs/spec-appendix-A-pinmap.md` §A.5.1 (S3 GPIO assignment)
+- `docs/esp32-s3/spec.md` §4.6 (SWD backend), §4.7 (SWO pipeline)
+- `docs/esp32-s3/architecture.md` §3 (concurrency), §4.3 (SWO data flow)
+- `docs/esp32-s3/spec-appendix-A-pinmap.md` §A.5.1 (S3 GPIO assignment)
 - `research/cmsis-dap-survey.md` §2 (SPI as SWD), §3 (SWO buffering)
 - `research/spi2-swd-benchmark.md` (Phase 0.3 spike, the ~25 us/transaction finding)
 - `prototypes/spi2-swd-spike/main/spi2_swd_spike.c` (working SPI2+GDMA setup)

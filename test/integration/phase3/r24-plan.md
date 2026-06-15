@@ -1,6 +1,6 @@
 # R24 plan: finish TinyUSB host pivot in usbhost.c
 
-`docs/design/usbhost.md` §11 ("Phase 3 P3.0 pivot to TinyUSB host")
+`docs/esp32-s3/design/usbhost.md` §11 ("Phase 3 P3.0 pivot to TinyUSB host")
 described a planned migration from the IDF `usb_host_*` component to
 the TinyUSB host stack. The build infrastructure landed (the
 MicroPython submodule is on `andrewleech/micropython` `machine-usbhost`
@@ -250,7 +250,7 @@ hardware/stack constraint regardless of which stack drives it; no
 additional firmware effort will move it.
 
 Either way: clean up dead IDF `usb_host_*` includes, update doc
-comments, update `docs/design/usbhost.md` §11 to reflect that the
+comments, update `docs/esp32-s3/design/usbhost.md` §11 to reflect that the
 pivot is now complete.
 
 Commit.
@@ -273,7 +273,7 @@ Plus build-side checks:
 - Firmware binary boots cleanly on the ESP32-S3 (no IDF panic).
 - No symbol clash between TinyUSB host (in MicroPython submodule) and
   IDF `usb_host_*` (which is also linked into the firmware via
-  `IDF_COMPONENTS`). Per `docs/design/usbhost.md` §11 the two stacks
+  `IDF_COMPONENTS`). Per `docs/esp32-s3/design/usbhost.md` §11 the two stacks
   coexist in the build because only one calls into the DWC2 HCD at
   runtime; we need to verify TinyUSB takes ownership of the controller
   and IDF `usb_host_install` is NOT called anywhere on the boot path.

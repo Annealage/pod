@@ -3,7 +3,7 @@
 Master plan for the RP2350 (Pico 2 W) variant of the Annealage Pod. This is a
 dynamic, risk-ordered plan: each phase ends at a decision gate that is validated
 on hardware before the next phase commits, and the plan is re-cut as spikes land.
-It is the counterpart to the ESP32-S3 `docs/spec.md` and `docs/architecture.md`.
+It is the counterpart to the ESP32-S3 `docs/esp32-s3/spec.md` and `docs/esp32-s3/architecture.md`.
 
 Read first: `docs/rp2350/spike-findings.md` (what is already proven on hardware)
 and `docs/rp2350/dev-notes.md` (gotchas and recipes).
@@ -95,7 +95,7 @@ the risk register) rather than silent scope creep.
 
 Shared (single source, both variants):
 - the `annealage_pod` MicroPython package surface and RP_INFRA API mimicry
-  (`docs/spec.md` §7, appendix B);
+  (`docs/esp32-s3/spec.md` §7, appendix B);
 - USB/IP protocol logic (framing, OP_REQ/REP, CMD_SUBMIT validation) factored
   away from the ESP-IDF/lwIP specifics;
 - INA228 driver, slave register-table model, reset abstractions.
@@ -177,7 +177,7 @@ Deferred:
 ## 9. Pointers
 
 - `docs/rp2350/spike-findings.md`, `docs/rp2350/dev-notes.md`
-- ESP32-S3 baseline: `docs/spec.md`, `docs/architecture.md`, `docs/design/`
+- ESP32-S3 baseline: `docs/esp32-s3/spec.md`, `docs/esp32-s3/architecture.md`, `docs/esp32-s3/design/`
 - On-device probe reference: `github.com/essele/pico_debug`
 - Spike code: `prototypes/rp2350-swd-spike/`
 - Per-phase detail: `phase-1-foundation.md` ... `phase-7-integration-hardening.md`

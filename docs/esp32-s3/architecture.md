@@ -342,7 +342,7 @@ Flash flow:
 
 ## 10. References
 
-- `docs/spec.md`: requirements and decisions
+- `docs/esp32-s3/spec.md`: requirements and decisions
 - `research/cmsis-dap-survey.md`: firmware base, SWD/SWO backend selection, license analysis
 - `research/spi2-swd-benchmark.md`: real-silicon validation of the SWD I/O backend (Phase 0 output)
 - `referencea/annealage_pod/`: existing Octoprobe Annealage Pod hardware design, source of carrier compatibility

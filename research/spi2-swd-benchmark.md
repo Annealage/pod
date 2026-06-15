@@ -1,6 +1,6 @@
 # ESP32-S3 SPI2 + GDMA half-duplex 3-wire as SWD I/O backend, benchmark
 
-Spike validates the assumption in `docs/spec.md` §4.6 and `research/cmsis-dap-survey.md`
+Spike validates the assumption in `docs/esp32-s3/spec.md` §4.6 and `research/cmsis-dap-survey.md`
 that ESP32-S3 SPI2 in 3-wire half-duplex with GDMA can drive SWD at 25 MHz steady,
 40 MHz on short wires.
 

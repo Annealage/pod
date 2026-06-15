@@ -14,7 +14,7 @@ Optional body wrapped at 75 characters per line.
 Signed-off-by: Your Name <you@example.com>
 ```
 
-Scope is a short path prefix (`usbhost`, `usbip`, `annealage_pod/boot`, `docs/runbook`, etc.). Subjects are at most 72 characters and end with a full stop.
+Scope is a short path prefix (`usbhost`, `usbip`, `annealage_pod/boot`, `docs/esp32-s3/runbook`, etc.). Subjects are at most 72 characters and end with a full stop.
 
 A `pre-commit` hook enforces this. After cloning:
 

@@ -1,7 +1,7 @@
 # USB/IP server (WS-A) design notes
 
 Phase 2 deliverable for workstream WS-A. Implements the USB/IP
-multiplexer specified in `docs/spec.md` §4.4 and
+multiplexer specified in `docs/esp32-s3/spec.md` §4.4 and
 `research/usbip-multiplexing-design.md`.
 
 ## 1. Files

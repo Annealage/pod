@@ -6,7 +6,7 @@ mpy-pod's USB/IP server serialises per-EP via dedicated FreeRTOS lane tasks (`sr
 
 Which is faster in practice on ESP32-S3, and by how much? Worth keeping the lane-task model, or is the simpler queue-in-completion good enough?
 
-The TinyUSB host backend currently forces `USBIPD_PIPELINE_DEPTH = 1` (R27 gotcha #2 in `src/c_modules/usbhost/usbhost.c` per `docs/spec.md:152`), so the lane model's nominal parallelism advantage is already neutralised at the per-EP level. Cross-EP parallelism still applies.
+The TinyUSB host backend currently forces `USBIPD_PIPELINE_DEPTH = 1` (R27 gotcha #2 in `src/c_modules/usbhost/usbhost.c` per `docs/esp32-s3/spec.md:152`), so the lane model's nominal parallelism advantage is already neutralised at the per-EP level. Cross-EP parallelism still applies.
 
 ## Hypothesis
 

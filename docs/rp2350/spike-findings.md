@@ -6,7 +6,7 @@ Companion to `dev-notes.md` (gotchas/recipes). The phased plan builds on these.
 ## Context
 
 The Annealage Pod is adding an RP2350 (Pico 2 W) target as a parallel variant
-alongside the ESP32-S3 design (`docs/spec.md`, `docs/architecture.md`). The pivot
+alongside the ESP32-S3 design (`docs/esp32-s3/spec.md`, `docs/esp32-s3/architecture.md`). The pivot
 inverts one core decision: instead of synthesising a CMSIS-DAP-v2 probe over
 USB/IP for a host-side pyOCD to drive, the debugger runs **on the pod** in
 MicroPython, driving SWD directly. The host talks to the pod over Wi-Fi.
@@ -90,7 +90,7 @@ be robust. A bare hostname is not enough: advertise a browsable mDNS **service**
 records (REPL/socket port, USB/IP port, UART-forward port, carrier-id,
 firmware-version), so host tooling can enumerate pods by service type and connect
 without a pre-known name. The `ampremote`-based host wrapper should browse this
-service. This extends the ESP32-S3 spec's mDNS record (`docs/spec.md` §5.2)
+service. This extends the ESP32-S3 spec's mDNS record (`docs/esp32-s3/spec.md` §5.2)
 toward discovery-first rather than name-first.
 
 ## 4. Remaining hardware risks (next spikes)

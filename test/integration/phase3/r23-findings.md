@@ -306,7 +306,7 @@ without throughput effect. The actual lever for throughput is one of:
 
 1. Verify IDF host stack URB pipelining behavior (by probing
    `submit_xfer` timing or testing with a different USB host stack).
-2. Switch to TinyUSB host (`docs/design/usbhost.md` §11), which has a
+2. Switch to TinyUSB host (`docs/esp32-s3/design/usbhost.md` §11), which has a
    different scheduling model and may pipeline transfers better. The
    firmware infrastructure for this pivot is already linked in the build
    but our `usbhost.c` still uses IDF `usb_host_*`.

@@ -41,5 +41,5 @@ Port-specific replacements live in `../../port/`:
 - `port/jtag_stub.c`: stubs `JTAG_*` entry points so DAP.c links with
   DAP_JTAG=0 still referencing them through function-pointer paths.
 
-See `docs/design/cmsis-dap.md` for the full vendoring inventory and design
+See `docs/esp32-s3/design/cmsis-dap.md` for the full vendoring inventory and design
 rationale.

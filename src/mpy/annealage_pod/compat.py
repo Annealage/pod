@@ -2,7 +2,7 @@
 #
 # Reproduces the symbol table the existing Octoprobe RP_INFRA Pico
 # exposes so that testbed_micropython only needs a TCP-REPL transport
-# adapter to keep working. See docs/spec-appendix-B-rp_infra-api.md
+# adapter to keep working. See docs/esp32-s3/spec-appendix-B-rp_infra-api.md
 # for the source of truth.
 #
 # The Pico-side surface (Appendix B §B.2) is:

@@ -1,6 +1,6 @@
 # Annealage Pod MicroPython package.
 #
-# Public surface (per docs/spec.md §7 and the WS-E entry of
+# Public surface (per docs/esp32-s3/spec.md §7 and the WS-E entry of
 # plan/phase-2-parallel-implementation.md):
 #   - annealage_pod.boot        boot orchestration
 #   - annealage_pod.power       VTARGET / DUT-USB rails + INA228 telemetry

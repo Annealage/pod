@@ -1,7 +1,7 @@
 # Annealage Pod: GPIO assignment table.
 #
 # Single source of truth on the MicroPython side for the pins listed in
-# docs/spec-appendix-A-pinmap.md (§A.5.1). Other annealage_pod.* modules
+# docs/esp32-s3/spec-appendix-A-pinmap.md (§A.5.1). Other annealage_pod.* modules
 # import these constants rather than hard-coding GPIO numbers locally.
 #
 # Values match the appendix exactly. Keep this in sync with appendix

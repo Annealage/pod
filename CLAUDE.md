@@ -7,8 +7,8 @@ and naming conventions.
 
 - **ESP32-S3** (original): single ESP32-S3 + ESP-IDF + MicroPython, C user modules
   for USB/IP, synthetic CMSIS-DAP-v2, UART bridge, I2C/SPI slave. The design of
-  record is `docs/spec.md` and `docs/architecture.md`, with per-workstream notes
-  in `docs/design/`.
+  record is `docs/esp32-s3/spec.md` and `docs/esp32-s3/architecture.md`, with per-workstream notes
+  in `docs/esp32-s3/design/`.
 - **RP2350 (Pico 2 W)**: a parallel variant in bring-up. Inverts the debug-probe
   decision, the pod runs the debugger itself in MicroPython (PIO SWD + DP/AP/MEM-AP
   + CMSIS FLM flash loader + an on-pod GDB RSP server) instead of exporting a
@@ -17,6 +17,12 @@ and naming conventions.
 
 ## RP2350 docs (read these before working on the RP2350 target)
 
+- `docs/rp2350/hardware-setup.md`: the single DUT-to-pod wiring reference (SWD,
+  USB host, UART, I2C, SPI, GPIO/ADC, logic-analyser taps, power/ground), written
+  to be followable by a hobbyist. Marks each interface VERIFIED vs SUGGESTED
+  (untested), and lists the open hardware decisions (DUT UART/SPI/nRST pins,
+  USB-host cabling/power) still needed. The other RP2350 docs link here for "what
+  wires where".
 - `docs/rp2350/dev-notes.md`: development gotchas and recipes that cost real
   debugging time. Notably: `mpremote resume` caches imported modules (re-copy AND
   `sys.modules.pop` after edits); `probe-rs download --binary-format uf2`

@@ -38,7 +38,7 @@ Replicate the existing Octoprobe v0.7 carrier connector layout on the new PCB. S
 
 This preserves drop-in mechanical compatibility with existing Octoprobe DUT carriers. The cost is a less convenient DUT-side carrier design (4 connectors instead of 1) retained for compatibility.
 
-The S3-side GPIO assignment is in `docs/spec-appendix-A-pinmap.md`. Appendix A §A.2 enumerates the v0.7 signals that map across these connectors and is the source of truth for the new PCB's signal list. Appendix A §A.5's proposed consolidated 40-pin layout is informational only and deprecated by this decision; the same S3 GPIO bindings still apply, but they reach the DUT through the four existing connector footprints rather than one new socket.
+The S3-side GPIO assignment is in `docs/esp32-s3/spec-appendix-A-pinmap.md`. Appendix A §A.2 enumerates the v0.7 signals that map across these connectors and is the source of truth for the new PCB's signal list. Appendix A §A.5's proposed consolidated 40-pin layout is informational only and deprecated by this decision; the same S3 GPIO bindings still apply, but they reach the DUT through the four existing connector footprints rather than one new socket.
 
 ### 3.2 Level translation
 
@@ -297,8 +297,8 @@ Surface is provisional and frozen after the first prototyping pass.
 
 ## 8. Open items for follow-up
 
-1. **DUT carrier pinout**: closed. See `docs/spec-appendix-A-pinmap.md`.
-2. **RP_INFRA API surface**: closed. See `docs/spec-appendix-B-rp_infra-api.md`. The appendix flags 19 RP_INFRA methods and switch objects as gaps in §7 below; the appendix table is the canonical mapping.
+1. **DUT carrier pinout**: closed. See `docs/esp32-s3/spec-appendix-A-pinmap.md`.
+2. **RP_INFRA API surface**: closed. See `docs/esp32-s3/spec-appendix-B-rp_infra-api.md`. The appendix flags 19 RP_INFRA methods and switch objects as gaps in §7 below; the appendix table is the canonical mapping.
 3. **TinyUSB host on S3**: open. Verify ESP-IDF v5.5 TinyUSB host stack supports the operations the USB/IP server needs (raw URB submit on arbitrary endpoints, non-canned class-driver flow). If insufficient, fall back to the underlying `usb_host` IDF component directly. Tracked as risk R2.
 4. **USB/IP synthetic-device extension**: closed. See `research/usbip-multiplexing-design.md`. Key: multiplexing is essentially free in the USB/IP protocol (esp-usbip-bridge's existing `virtual_device_t` ops table merges devices in `OP_REP_DEVLIST`); host-tool recognition is iInterface-string-based, not VID/PID-based, so the load-bearing field is `iInterface = "CMSIS-DAP"`; `OP_REP_IMPORT` does not carry interface descriptors. The design names six open implementation issues with concrete bring-up tests in §5.1.
 5. **Pin budget reality check**: closed in Appendix A. Budget closes exactly at 33/33 with one decision required between (a) dropping legacy GPD6/7 channels in rev1, or (b) muxing them onto SPI-slave-only translator pins via a 74CBT3257.
@@ -336,8 +336,8 @@ Both variants share most of rev1's firmware: build infrastructure, MP package, U
 
 ## Appendix A: pin map
 
-See `docs/spec-appendix-A-pinmap.md`.
+See `docs/esp32-s3/spec-appendix-A-pinmap.md`.
 
 ## Appendix B: RP_INFRA API mimicry
 
-See `docs/spec-appendix-B-rp_infra-api.md`.
+See `docs/esp32-s3/spec-appendix-B-rp_infra-api.md`.

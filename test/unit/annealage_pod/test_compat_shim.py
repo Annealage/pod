@@ -37,7 +37,7 @@ def test_set_switch_returns_change_flag():
 def test_get_relays_uses_parameter_name_correctly():
     """Bug fix: upstream RP_INFRA shadowed the `relays` parameter.
 
-    See docs/spec-appendix-B-rp_infra-api.md §B.7. The shim must
+    See docs/esp32-s3/spec-appendix-B-rp_infra-api.md §B.7. The shim must
     actually return state for the requested relay number rather
     than crash on an unbound `i`.
     """

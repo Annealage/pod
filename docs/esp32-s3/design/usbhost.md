@@ -8,7 +8,7 @@ Targets one DUT device at a time; supports composite devices
 
 ## 1. Stack selection: `usb_host` component, not TinyUSB
 
-`docs/spec.md` §4.5 and the open issue at §8 item 3 frame this as
+`docs/esp32-s3/spec.md` §4.5 and the open issue at §8 item 3 frame this as
 "verify ESP-IDF v5.5 TinyUSB host stack supports the operations the
 USB/IP server needs (raw URB submit on arbitrary endpoints,
 non-canned class-driver flow). If insufficient, fall back to the
@@ -61,7 +61,7 @@ component is linked into the firmware automatically.
   cross-compiler.
 - `src/c_modules/usbhost/micropython.cmake`: switched from
   `usbhost_stub.c` to `usbhost.c`.
-- `docs/design/usbhost.md`: this document.
+- `docs/esp32-s3/design/usbhost.md`: this document.
 - `test/unit/usbhost/`: host-side CTest harness.
 
 ## 3. Vendoring
@@ -69,7 +69,7 @@ component is linked into the firmware automatically.
 The slot/pipe topology in `usbhost.c` is shape-equivalent to
 `referencea/esp-usbip-bridge/main/usb_backend.c`. The reference
 repository ships no LICENSE file; per the same analysis applied
-in `docs/design/usbip-server.md`, that means we cannot copy the
+in `docs/esp32-s3/design/usbip-server.md`, that means we cannot copy the
 file verbatim. The implementation here is a clean rewrite that
 arrives at the same overall design (single-client async model,
 pre-allocated pipe slots, per-pipe binary semaphore, malloc-per-URB)
