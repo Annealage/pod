@@ -176,3 +176,36 @@ they do not fit upstream master. The pod's functionality is not at risk: it carr
 the working fix against its pinned tinyusb regardless of upstream. Direction pending
 (rewrite against new master / hold the PR / coordinate with the upstream refactor
 author).
+
+### Rewrite implemented (2026-06-16)
+
+Done: reimplemented `hcd_edpt_abort_xfer` + `hcd_edpt_close` against the refactored
+master driver. Lives in a fork checkout at `/home/corona/studio/tinyusb-pr3702`,
+branch `edpt-abort-master` (off upstream master `14e20e9f6`), commit `6dae50c88`.
+
+- abort: handles active-EPX (`sie_stop_xfer` / host STOP_TRANS, not the device-only
+  `usb_hw->abort`), queued-EPX, interrupt-EP, and idempotent-idle; sets state to
+  IDLE before clearing the latches to close the ISR race; re-homes the round-robin
+  scheduler (promote next pending EP or disarm); leaves the EP re-armable (abort is
+  not close).
+- close: frees the `ep_pool` slot (`max_packet_size = 0` last), tears down the
+  interrupt-EP hardware, mirroring `hcd_device_close`.
+
+Validation: compiles warning-free and links a valid ARM ELF for the rp2040 host
+example (pico-sdk 2.2.0, arm-gcc 14.3); the interrupt-EP `buf_status` bit math was
+confirmed against the new ISR's documented layout (IEPn IN/OUT = `n*2`, `n*2+1`); an
+adversarial review confirmed abort re-armability, scheduler/state consistency, and
+race-safety. NOT yet hardware-tested - the pod builds the OLD vendored tinyusb, so
+this upstream-master version cannot be exercised on it directly.
+
+On-hardware items pending before merge: (1) STOP_TRANS stop-to-clear race timing
+under real bus traffic; (2) confirm the `sie_status` clear does not swallow an
+unrelated event under load; (3) promote-next-on-abort vs the round-robin under
+concurrent aborts; (4) closing an EPX-allocated bulk EP left as the active epx
+(benign by contract); plus the driver's pre-existing single-core USB-servicing
+assumption.
+
+To land it: force-push `edpt-abort-master` to `andrewleech:rp2-host-edpt-abort`
+(updates PR #3702, with a comment that it is a reimplementation against the
+refactored driver) or open a fresh PR; the GenAI disclosure goes in the PR
+description. Pending maintainer sign-off; nothing pushed.
