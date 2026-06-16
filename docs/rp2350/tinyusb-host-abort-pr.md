@@ -232,4 +232,7 @@ in-flight transfers and returns true) - flag it for the maintainer rather than
 diverge from the dwc2 peer (MINOR-4).
 
 Branch `edpt-abort-master`: `6dae50c88` (impl, hardware-validated) + `b414cc7d8`
-(review fixes). Still pending maintainer sign-off + the push.
+(review fixes). Pushed 2026-06-16: force-updated the PR #3702 head
+(`andrewleech:rp2-host-edpt-abort`) to `b414cc7d8` and posted a comment
+(pull/3702#issuecomment-4714044332) noting the rebase-onto-master + reimplementation
+against the current driver. Awaiting the maintainer's re-review / CI re-run.
