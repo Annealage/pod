@@ -45,10 +45,22 @@ OPENOCD      ?= /home/corona/openocd_rpi/src/openocd
 OPENOCD_TCL  ?= /home/corona/openocd_rpi/tcl
 PROBE_SERIAL ?= $(lastword $(subst :, ,$(PROBE)))
 
+# picotool cache for the pico-sdk fetch-from-git, so a fresh cmake configure does
+# not fail on the host picotool version gate.
+PTCACHE ?= $(HOME)/.cache/picotool-sdk
+
 .DEFAULT_GOAL := firmware
 
 .PHONY: firmware
 firmware: mpy-cross ## Build the pod firmware (.uf2 + .elf)
+	@# Configure with the picotool fetch flag if the build dir is not yet
+	@# configured. The rp2 port Makefile's auto-configure omits it, so a fresh
+	@# build (e.g. after `make clean`) dies at the pico-sdk picotool version gate
+	@# before the qstr collection runs; pre-configuring here makes the port build
+	@# reuse it. See docs/rp2350/dev-notes.md.
+	[ -e $(BUILD)/Makefile ] || cmake -S $(RP2_PORT) -B $(BUILD) -DPICO_BUILD_DOCS=0 \
+		-DMICROPY_BOARD=$(BOARD) -DMICROPY_BOARD_DIR=$(BOARD_DIR) \
+		-DPICOTOOL_FORCE_FETCH_FROM_GIT=1 -DPICOTOOL_FETCH_FROM_GIT_PATH=$(PTCACHE)
 	$(MAKE) -C $(RP2_PORT) BOARD_DIR=$(BOARD_DIR) -j$(JOBS)
 	@echo "built: $(BUILD)/firmware.uf2"
 

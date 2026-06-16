@@ -32,7 +32,16 @@ Always address devices and probes by their stable identity, never by a
 usually attached at once; a bare `grep MicroPython | head -1` will pick the wrong
 board.
 
-## 2. Flashing RP2350 MicroPython over SWD
+## 2. Building and flashing RP2350 MicroPython over SWD
+
+**Building:** `make` (or `make firmware`) from the repo root. A fresh cmake
+configure must pass the picotool fetch flag, or the pico-sdk aborts at configure on
+the host picotool version gate (`Incompatible picotool installation found`) - before
+the qstr / root-pointer collection even runs, which can masquerade as a missing
+root pointer / `mp_state_vm_t has no member` error if you only look at the compile
+step. The top-level `Makefile` pre-configures the build dir with
+`-DPICOTOOL_FORCE_FETCH_FROM_GIT=1 -DPICOTOOL_FETCH_FROM_GIT_PATH=$(PTCACHE)`, so
+`make clean && make firmware` works; if you configure by hand, include those flags.
 
 **Use `make flash` (OpenOCD) - it halts BOTH cores first.** probe-rs `download`
 halts only core0; if core1 is running (the netboot drives XIP from flash), an
