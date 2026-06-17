@@ -41,6 +41,11 @@ _WIFI_RETRY_MS = const(10000)
 # cooperatively so accept never blocks the loop; sub-second latency is irrelevant
 # for a management connection.
 _ACCEPT_POLL_MS = const(150)
+# Socket-poll events that mean the REPL client is gone: HUP/ERR (reset) or NVAL
+# (closed). The dupterm layer closes the client socket on disconnect, so a dead
+# cached handle polls one of these. POLLNVAL is not exported by select, so its
+# numeric value (MP_STREAM_POLL_NVAL = 0x20) is OR'd in.
+_POLL_DEAD = select.POLLHUP | select.POLLERR | 0x20
 
 
 def _pm_none(wlan):
@@ -126,24 +131,55 @@ async def _wifi_supervisor(wlan, ssid, pw, port):
 
 
 async def _repl_accept(port):
-    # Bind the REPL listener and, on each new client, dup the REPL onto it,
-    # closing the previous client so a reconnecting host always lands on a clean
-    # slot (and the fd leak is bounded to one). The client socket is non-blocking
-    # - a blocking one could let a slow peer wedge the single-core loop - and we
-    # NEVER read it here: arepl owns the read via sys.stdin, into which os.dupterm
-    # aggregates the slot. A dead client is auto-detached lazily by os_dupterm on
-    # the next stdin read. The listener is polled cooperatively so accept never
-    # blocks the loop.
+    # Bind the REPL listener and serve ONE client at a time. The pod does NOT evict
+    # a live session: while a client holds the REPL a new connection is refused (a
+    # one-line BUSY notice, then closed without attaching it), so an agent that
+    # accidentally dials the wrong pod can't knock the active one off.
+    #
+    # The active client is tracked in `cur` and its disconnect is detected by polling
+    # THAT handle, never the dupterm slot: the dupterm layer (os_dupterm.c
+    # mp_os_deactivate) closes the socket on the client's EOF/error, so a dead handle
+    # polls NVAL/HUP/ERR while a live one polls RD/WR. Polling the socket touches no
+    # shared REPL state. We never read the socket: arepl owns the read via sys.stdin,
+    # into which os.dupterm aggregates the slot.
+    #
+    # KNOWN ISSUE (task #36): a session held idle a few seconds then closed leaves the
+    # socket REPL wedged until reboot (a pre-existing dupterm/arepl/lwIP bug, not this
+    # loop - reproduces on a plain evict loop too). Short sessions are unaffected.
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", port))
-    s.listen(1)
+    s.listen(4)
     s.setblocking(False)
     poller = select.poll()
     poller.register(s, select.POLLIN)
+    live = select.poll()
     cur = None
     while True:
         try:
+            # Has the active session ended? The dupterm layer closes the client
+            # socket on disconnect, so the cached handle then polls dead.
+            if cur is not None:
+                dead = False
+                try:
+                    for _o, ev in live.poll(0):
+                        if ev & _POLL_DEAD:
+                            dead = True
+                except Exception:
+                    dead = True
+                if dead:
+                    try:
+                        live.unregister(cur)
+                    except Exception:
+                        pass
+                    # dupterm's mp_os_deactivate already closed it on a clean EOF
+                    # (double tcp_close is guarded to a no-op); close here too so an
+                    # RST'd handle that dupterm hasn't reaped yet doesn't leak.
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+                    cur = None
             if poller.poll(0):
                 try:
                     cli, addr = s.accept()
@@ -151,26 +187,33 @@ async def _repl_accept(port):
                     cli = None
                 if cli is not None:
                     cli.setblocking(False)
-                    # Repoint the dupterm slot to the new client first, then close
-                    # the previous one: os.dupterm(cli) replaces the slot, so the
-                    # old socket is no longer the REPL target before we close it.
-                    prev = cur
-                    cur = cli
-                    try:
-                        os.dupterm(cli)
-                        print("netboot: REPL client", addr)
-                    except Exception:
+                    if cur is None:
+                        cur = cli
+                        try:
+                            os.dupterm(cli)
+                            live.register(cli, select.POLLIN)
+                            print("netboot: REPL client", addr)
+                        except Exception:
+                            try:
+                                os.dupterm(None, 0)
+                            except Exception:
+                                pass
+                            try:
+                                cli.close()
+                            except Exception:
+                                pass
+                            cur = None
+                    else:
+                        # A session is already attached: refuse without evicting.
+                        try:
+                            cli.send(b"annealage-pod: BUSY - REPL in use by another client\r\n")
+                        except Exception:
+                            pass
                         try:
                             cli.close()
                         except Exception:
                             pass
-                        cur = prev
-                        cli = None
-                    if cli is not None and prev is not None:
-                        try:
-                            prev.close()
-                        except Exception:
-                            pass
+                        print("netboot: REPL busy, refused", addr)
         except Exception as e:
             try:
                 sys.print_exception(e)

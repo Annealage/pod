@@ -27,5 +27,17 @@ set(MICROPY_HW_USB_HOST 1)
 list(APPEND MICROPY_DEF_BOARD CFG_TUH_CDC=0 CFG_TUH_MSC=0 CFG_TUH_HID=0)
 list(APPEND MICROPY_DEF_BOARD CFG_TUH_API_EDPT_XFER=1)
 
+# Two concurrent lwIP-RAW TCP listeners (usbip:3240 + the Wi-Fi socket REPL:8266)
+# run under NO_SYS=1 and share lwIP's global TCP PCB pools. Raise MEMP_NUM_TCP_PCB
+# so usbip's accepted connections (up to USBIP_MAX_CONNS=4), the REPL's client, the
+# REPL accept backlog, and TIME_WAIT churn never starve the REPL - otherwise new
+# REPL connects are RST'd while forwarding (the pod's only management channel on a
+# deployed unit). Set via MICROPY_DEF_BOARD so the define reaches the lwIP sources
+# (memp.c sizes the pools), which compile into the firmware target through the
+# micropy_lib_lwip INTERFACE library. MEMP_NUM_TCP_PCB_LISTEN is pinned at its
+# default to document intent. MEM_SIZE is deliberately untouched: this is a
+# PCB-count problem, not a pbuf/segment one.
+list(APPEND MICROPY_DEF_BOARD MEMP_NUM_TCP_PCB=10 MEMP_NUM_TCP_PCB_LISTEN=8)
+
 # Frozen Python package.
 set(MICROPY_FROZEN_MANIFEST ${MICROPY_BOARD_DIR}/manifest.py)
