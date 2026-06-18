@@ -23,8 +23,10 @@ import asyncio
 import sys
 import threading
 from pod.discovery import discover_pods as _discover_pods
-from pod.registry import get_pod, load_registry
+from pod.registry import get_pod, load_registry, update_pod, reconcile_dut
 from pod.client import Pod
+from pod.target import PodUnreachable
+from pod import enroll
 
 # Optional mcp import
 try:
@@ -57,12 +59,51 @@ def handle_pod_info(label: str) -> dict:
     return {"label": label, **entry}
 
 
+def handle_register_pod(label: str, match: str = None,
+                        timeout: float = 5.0) -> dict:
+    """Discover a pod via mDNS and register its stable handles under `label`.
+
+    The agent counterpart to `pod register` with no address: enrolls a
+    freshly-flashed pod by name, storing hostname + IPv6 + IPv4 and reading the
+    identity fingerprint. Overwrites an existing label.
+    """
+    entry = enroll.register_discovered(label, match=match, timeout=timeout,
+                                       probe=True, force=True)
+    return {"label": label, **entry}
+
+
+def handle_dut(label: str, adopt: bool = False) -> dict:
+    """Probe the live DUT identity over SWD and reconcile it with the declared block.
+
+    Returns the reconcile_dut verdict (MATCH/MISMATCH/UNDECLARED/NO_DECLARED/
+    NO_LIVE) with the per-field declared-vs-live ids. With adopt=True, snapshots
+    the live ids into the declared expected{} block first.
+    """
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    pod = Pod.from_entry(entry)
+    try:
+        live = pod.discover_dut()
+    except Exception as exc:  # noqa: BLE001 - surfaced in the verdict
+        live = {"ok": False, "err": repr(exc)}
+    if adopt and live and live.get("ok", True):
+        expected = {k: live[k] for k in ("dpidr", "ap_idr", "cpuid", "rom_base")
+                    if k in live}
+        if expected:
+            dut = dict(entry.get("dut") or {})
+            dut["expected"] = expected
+            update_pod(label, dut=dut)
+            entry = get_pod(label)
+    return reconcile_dut(entry.get("dut"), live)
+
+
 def handle_dut_exec(label: str, code: str) -> str:
     """Execute MicroPython code on a pod. Returns stdout."""
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
-    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    pod = Pod.from_entry(entry)
     return pod.exec(code)
 
 
@@ -71,7 +112,7 @@ def handle_mount_dir(label: str, directory: str) -> str:
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
-    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    pod = Pod.from_entry(entry)
     pod.mount(directory)
     return f"Mounted {directory} on {label}."
 
@@ -82,7 +123,7 @@ def handle_flash_dut(label: str, image: str, target: str = None,
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
-    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    pod = Pod.from_entry(entry)
     return pod.flash_dut(image, target=target, addr=addr)
 
 
@@ -96,7 +137,7 @@ def handle_reset_dut(label: str, mode: str = "sysreset") -> dict:
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
-    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    pod = Pod.from_entry(entry)
     return pod.reset_dut(mode=mode)
 
 
@@ -105,7 +146,7 @@ def handle_read_dut(label: str, addr: int, length: int, out_path: str) -> str:
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
-    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    pod = Pod.from_entry(entry)
     return pod.read_dut(addr, length, out_path)
 
 
@@ -132,7 +173,7 @@ def handle_gdb_dut(label: str, listen_port: int = 0) -> dict:
         return {"endpoint": sess["endpoint"], "gdb_port": sess["gdb_port"],
                 "label": label}
 
-    pod = Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    pod = Pod.from_entry(entry)
     gdb_port = entry.get("gdb_port") or 3335
     ready = threading.Event()
     bound: dict = {}
@@ -169,7 +210,7 @@ def _pod_for(label: str) -> Pod:
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
-    return Pod(address=entry["address"], repl_port=entry.get("repl_port", 8266))
+    return Pod.from_entry(entry)
 
 
 def handle_i2c_target(label: str, addr: int = 0x42, regs=None, bus: int = 1,
@@ -246,11 +287,49 @@ def build_server():
             ),
             Tool(
                 name="pod_info",
-                description="Return registry info for a named pod.",
+                description=(
+                    "Return registry info for a named pod: its stable handles "
+                    "(hostname, addr6 IPv6 list, addr4), identity fingerprint, "
+                    "ports, and declared DUT block."),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."}
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="register_pod",
+                description=(
+                    "Discover a pod via mDNS and register it under a label, "
+                    "storing its stable handles (hostname + IPv6 + IPv4) and "
+                    "reading its identity fingerprint. Use to enroll a "
+                    "freshly-flashed pod by name without a hand-copied address. "
+                    "Overwrites an existing label."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Label to register under."},
+                        "match": {"type": "string", "description": "Disambiguate the mDNS match (hostname/instance); default uses the label."},
+                        "timeout": {"type": "number", "description": "mDNS browse duration in seconds.", "default": 5.0},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="dut",
+                description=(
+                    "Probe the connected DUT's identity over SWD (dpidr, ap_idr, "
+                    "cpuid, rom_base) and reconcile it against the pod's declared "
+                    "DUT block. Returns a verdict (MATCH / MISMATCH / UNDECLARED / "
+                    "NO_DECLARED / NO_LIVE). adopt=true snapshots the live ids into "
+                    "the declared expected{} block."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "adopt": {"type": "boolean", "description": "Snapshot live ids into the declared expected block.", "default": False},
                     },
                     "required": ["label"],
                 },
@@ -483,6 +562,13 @@ def build_server():
             elif name == "pod_info":
                 result = await asyncio.to_thread(
                     handle_pod_info, arguments["label"])
+            elif name == "register_pod":
+                result = await asyncio.to_thread(
+                    handle_register_pod, arguments["label"],
+                    arguments.get("match"), arguments.get("timeout", 5.0))
+            elif name == "dut":
+                result = await asyncio.to_thread(
+                    handle_dut, arguments["label"], arguments.get("adopt", False))
             elif name == "dut_exec":
                 result = await asyncio.to_thread(
                     handle_dut_exec, arguments["label"], arguments["code"])
@@ -542,7 +628,14 @@ def build_server():
 
         except NotImplementedError as exc:
             return [TextContent(type="text", text=f"Not implemented: {exc}")]
-        except KeyError as exc:
+        except PodUnreachable as exc:
+            # No tier yielded an identity-confirmed target - unreachable, or a
+            # DHCP-moved IPv4 whose fingerprint did not match. Distinct from a
+            # generic failure so the agent does not retry blindly.
+            return [TextContent(
+                type="text",
+                text=f"Pod unreachable or identity mismatch: {exc}")]
+        except (LookupError, KeyError) as exc:
             return [TextContent(type="text", text=f"Error: {exc}")]
 
     return server

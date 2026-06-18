@@ -514,14 +514,18 @@ class GdbServer:
 
     def __init__(self, pod_addr=None, pod_port=3335, listen_host="127.0.0.1",
                  listen_port=0, resume_window_ms=200, link=None,
-                 connect_timeout=10.0):
+                 connect_timeout=10.0, resolver=None):
         """Construct a GdbServer.
 
         link may be injected (for tests / reuse); otherwise the pod socket is
         opened lazily by connect_pod() with the same poll-with-backoff as
-        flash_dut while the REPL-started gdb_serve comes up.
+        flash_dut while the REPL-started gdb_serve comes up. A resolver (from the
+        Pod) supplies the connect endpoint so the gdb path shares the same
+        IPv6-first/identity-checked target as every other transport; pod_addr is
+        the back-compat fallback when no resolver is given.
         """
         self.pod_addr = pod_addr
+        self._resolver = resolver
         self.pod_port = pod_port
         self.listen_host = listen_host
         self.listen_port = listen_port
@@ -552,11 +556,13 @@ class GdbServer:
         """Open the pod socket with poll-with-backoff and build the PodLink."""
         if self.link is not None:
             return self.link
+        endpoint = (self._resolver.endpoint(self.pod_port)
+                    if self._resolver is not None
+                    else (self.pod_addr, self.pod_port))
         sock = None
         for _ in range(100):
             try:
-                sock = socket.create_connection(
-                    (self.pod_addr, self.pod_port), timeout=5)
+                sock = socket.create_connection(endpoint, timeout=5)
                 break
             except OSError:
                 time.sleep(0.1)

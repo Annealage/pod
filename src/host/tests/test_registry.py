@@ -10,8 +10,11 @@ from pod.registry import (
     save_registry,
     get_pod,
     set_pod,
+    update_pod,
     remove_pod,
     reconcile,
+    reconcile_dut,
+    _migrate_entry,
 )
 from pod.discovery import PodInfo
 
@@ -26,7 +29,7 @@ def isolated_registry(tmp_path, monkeypatch):
 class TestLoadSave:
     def test_load_empty(self):
         registry = load_registry()
-        assert registry["version"] == 1
+        assert registry["version"] == 2
         assert registry["pods"] == {}
 
     def test_save_and_reload(self):
@@ -128,3 +131,87 @@ class TestReconcile:
     def test_reconcile_persisted(self):
         reconcile("lab-pod", self._make_pod_info())
         assert get_pod("lab-pod") is not None
+
+
+class TestMigration:
+    def test_v1_ipv4_address_becomes_addr4(self):
+        e = {"address": "192.168.0.50", "repl_port": 8266}
+        _migrate_entry(e)
+        assert e["addr4"] == "192.168.0.50"
+        assert e["addr6"] == []
+        assert e["hostname"] is None
+        assert e["address"] == "192.168.0.50"   # never dropped
+
+    def test_v1_ipv6_address_becomes_addr6(self):
+        e = {"address": "fd32::1"}
+        _migrate_entry(e)
+        assert e["addr6"] == ["fd32::1"]
+        assert e["addr4"] is None
+
+    def test_v1_hostname_address_becomes_hostname(self):
+        e = {"address": "annealage-pod.local"}
+        _migrate_entry(e)
+        assert e["hostname"] == "annealage-pod.local"
+        assert e["addr4"] is None and e["addr6"] == []
+
+    def test_migration_idempotent(self):
+        e = {"address": "192.168.0.50"}
+        _migrate_entry(e)
+        first = dict(e)
+        _migrate_entry(e)
+        assert e == first
+
+    def test_load_migrates_and_bumps_version(self):
+        save_registry({"version": 1, "pods": {
+            "old": {"address": "192.168.0.9", "repl_port": 8266}}})
+        reg = load_registry()
+        assert reg["version"] == 2
+        assert reg["pods"]["old"]["addr4"] == "192.168.0.9"
+
+
+class TestReconcilePreserves:
+    def test_reconcile_keeps_dut_and_fingerprint(self):
+        set_pod("p", {"addr4": "192.168.0.9", "repl_port": 8266,
+                      "fingerprint": "abcd1234", "dut": {"label": "nrf"}})
+        info = PodInfo(name="p", hostname="p.local", addr4="192.168.0.9",
+                       repl_port=8266, usbip_port=None, uart_port=None,
+                       gdb_port=None)
+        entry = reconcile("p", info)
+        assert entry["fingerprint"] == "abcd1234"
+        assert entry["dut"] == {"label": "nrf"}
+        assert entry["hostname"] == "p.local"
+
+
+class TestReconcileDut:
+    LIVE = {"ok": True, "dpidr": 0x2BA01477, "ap_idr": 0x24770011,
+            "cpuid": 0x410FC241, "rom_base": 0xE00FF003}
+
+    def test_no_declared(self):
+        r = reconcile_dut(None, self.LIVE)
+        assert r["verdict"] == "NO_DECLARED"
+
+    def test_match(self):
+        declared = {"expected": {"dpidr": 0x2BA01477, "cpuid": 0x410FC241}}
+        r = reconcile_dut(declared, self.LIVE)
+        assert r["verdict"] == "MATCH"
+
+    def test_mismatch(self):
+        declared = {"expected": {"dpidr": 0x12345678}}
+        r = reconcile_dut(declared, self.LIVE)
+        assert r["verdict"] == "MISMATCH"
+        assert r["fields"]["dpidr"]["match"] is False
+
+    def test_cpuid_revision_ignored(self):
+        # low nibble (revision) differs; compare must still MATCH on the part.
+        declared = {"expected": {"cpuid": 0x410FC240}}
+        r = reconcile_dut(declared, self.LIVE)
+        assert r["verdict"] == "MATCH"
+
+    def test_undeclared_ids(self):
+        r = reconcile_dut({"label": "nrf"}, self.LIVE)
+        assert r["verdict"] == "UNDECLARED"
+
+    def test_no_live(self):
+        declared = {"expected": {"dpidr": 0x2BA01477}}
+        r = reconcile_dut(declared, {"ok": False, "err": "no SWD"})
+        assert r["verdict"] == "NO_LIVE"

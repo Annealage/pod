@@ -13,6 +13,7 @@ Stubbed methods raise NotImplementedError with the phase they're pending:
 """
 
 import ast
+import ipaddress
 import os
 import socket
 import struct
@@ -20,6 +21,8 @@ import threading
 import time
 import subprocess as _subprocess
 from typing import Callable, List, Optional
+
+from pod.target import TargetResolver
 
 
 def _last_dict(stdout: str) -> dict:
@@ -39,21 +42,78 @@ class Pod:
 
     def __init__(
         self,
-        address: str,
+        address: Optional[str] = None,
         repl_port: int = 8266,
         runner: Optional[Callable] = None,
+        *,
+        hostname: Optional[str] = None,
+        addr6=None,
+        addr4: Optional[str] = None,
+        fingerprint: Optional[str] = None,
+        resolver: Optional[TargetResolver] = None,
     ):
         """Create a Pod client.
 
+        The connect target is chosen by a TargetResolver from the pod's stable
+        handles (mDNS hostname + IPv6) and DHCP IPv4, verifying identity before
+        trusting an address that drifts (see pod.target). Every transport - the
+        ampremote socket REPL and the raw flash/read/LA/gdb sockets - shares the
+        one resolution.
+
         Args:
-            address: IPv4 address of the pod.
+            address: a single literal/hostname (back-compat). Classified into
+                the right handle when no explicit handle is given; a bare IPv4
+                stays network-free (the resolver trusts the lone address).
             repl_port: TCP port of the ampremote socket REPL.
             runner: Callable with the same signature as subprocess.run.
                     Defaults to subprocess.run. Inject a fake for testing.
+            hostname/addr6/addr4/fingerprint: the registry handles.
+            resolver: inject a pre-built TargetResolver (tests / reuse).
         """
-        self.address = address
         self.repl_port = repl_port
         self._runner = runner if runner is not None else _subprocess.run
+        self._seed_address = address
+        if resolver is not None:
+            self._resolver = resolver
+        else:
+            if address is not None and not (hostname or addr6 or addr4):
+                try:
+                    if ipaddress.ip_address(address).version == 6:
+                        addr6 = [address]
+                    else:
+                        addr4 = address
+                except ValueError:
+                    hostname = address
+            self._resolver = TargetResolver(
+                hostname=hostname, addr6=addr6, addr4=addr4,
+                fingerprint=fingerprint, repl_port=repl_port)
+
+    @classmethod
+    def from_entry(cls, entry: dict, runner: Optional[Callable] = None) -> "Pod":
+        """Build a Pod from a registry entry, wiring the full handle set."""
+        return cls(
+            address=entry.get("address"),
+            repl_port=entry.get("repl_port", 8266),
+            runner=runner,
+            hostname=entry.get("hostname"),
+            addr6=entry.get("addr6"),
+            addr4=entry.get("addr4"),
+            fingerprint=entry.get("fingerprint"),
+        )
+
+    @property
+    def resolver(self) -> TargetResolver:
+        return self._resolver
+
+    @property
+    def address(self):
+        """The resolved connect host if known, else a best-effort handle (no walk)."""
+        cached = self._resolver.cached
+        if cached is not None:
+            return cached
+        return (self._seed_address or self._resolver.addr4
+                or (self._resolver.addr6[0] if self._resolver.addr6 else None)
+                or self._resolver.hostname)
 
     # ── argv construction (pure, testable) ───────────────────────────────
 
@@ -61,10 +121,10 @@ class Pod:
         """Build the ampremote argv list for a given verb and arguments.
 
         Returns a list starting with ['ampremote', 'connect',
-        'socket://ADDRESS:PORT', verb, *args].
-        No subprocess is invoked.
+        'socket://HOST:PORT', verb, *args] where HOST is the resolved connect
+        target (IPv6 literals bracketed). No subprocess is invoked.
         """
-        connect_target = f"socket://{self.address}:{self.repl_port}"
+        connect_target = self._resolver.ampremote_target(self.repl_port)
         return ["ampremote", "connect", connect_target, verb] + list(args)
 
     # ── live commands ────────────────────────────────────────────────────
@@ -144,7 +204,8 @@ class Pod:
             if "exc" in result:
                 break
             try:
-                sock = socket.create_connection((self.address, port), timeout=5)
+                sock = socket.create_connection(
+                    self._resolver.endpoint(port), timeout=5)
                 break
             except OSError:
                 time.sleep(0.1)
@@ -189,6 +250,18 @@ class Pod:
         )
         return _last_dict(out)
 
+    def discover_dut(self) -> dict:
+        """Read the connected DUT's generic ADIv5/Cortex-M identity over SWD.
+
+        Returns the on-pod ops.discover() dict: architecturally-generic IDs
+        (dpidr, ap_idr, cpuid, rom_base) the host decodes/compares - no
+        family-specific reads, no core halt. {"ok": False, "err": ...} if SWD
+        does not connect (DUT unpowered / not wired).
+        """
+        out = self.exec(
+            "import annealage_pod.debug.ops as o; print(o.discover())")
+        return _last_dict(out)
+
     @staticmethod
     def _dump_stream_cmd(addr: int, length: int, port: int) -> str:
         """Build the on-pod dump_stream invocation (pure, for testability)."""
@@ -222,7 +295,8 @@ class Pod:
             if "exc" in result:
                 break
             try:
-                sock = socket.create_connection((self.address, port), timeout=5)
+                sock = socket.create_connection(
+                    self._resolver.endpoint(port), timeout=5)
                 break
             except OSError:
                 time.sleep(0.1)
@@ -291,7 +365,7 @@ class Pod:
         worker.start()
         try:
             server = GdbServer(
-                pod_addr=self.address,
+                resolver=self._resolver,
                 pod_port=gdb_port,
                 listen_port=listen_port,
                 resume_window_ms=resume_window_ms,
@@ -427,7 +501,8 @@ class Pod:
             if "exc" in result:
                 break
             try:
-                sock = socket.create_connection((self.address, port), timeout=5)
+                sock = socket.create_connection(
+                    self._resolver.endpoint(port), timeout=5)
                 break
             except OSError:
                 time.sleep(0.1)
