@@ -34,7 +34,11 @@ _LIST_RE = re.compile(
 
 def _run(argv, sudo=False, timeout=20, runner=None):
     runner = runner or subprocess.run
-    if sudo:
+    # attach/detach write vhci sysfs and normally need root, so they run under
+    # `sudo -n`. Set POD_USBIP_SUDO=0 when the host is configured for sudo-less
+    # usbip (a udev rule making the vhci sysfs group-writable, or running as
+    # root) so the bare command is used instead. See src/host/README.md.
+    if sudo and os.environ.get("POD_USBIP_SUDO", "1") != "0":
         argv = ["sudo", "-n"] + argv
     return runner(argv, capture_output=True, text=True, timeout=timeout)
 

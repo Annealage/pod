@@ -1,0 +1,19 @@
+# Annealage Pod - sudo-less USB/IP attach/detach.
+#
+# `pod attach` / `pod detach` drive the host `usbip` client, which attaches a
+# pod-exported DUT by writing the vhci_hcd sysfs attributes (attach/detach).
+# Those are root-only by default, which is why `pod attach` otherwise shells out
+# via `sudo -n usbip`.
+#
+# This rule hands the two attributes to the `usbip` group so its members can
+# attach/detach without root. The kernel's vhci store handlers do not check
+# capabilities, so group-writable sysfs is sufficient - no CAP_NET_ADMIN needed.
+#
+# Pair it with POD_USBIP_SUDO=0 in the pod tooling's environment so `pod attach`
+# calls the bare `usbip` instead of `sudo -n usbip`. Full install steps:
+# "Running attach/detach without sudo - Option B" in src/host/README.md.
+#
+# vhci_hcd.* matches both controllers (USB2/USB3) the module may register.
+
+ACTION=="add", SUBSYSTEM=="platform", KERNEL=="vhci_hcd.*", \
+  RUN+="/bin/sh -c 'chgrp usbip /sys%p/attach /sys%p/detach 2>/dev/null; chmod g+w /sys%p/attach /sys%p/detach 2>/dev/null'"

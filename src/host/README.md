@@ -44,6 +44,11 @@ pod cp <label> <src> <dst>            copy a file (':path' = pod side)
 pod flash <label> <image> [--addr 0xADDR] [--target T]
 pod reset <label> [--mode sysreset|halt]
 pod gdb <label> [--listen-port N] [--gdb-port 3335] [--no-reset-halt] [--resume-window-ms 200]
+pod pins <label> [--cached]           show the pod's own DUT-facing pin assignments
+pod dut <label> [--dut-* ...] [--adopt]   show / set / verify the wired DUT (identity, wiring, usb, repl)
+pod usb <label>                       list the DUT USB devices the pod exports (live VID:PID)
+pod attach <label> [--no-ensure]      attach the pod's DUT USB over USB/IP; prints the DUT tty
+pod detach <label> --port N           detach a USB/IP vhci port (N from `usbip port`)
 pod i2c-target <label> [--addr 0x42] [--regs 0xAB 0xCD ...] [--bus 1] [--scl 11] [--sda 10]
 pod i2c-regs <label> [--off 0] [--length N] [--write 0xAB ...]   read/write the target register file
 pod gpio <label> <pin> [--value 0|1] [--pull up|down]            read or drive a pod GPIO
@@ -172,6 +177,77 @@ Tests cover discovery parsing, the registry, CLI argument handling, and the
 client's command construction with an injected runner. The live flash/reset/read
 paths are validated against hardware, not in the unit tests.
 
+## USB/IP DUT access
+
+When the DUT's native USB is wired to the **pod's** USB host port, the pod exports
+it over USB/IP (TCP 3240) and the host attaches it as a local device, so you talk
+to the DUT's own REPL:
+
+```bash
+pod usb lab1                 # list exported devices (live VID:PID + busid)
+pod attach lab1              # bring the pod USB host + usbip server up, attach, print the DUT tty
+mpremote connect <tty>       # the printed /dev/serial/by-id path -> the DUT REPL
+pod detach lab1 --port N     # release (N from `usbip port`)
+```
+
+`pod attach` returns `{busid, vid, pid, tty}`; the MCP equivalents are `dut_usb`
+(list) and `attach_dut`. If the DUT USB instead goes straight to this host
+(declared `agent-direct` in the DUT block, `pod dut --dut-usb VID:PID/agent-direct`),
+skip USB/IP and connect the by-id tty directly.
+
+> Activating the pod USB host (`pod attach` does this unless `--no-ensure`) drives
+> the native USB controller into host mode. It coexists with the Wi-Fi REPL on the
+> current firmware, but it is a deliberate action - the REPL is the pod's only
+> management channel.
+
+### Host prerequisites
+
+`pod attach`/`detach` use the standard `usbip` client (usbip-utils) and the
+`vhci_hcd` kernel module:
+
+```bash
+sudo apt install usbip                                       # /usr/bin/usbip
+sudo modprobe vhci-hcd                                       # load now
+echo vhci-hcd | sudo tee /etc/modules-load.d/vhci-hcd.conf   # and at every boot
+```
+
+### Running attach/detach without sudo
+
+`usbip attach`/`detach` need root only to write the vhci sysfs
+(`/sys/devices/platform/vhci_hcd.0/attach`). `pod attach` calls them as
+`sudo -n usbip ...`, so it runs unattended once one of these once-off configs is
+in place. Pick one:
+
+**Option A - scoped passwordless sudo (recommended, most reliable).** A sudoers
+drop-in lets `sudo -n usbip` run without a prompt, and grants nothing else:
+
+```bash
+echo "$USER ALL=(root) NOPASSWD: /usr/bin/usbip" | sudo tee /etc/sudoers.d/pod-usbip
+sudo chmod 0440 /etc/sudoers.d/pod-usbip
+sudo visudo -c                                               # validate syntax
+```
+
+This matches what `pod attach` already does; leave `POD_USBIP_SUDO` unset.
+
+**Option B - no sudo at all, via a udev rule.** The rule ships in this repo at
+`src/host/udev/99-usbip.rules`; it makes the vhci attach/detach sysfs attributes
+writable by a `usbip` group (the kernel's vhci store handlers do not check
+capabilities, so that is sufficient):
+
+```bash
+sudo groupadd -f usbip
+sudo usermod -aG usbip "$USER"                               # re-login to pick up the group
+sudo install -m 0644 src/host/udev/99-usbip.rules /etc/udev/rules.d/99-usbip.rules
+sudo udevadm control --reload
+sudo modprobe -r vhci-hcd 2>/dev/null; sudo modprobe vhci-hcd   # or reboot, to re-fire the rule
+ls -l /sys/devices/platform/vhci_hcd.0/attach                # expect group 'usbip', mode -rw-rw-r--
+```
+
+Then tell the pod tooling to skip the sudo prefix by exporting `POD_USBIP_SUDO=0`
+in its environment (shell profile, or the MCP server's env). With that set,
+`pod attach`/`detach` call the bare `usbip`. If a hardened kernel still rejects
+the unprivileged attach, fall back to Option A.
+
 ## Status
 
 `discover` / `list` / `register` / `info` / `repl` / `mount` / `exec` / `cp`,
@@ -187,5 +263,10 @@ hardware-validated end-to-end, including the live Wi-Fi capture round-trip
 (capture -> stream -> VCD, reliable on PIO0; the earlier hang was the LA running
 on PIO2, the CYW43 Wi-Fi block, now fixed). For DUT wiring and usage, see
 "Using the logic analyser" in `../../docs/rp2350/logic-analyser.md`.
-`usbip_attach` (Phase 4) and `uart_stream` / `telemetry` (Phase 5) remain
-stubbed and raise with the pending phase.
+USB/IP DUT access (`pod usb` / `pod attach` / `pod detach`, MCP `dut_usb` /
+`attach_dut`) is implemented and host-unit-tested, driven by the standard `usbip`
+client against the pod's existing server (see "USB/IP DUT access" above). The
+attach path is exercised when the DUT's USB is on the pod host port; on a bench
+where the DUT enumerates straight to the host it is `agent-direct` and not used.
+`uart_stream` / `telemetry` (Phase 5) remain stubbed and raise with the pending
+phase.
