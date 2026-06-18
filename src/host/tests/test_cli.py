@@ -108,6 +108,25 @@ class TestRegisterAndInfo:
         out, _ = capsys.readouterr()
         assert "10.0.0.99" in out
 
+    def test_force_register_preserves_dut_and_notes(self, monkeypatch):
+        # Seed an entry with a DUT block + notes + fingerprint, then re-register
+        # the same label with a new address and no --dut flags.
+        from pod.registry import set_pod, get_pod
+        set_pod("keep-pod", {
+            "addr4": "192.168.0.5", "addr6": [], "repl_port": 8266,
+            "fingerprint": "abcd1234",
+            "dut": {"label": "nrf", "expected": {"dpidr": 0x2BA01477}},
+            "notes": "bench 3",
+        })
+        ret = self._register(monkeypatch, label="keep-pod",
+                             address="192.168.0.77", force=True)
+        assert ret in (0, None)
+        e = get_pod("keep-pod")
+        assert e["addr4"] == "192.168.0.77"          # handle refreshed
+        assert e["dut"] == {"label": "nrf", "expected": {"dpidr": 0x2BA01477}}
+        assert e["notes"] == "bench 3"
+        assert e["fingerprint"] == "abcd1234"        # re-probe failed -> kept
+
 
 class TestUnregister:
     def test_unregister_existing(self, monkeypatch, capsys):
@@ -238,3 +257,29 @@ class TestNoSubcommand:
         monkeypatch.setattr(sys, "argv", ["pod"])
         ret = main()
         assert ret in (1, None) or ret != 0
+
+
+class TestCarryOver:
+    """Unit tests for enroll.carry_over field preservation on re-register."""
+
+    def test_explicit_dut_fields_merge_over_existing(self):
+        from pod.enroll import carry_over
+        existing = {"dut": {"label": "nrf", "target_family": "nRF52840_xxAA",
+                            "expected": {"dpidr": 1}}}
+        entry = {"dut": {"notes": "swapped probe"}}   # only a new field set
+        carry_over(existing, entry)
+        assert entry["dut"]["label"] == "nrf"          # old fields kept
+        assert entry["dut"]["expected"] == {"dpidr": 1}
+        assert entry["dut"]["notes"] == "swapped probe"   # new merged in
+
+    def test_new_fingerprint_wins_over_old(self):
+        from pod.enroll import carry_over
+        entry = {"fingerprint": "new"}
+        carry_over({"fingerprint": "old"}, entry)
+        assert entry["fingerprint"] == "new"
+
+    def test_no_existing_is_noop(self):
+        from pod.enroll import carry_over
+        entry = {"addr4": "1.2.3.4"}
+        carry_over(None, entry)
+        assert entry == {"addr4": "1.2.3.4"}

@@ -218,10 +218,13 @@ def cmd_register(args):
         entry.update(extra)
         # Read the fingerprint so an IPv4/mDNS connect is trusted from session
         # one. Best-effort; registration still succeeds if briefly unreachable.
-        from pod.enroll import probe_fingerprint
+        from pod.enroll import probe_fingerprint, carry_over
         fp = None if args.no_probe else probe_fingerprint(entry)
         if fp:
             entry["fingerprint"] = fp
+        # A --force re-register refreshes the handles but keeps the existing
+        # DUT block / notes / fingerprint (see carry_over).
+        carry_over(existing, entry)
         set_pod(label, entry)
 
     disp = entry.get("hostname") or entry.get("addr4") or \

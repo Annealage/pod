@@ -52,6 +52,31 @@ def entry_from_podinfo(info):
     }
 
 
+def carry_over(existing, entry):
+    """Preserve user/probe-managed fields from an existing registration, in place.
+
+    A `--force` re-register rebuilds the entry to refresh the network handles
+    (hostname/addr6/addr4). This keeps the things the fresh discovery does not
+    know about so re-registering to fix an address never silently drops them:
+      - the declared DUT block (any explicit --dut fields merge on top of it);
+      - notes (unless new notes were given);
+      - the stored fingerprint, when the re-probe produced none (pod briefly
+        unreachable) - so the identity guard is not lost.
+    """
+    if not existing:
+        return entry
+    if existing.get("dut"):
+        merged = dict(existing["dut"])
+        if entry.get("dut"):
+            merged.update(entry["dut"])
+        entry["dut"] = merged
+    if entry.get("notes") is None and existing.get("notes") is not None:
+        entry["notes"] = existing["notes"]
+    if not entry.get("fingerprint") and existing.get("fingerprint"):
+        entry["fingerprint"] = existing["fingerprint"]
+    return entry
+
+
 def probe_fingerprint(entry):
     """Best-effort: resolve a live target for the entry and read its fingerprint."""
     from pod.target import TargetResolver, read_fingerprint
@@ -72,7 +97,8 @@ def register_discovered(label, match=None, timeout=5.0, probe=True, force=False,
     Raises ValueError if the label exists and force is False, or LookupError if
     no single pod matches. Returns the stored entry.
     """
-    if get_pod(label) is not None and not force:
+    existing = get_pod(label)
+    if existing is not None and not force:
         raise ValueError(
             "Label '%s' already registered. Use force to overwrite." % label)
     pods = discover_pods(timeout=timeout)
@@ -87,5 +113,6 @@ def register_discovered(label, match=None, timeout=5.0, probe=True, force=False,
         fp = probe_fingerprint(entry)
         if fp:
             entry["fingerprint"] = fp
+    carry_over(existing, entry)
     set_pod(label, entry)
     return entry
