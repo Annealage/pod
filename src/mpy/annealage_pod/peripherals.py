@@ -19,6 +19,8 @@
 
 import machine
 
+from . import _rp2_pinmap as _pins
+
 # name -> (obj, extra). obj has .deinit(); extra carries helper state (e.g. the
 # I2C target's backing buffer) or None.
 _INST = {}
@@ -53,7 +55,8 @@ def instances():
 # -- I2C target (hardware machine.I2CTarget, mem-backed register file) --------
 
 
-def i2c_target(addr=0x42, regs=None, bus=1, scl=11, sda=10,
+def i2c_target(addr=0x42, regs=None, bus=_pins.I2C_TARGET_BUS,
+               scl=_pins.I2C_TARGET_SCL, sda=_pins.I2C_TARGET_SDA,
                size=256, name="i2c_target"):
     """Bring up a persistent hardware I2C target with a mem-backed register file.
 

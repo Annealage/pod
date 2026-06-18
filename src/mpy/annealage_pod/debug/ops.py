@@ -13,6 +13,7 @@ import struct
 import time
 
 from . import swd_dap, flash_nrf52, netutil
+from .. import _rp2_pinmap
 
 _dp = None
 _ap = None
@@ -26,7 +27,8 @@ def _ensure(clkdiv=8):
     if _dp is None:
         from . import pio_arbiter
         pio_arbiter.claim("swd", 1)   # PIO1 (PIO2 = CYW43 Wi-Fi, PIO0 = analyser)
-        _dp = swd_dap.DebugPort(swdio=14, swclk=15, sm_id=4, clkdiv=clkdiv)
+        _dp = swd_dap.DebugPort(swdio=_rp2_pinmap.SWD_SWDIO,
+                                swclk=_rp2_pinmap.SWD_SWCLK, sm_id=4, clkdiv=clkdiv)
         _ap = swd_dap.MEMAP(_dp)
         _cm = swd_dap.CortexM(_ap)
         _flash = flash_nrf52.NRF52Flash(_ap, _cm)
