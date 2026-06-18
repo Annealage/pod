@@ -46,6 +46,26 @@ def info(clkdiv=8):
     }
 
 
+def discover(clkdiv=8):
+    # Identify the connected DUT with architecturally-generic ADIv5/Cortex-M
+    # reads only - the DP IDCODE, the MEM-AP IDR, the Cortex-M CPUID, and the
+    # debug ROM-table base. No core halt and no family-specific memory probe
+    # (unlike info(), whose part/flash/ram reads are nRF52 FICR / RP2350 SYSINFO
+    # and only valid per family). The host decodes core/designer/family from
+    # these raw ids. Returns {"ok": False, "err": ...} if SWD does not connect.
+    try:
+        dp, ap, cm, fl = _ensure(clkdiv)
+        return {
+            "ok": True,
+            "dpidr": dp.dpidr,
+            "ap_idr": ap.idr(),
+            "cpuid": cm.cpuid(),
+            "rom_base": ap.read_debug_base(),
+        }
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        return {"ok": False, "err": repr(e)}
+
+
 def flash_file(addr, path, clkdiv=8, verify=True, chunk_words=256):
     # Program target flash from a pod-side file, bounded memory, then resume.
     dp, ap, cm, fl = _ensure(clkdiv)
@@ -79,11 +99,12 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True):
     page = fl.page_size
     err = None
 
-    srv = socket.socket()
+    # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
+    srv = socket.socket(socket.AF_INET6)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     cl = None
     try:
-        srv.bind(("0.0.0.0", port))
+        srv.bind(("::", port))
         srv.listen(1)
         cl, _ = netutil.accept(srv, 30)   # bounded + Ctrl-C-interruptible
 
@@ -138,11 +159,12 @@ def dump_stream(addr, length, port=3334, clkdiv=8):
     if not cm.is_halted():
         cm.halt()
     err = None
-    srv = socket.socket()
+    # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
+    srv = socket.socket(socket.AF_INET6)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     cl = None
     try:
-        srv.bind(("0.0.0.0", port))
+        srv.bind(("::", port))
         srv.listen(1)
         cl, _ = netutil.accept(srv, 30)   # bounded + Ctrl-C-interruptible
         a = addr
@@ -295,11 +317,12 @@ def la_stream(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
     a = logic_analyser.LogicAnalyser(base_pin, width=width, sm_id=sm_id)
     err = None
     r = None
-    srv = socket.socket()
+    # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
+    srv = socket.socket(socket.AF_INET6)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     cl = None
     try:
-        srv.bind(("0.0.0.0", port))
+        srv.bind(("::", port))
         srv.listen(1)
         cl, _ = netutil.accept(srv, accept_timeout)   # bounded + Ctrl-C-interruptible
         # Bound the data phase too: a half-open / flaky Wi-Fi connection could

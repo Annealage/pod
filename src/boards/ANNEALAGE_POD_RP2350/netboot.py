@@ -142,9 +142,11 @@ async def _repl_accept(port):
     # state. We never read the socket: arepl owns the read via sys.stdin, into which
     # os.dupterm aggregates the slot. On a detected disconnect we detach the slot
     # before closing the socket (see the dead branch for why that order matters).
-    s = socket.socket()
+    # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion of
+    # an IP6_ADDR_ANY listener to IPADDR_TYPE_ANY; one socket serves both.
+    s = socket.socket(socket.AF_INET6)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("0.0.0.0", port))
+    s.bind(("::", port))
     s.listen(4)
     s.setblocking(False)
     poller = select.poll()

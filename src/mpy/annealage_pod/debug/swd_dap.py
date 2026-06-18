@@ -44,6 +44,7 @@ PWRUP_ACK = CSYSPWRUPACK | CDBGPWRUPACK            # 0xA0000000
 AP_CSW = 0x00
 AP_TAR = 0x04
 AP_DRW = 0x0C
+AP_BASE = 0xF8
 AP_IDR = 0xFC
 
 # CSW: base debug flags | size[2:0] | (addrinc[1:0] << 4)
@@ -215,6 +216,12 @@ class MEMAP:
 
     def idr(self):
         return self.dp.read_ap(AP_IDR, self.apsel)
+
+    def read_debug_base(self):
+        # ADIv5 MEM-AP BASE: the debug ROM table base pointer (bit 0 = present,
+        # bit 1 = format). The host walks/decodes it; here it is just one more
+        # generic identity word for discover().
+        return self.dp.read_ap(AP_BASE, self.apsel)
 
     def read32(self, addr):
         self._set_csw(CSW_WORD)

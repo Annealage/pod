@@ -241,10 +241,10 @@ def start_repl_socket(port=8266):
         return None
     if _repl_listener is not None:
         return _repl_listener
-    addr = _socket.getaddrinfo("0.0.0.0", port)[0][-1]
-    s = _socket.socket()
+    # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
+    s = _socket.socket(_socket.AF_INET6)
     s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    s.bind(addr)
+    s.bind(("::", port))
     s.listen(1)
     _repl_listener = s
     return s

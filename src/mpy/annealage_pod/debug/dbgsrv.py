@@ -357,11 +357,12 @@ def serve(dp, ap, cm, fpb, port=3335):
     # in (the PIO SM is not recreated, avoiding PIO instruction-memory leaks under
     # the persistent REPL). The core is left in whatever state the last command
     # set; this server never auto-resumes.
-    srv = socket.socket()
+    # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
+    srv = socket.socket(socket.AF_INET6)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     cl = None
     try:
-        srv.bind(("0.0.0.0", port))
+        srv.bind(("::", port))
         srv.listen(1)
         # Bound accept() so a session that never connects does not block the REPL
         # forever; a timeout here returns cleanly with no client.

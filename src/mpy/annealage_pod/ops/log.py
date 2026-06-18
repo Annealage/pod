@@ -77,10 +77,10 @@ def _start_socket_fallback(port):
         return None
     if _listener is not None:
         return _listener
-    addr = _socket.getaddrinfo("0.0.0.0", port)[0][-1]
-    s = _socket.socket()
+    # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
+    s = _socket.socket(_socket.AF_INET6)
     s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    s.bind(addr)
+    s.bind(("::", port))
     s.listen(1)
     _listener = s
     return s
