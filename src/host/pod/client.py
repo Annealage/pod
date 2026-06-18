@@ -250,6 +250,16 @@ class Pod:
         )
         return _last_dict(out)
 
+    def pinmap(self) -> dict:
+        """Report the pod's own DUT-facing GPIO assignments (SWD/nRST/I2C-target).
+
+        The pod side of the interconnect; pair with the registry dut.wiring for
+        the DUT-side pins.
+        """
+        out = self.exec(
+            "import annealage_pod._rp2_pinmap as p; print(p.pinmap())")
+        return _last_dict(out)
+
     def discover_dut(self) -> dict:
         """Read the connected DUT's generic ADIv5/Cortex-M identity over SWD.
 
@@ -534,14 +544,45 @@ class Pod:
 
     # ── stubbed methods (pending future phases) ──────────────────────────
 
-    def usbip_attach(self) -> None:
-        """Attach the DUT USB device over USB/IP.
+    def _usbip_host(self):
+        """A usbip-friendly host string (prefer hostname/IPv4; usbip IPv6 is spotty)."""
+        r = self._resolver
+        return (r.hostname or r.addr4 or (r.addr6[0] if r.addr6 else None)
+                or self.address)
 
-        Pending Phase 4: requires DUT USB host + USB/IP server on the pod.
+    def usbip_list(self) -> list:
+        """The DUT USB devices the pod exports over USB/IP (live VID:PID + busid)."""
+        from pod import usbip as _u
+        return _u.list_remote(self._usbip_host())
+
+    def usbip_attach(self, ensure: bool = True) -> dict:
+        """Export the DUT over USB/IP and attach it on this host.
+
+        With ensure=True, first brings the pod's USB host + usbip server up over
+        the REPL (see pod.usbip.ensure_server - note the Wi-Fi risk). Lists the
+        exported device for its live VID:PID + busid, attaches it (sudo), and
+        returns {busid, vid, pid, tty}; tty is the DUT's CDC device, or None if
+        it did not enumerate in time.
         """
-        raise NotImplementedError(
-            "usbip_attach is not yet implemented - pending Phase 4 (DUT USB host + USB/IP)"
-        )
+        from pod import usbip as _u
+        if ensure:
+            _u.ensure_server(self)
+        host = self._usbip_host()
+        devs = _u.list_remote(host)
+        if not devs:
+            raise RuntimeError(
+                "pod %s exports no USB device - is the DUT on the pod USB host "
+                "port and enumerated?" % host)
+        dev = dict(devs[0])
+        before = _u.serial_devices()
+        _u.attach(host, dev["busid"])
+        dev["tty"] = _u.wait_for_new_tty(before)
+        return dev
+
+    def usbip_detach(self, port: int) -> bool:
+        """Detach a vhci port previously attached (see `usbip port`)."""
+        from pod import usbip as _u
+        return _u.detach(port)
 
     def uart_stream(self) -> None:
         """Stream DUT UART output over TCP.

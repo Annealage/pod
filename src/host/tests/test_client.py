@@ -139,12 +139,34 @@ class TestDutOps:
         assert "reset_halt=False" in cmd
 
 
-class TestNotImplementedStubs:
-    def test_usbip_attach_raises(self, pod):
-        with pytest.raises(NotImplementedError) as exc_info:
-            pod.usbip_attach()
-        assert "Phase 4" in str(exc_info.value)
+class TestUsbipAttach:
+    def test_attach_flow(self, pod, monkeypatch):
+        import pod.usbip as u
+        calls = {}
+        monkeypatch.setattr(u, "ensure_server", lambda p: calls.setdefault("ensure", True))
+        monkeypatch.setattr(u, "list_remote",
+                            lambda host: [{"busid": "1-1", "vid": "f055", "pid": "9802"}])
+        monkeypatch.setattr(u, "attach",
+                            lambda host, busid: calls.setdefault("attach", (host, busid)))
+        monkeypatch.setattr(u, "serial_devices", lambda: set())
+        monkeypatch.setattr(u, "wait_for_new_tty", lambda before: "/dev/ttyACM1")
+        dev = pod.usbip_attach()
+        assert dev == {"busid": "1-1", "vid": "f055", "pid": "9802",
+                       "tty": "/dev/ttyACM1"}
+        assert calls["ensure"] is True
+        assert calls["attach"][1] == "1-1"
 
+    def test_attach_no_device_raises(self, pod, monkeypatch):
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ensure_server", lambda p: None)
+        monkeypatch.setattr(u, "list_remote", lambda host: [])
+        with pytest.raises(RuntimeError):
+            pod.usbip_attach()
+
+
+class TestNotImplementedStubs:
+    # usbip_attach is implemented (see TestUsbipAttach); uart_stream/telemetry
+    # remain stubs pending their phases.
     def test_uart_stream_raises(self, pod):
         with pytest.raises(NotImplementedError) as exc_info:
             pod.uart_stream()

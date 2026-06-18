@@ -74,7 +74,18 @@ def carry_over(existing, entry):
         entry["notes"] = existing["notes"]
     if not entry.get("fingerprint") and existing.get("fingerprint"):
         entry["fingerprint"] = existing["fingerprint"]
+    if not entry.get("pins") and existing.get("pins"):
+        entry["pins"] = existing["pins"]
     return entry
+
+
+def read_pinmap(entry):
+    """Best-effort: read the pod's own DUT-facing pin assignments, or None."""
+    from pod.client import Pod
+    try:
+        return Pod.from_entry(entry).pinmap()
+    except Exception:  # noqa: BLE001 - enrollment proceeds without the pinmap
+        return None
 
 
 def probe_fingerprint(entry):
@@ -113,6 +124,9 @@ def register_discovered(label, match=None, timeout=5.0, probe=True, force=False,
         fp = probe_fingerprint(entry)
         if fp:
             entry["fingerprint"] = fp
+        pins = read_pinmap(entry)
+        if pins:
+            entry["pins"] = pins
     carry_over(existing, entry)
     set_pod(label, entry)
     return entry

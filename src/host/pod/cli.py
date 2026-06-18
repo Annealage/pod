@@ -63,35 +63,146 @@ def _split_addr6(values):
 
 
 def _add_dut_flags(p):
-    """Add the shared --dut-* declared-block flags to a subparser."""
+    """Add the shared --dut-* declared-block flags to a subparser.
+
+    Everything is --dut-* scoped so it never collides with pod flags (e.g. the
+    pod's own --repl-port). The DUT block records identity, where the DUT is
+    reached (usb/repl), and how it is wired, so an agent reads one pod_info and
+    needs to ask nothing.
+    """
     p.add_argument("--dut-label", default=None, dest="dut_label", metavar="NAME",
                    help="DUT friendly name")
     p.add_argument("--dut-family", default=None, dest="dut_family", metavar="FAM",
                    help="DUT target family/part, e.g. nRF52840_xxAA")
+    p.add_argument("--dut-board", default=None, dest="dut_board", metavar="BOARD",
+                   help="DUT board name, e.g. PCA10059")
     p.add_argument("--dut-flash-base", default=None, dest="dut_flash_base",
                    metavar="ADDR", help="DUT flash base address (e.g. 0x0)")
     p.add_argument("--dut-flash-size", default=None, dest="dut_flash_size",
                    metavar="BYTES", help="DUT flash size in bytes")
+    p.add_argument("--dut-usb", default=None, dest="dut_usb", metavar="VID:PID[/CONN]",
+                   help="DUT USB id + where it connects, e.g. f055:9802/pod-host "
+                        "(conn: pod-host | agent-direct)")
+    p.add_argument("--dut-repl", default=None, dest="dut_repl",
+                   metavar="TRANSPORT[:PORT]",
+                   help="How the DUT REPL is reached, e.g. usbip:3240 or cdc-direct")
+    p.add_argument("--dut-wire", default=None, dest="dut_wire", action="append",
+                   metavar="SPEC",
+                   help="Per-interface wiring (repeatable), e.g. "
+                        "i2c:pod.scl=11,pod.sda=10,dut.scl=42/P1.10,dut.sda=45/P1.13")
     p.add_argument("--dut-notes", default=None, dest="dut_notes", metavar="TEXT",
                    help="DUT-specific notes")
 
 
+def _parse_usb(spec):
+    """'f055:9802/pod-host' -> {'vid','pid','connection'}."""
+    usb_part, _, conn = spec.partition("/")
+    vid_s, _, pid_s = usb_part.partition(":")
+    out = {}
+    if vid_s:
+        out["vid"] = "0x%04x" % int(vid_s, 16)
+    if pid_s:
+        out["pid"] = "0x%04x" % int(pid_s, 16)
+    if conn:
+        out["connection"] = conn
+    return out
+
+
+def _parse_repl(spec):
+    """'usbip:3240' / 'cdc-direct' -> {'transport', 'port'?}."""
+    transport, _, port = spec.partition(":")
+    out = {"transport": transport}
+    if port:
+        out["port"] = int(port, 0)
+    return out
+
+
+def _parse_pin(rhs):
+    """'42/P1.10' -> {'pin': 42, 'label': 'P1.10'}; '42' -> {'pin': 42}."""
+    pin_s, _, label = rhs.partition("/")
+    out = {"pin": int(pin_s, 0)}
+    if label:
+        out["label"] = label
+    return out
+
+
+def _parse_wire(spec):
+    """'i2c:pod.scl=11,pod.sda=10,dut.scl=42/P1.10' -> (iface, {pod:{}, dut:{}})."""
+    iface, _, rest = spec.partition(":")
+    side = {"pod": {}, "dut": {}}
+    for tok in rest.split(","):
+        tok = tok.strip()
+        if not tok or "=" not in tok:
+            continue
+        lhs, _, rhs = tok.partition("=")
+        where, _, sig = lhs.partition(".")
+        if where == "pod":
+            side["pod"][sig] = int(rhs, 0)
+        elif where == "dut":
+            side["dut"][sig] = _parse_pin(rhs)
+    return iface, {k: v for k, v in side.items() if v}
+
+
+def _print_dut_fields(declared, pad):
+    """Print a declared DUT block's fields (identity, usb, repl, wiring)."""
+    for k in ("label", "target_family", "board", "flash_base", "flash_size",
+              "notes"):
+        if declared.get(k) is not None:
+            v = declared[k]
+            v = hex(v) if isinstance(v, int) else v
+            print(f"{pad}{k}: {v}")
+    usb = declared.get("usb")
+    if usb:
+        conn = f" ({usb['connection']})" if usb.get("connection") else ""
+        print(f"{pad}usb: {usb.get('vid', '?')}:{usb.get('pid', '?')}{conn}")
+    repl = declared.get("repl")
+    if repl:
+        port = f":{repl['port']}" if repl.get("port") else ""
+        print(f"{pad}repl: {repl.get('transport', '?')}{port}")
+    wiring = declared.get("wiring")
+    if wiring:
+        print(f"{pad}wiring:")
+        for iface, m in wiring.items():
+            pod_s = " ".join(f"{s}=GP{p}" for s, p in m.get("pod", {}).items())
+            dut_s = " ".join(
+                f"{s}=Pin({d['pin']})" + (f"/{d['label']}" if d.get("label") else "")
+                for s, d in m.get("dut", {}).items())
+            print(f"{pad}  {iface}: pod[{pod_s}]  dut[{dut_s}]")
+    exp = declared.get("expected")
+    if exp:
+        print(f"{pad}expected: " + "  ".join(
+            f"{k}={hex(v)}" for k, v in exp.items()))
+
+
 def _dut_block_from_args(args):
     """Build a declared DUT block from --dut-* flags, or None if none given."""
-    fields = {
-        "label": getattr(args, "dut_label", None),
-        "target_family": getattr(args, "dut_family", None),
-        "flash_base": getattr(args, "dut_flash_base", None),
-        "flash_size": getattr(args, "dut_flash_size", None),
-        "notes": getattr(args, "dut_notes", None),
-    }
+    block = {}
+    if getattr(args, "dut_label", None) is not None:
+        block["label"] = args.dut_label
+    if getattr(args, "dut_family", None) is not None:
+        block["target_family"] = args.dut_family
+    if getattr(args, "dut_board", None) is not None:
+        block["board"] = args.dut_board
     if getattr(args, "dut_flash_base", None) is not None:
-        fields["flash_base"] = int(args.dut_flash_base, 0) \
+        block["flash_base"] = int(args.dut_flash_base, 0) \
             if isinstance(args.dut_flash_base, str) else args.dut_flash_base
     if getattr(args, "dut_flash_size", None) is not None:
-        fields["flash_size"] = int(args.dut_flash_size, 0) \
+        block["flash_size"] = int(args.dut_flash_size, 0) \
             if isinstance(args.dut_flash_size, str) else args.dut_flash_size
-    block = {k: v for k, v in fields.items() if v is not None}
+    if getattr(args, "dut_notes", None) is not None:
+        block["notes"] = args.dut_notes
+    if getattr(args, "dut_usb", None):
+        block["usb"] = _parse_usb(args.dut_usb)
+    if getattr(args, "dut_repl", None):
+        block["repl"] = _parse_repl(args.dut_repl)
+    if getattr(args, "dut_wire", None):
+        wiring = {}
+        for spec in args.dut_wire:
+            iface, m = _parse_wire(spec)
+            if iface:
+                wiring[iface] = m
+        if wiring:
+            block["wiring"] = wiring
     if not block:
         return None
     block["declared_at"] = _now()
@@ -218,12 +329,16 @@ def cmd_register(args):
         entry.update(extra)
         # Read the fingerprint so an IPv4/mDNS connect is trusted from session
         # one. Best-effort; registration still succeeds if briefly unreachable.
-        from pod.enroll import probe_fingerprint, carry_over
-        fp = None if args.no_probe else probe_fingerprint(entry)
-        if fp:
-            entry["fingerprint"] = fp
+        from pod.enroll import probe_fingerprint, read_pinmap, carry_over
+        if not args.no_probe:
+            fp = probe_fingerprint(entry)
+            if fp:
+                entry["fingerprint"] = fp
+            pins = read_pinmap(entry)
+            if pins:
+                entry["pins"] = pins
         # A --force re-register refreshes the handles but keeps the existing
-        # DUT block / notes / fingerprint (see carry_over).
+        # DUT block / notes / fingerprint / pins (see carry_over).
         carry_over(existing, entry)
         set_pod(label, entry)
 
@@ -239,12 +354,26 @@ def cmd_dut(args):
     """Show / set / verify the DUT a pod is wired to."""
     entry = _require_pod(args.label)
 
-    # Setting declared metadata?
+    # Setting declared metadata? Merge nested fields additively so declaring one
+    # interface's wiring (or a usb/repl field) does not wipe the others.
     declared = dict(entry.get("dut") or {})
     block = _dut_block_from_args(args)
     changed = False
     if block:
+        new_wiring = block.pop("wiring", None)
+        new_usb = block.pop("usb", None)
+        new_repl = block.pop("repl", None)
         declared.update(block)
+        if new_usb:
+            declared.setdefault("usb", {}).update(new_usb)
+        if new_repl:
+            declared.setdefault("repl", {}).update(new_repl)
+        if new_wiring:
+            w = declared.setdefault("wiring", {})
+            for iface, m in new_wiring.items():
+                cur = w.setdefault(iface, {})
+                for side, sigs in m.items():
+                    cur.setdefault(side, {}).update(sigs)
         changed = True
 
     # Live discover (default unless --no-probe), and optionally adopt the read
@@ -273,11 +402,7 @@ def cmd_dut(args):
     print(f"DUT verdict: {result['verdict']}")
     if declared:
         print("  declared:")
-        for k in ("label", "target_family", "flash_base", "flash_size", "notes"):
-            if declared.get(k) is not None:
-                v = declared[k]
-                v = hex(v) if isinstance(v, int) else v
-                print(f"    {k}: {v}")
+        _print_dut_fields(declared, "    ")
     if result.get("fields"):
         print("  identity (declared vs live):")
         for name, f in result["fields"].items():
@@ -292,6 +417,90 @@ def cmd_dut(args):
         else:
             print(f"  live read failed: {live.get('err')}")
     return 0 if result["verdict"] not in ("MISMATCH",) else 1
+
+
+def _format_pinmap(pins):
+    """Render a pod pinmap dict to compact lines."""
+    out = []
+    swd = pins.get("swd")
+    if swd:
+        out.append("  swd: " + " ".join(f"{k}=GP{v}" for k, v in swd.items()))
+    if pins.get("nrst") is not None:
+        out.append(f"  nrst: GP{pins['nrst']}")
+    i2c = pins.get("i2c_target")
+    if i2c:
+        out.append("  i2c_target: " + " ".join(
+            (f"{k}=GP{v}" if k != "bus" else f"bus={v}") for k, v in i2c.items()))
+    return out
+
+
+def cmd_pins(args):
+    """Show the pod's own DUT-facing pin assignments (live, or cached)."""
+    entry = _require_pod(args.label)
+    pins = None
+    if not args.cached:
+        try:
+            pins = Pod.from_entry(entry).pinmap()
+        except Exception as exc:  # noqa: BLE001 - fall back to the cached map
+            print(f"(live read failed: {exc}; showing cached)", file=sys.stderr)
+    if pins is None:
+        pins = entry.get("pins")
+    if not pins:
+        print("No pin map available (register the pod, or use a live read).",
+              file=sys.stderr)
+        return 1
+    print(f"Pod {args.label} DUT-facing pins:")
+    for line in _format_pinmap(pins):
+        print(line)
+    return 0
+
+
+def cmd_usb(args):
+    """List the DUT USB devices the pod exports over USB/IP (live VID:PID)."""
+    entry = _require_pod(args.label)
+    try:
+        devs = Pod.from_entry(entry).usbip_list()
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        print(f"usb list failed: {exc}", file=sys.stderr)
+        print("(the pod usbip server must be running - try 'pod attach' first)",
+              file=sys.stderr)
+        return 1
+    if not devs:
+        print("No DUT USB devices exported by the pod.")
+        return 0
+    for d in devs:
+        print(f"  {d['busid']}  {d['vid']}:{d['pid']}")
+    return 0
+
+
+def cmd_attach(args):
+    """Attach the pod's DUT USB over USB/IP and report the DUT's tty."""
+    entry = _require_pod(args.label)
+    try:
+        dev = Pod.from_entry(entry).usbip_attach(ensure=not args.no_ensure)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        print(f"attach failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Attached DUT {dev['vid']}:{dev['pid']} (busid {dev['busid']}).")
+    if dev.get("tty"):
+        print(f"  DUT REPL: {dev['tty']}")
+        print(f"  e.g. mpremote connect {dev['tty']}")
+    else:
+        print("  (no CDC tty appeared yet; check 'usbip port' / dmesg)")
+    return 0
+
+
+def cmd_detach(args):
+    """Detach a USB/IP vhci port (see 'usbip port')."""
+    _require_pod(args.label)
+    from pod import usbip as _u
+    try:
+        _u.detach(args.port)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        print(f"detach failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Detached vhci port {args.port}.")
+    return 0
 
 
 def cmd_unregister(args):
@@ -320,17 +529,15 @@ def cmd_info(args):
     print(f"Carrier:    {entry.get('carrier_id') or '(none)'}")
     print(f"MP version: {entry.get('mp_version') or '(none)'}")
     print(f"Last seen:  {entry.get('last_seen') or '(unknown)'}")
+    pins = entry.get("pins")
+    if pins:
+        print("Pod pins:")
+        for line in _format_pinmap(pins):
+            print(line)
     dut = entry.get("dut")
     if dut:
         print("DUT (declared):")
-        for k in ("label", "target_family", "flash_base", "flash_size", "notes"):
-            if dut.get(k) is not None:
-                v = dut[k]
-                v = hex(v) if isinstance(v, int) else v
-                print(f"  {k}: {v}")
-        if dut.get("expected"):
-            exp = "  ".join(f"{k}={hex(v)}" for k, v in dut["expected"].items())
-            print(f"  expected: {exp}")
+        _print_dut_fields(dut, "  ")
         print("  (run 'pod dut %s' to verify against the live target)" % args.label)
     notes = entry.get("notes")
     if notes:
@@ -568,6 +775,35 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p = sub.add_parser("info", help="Show full details for a registered pod")
     p.add_argument("label")
 
+    # pins
+    p = sub.add_parser("pins",
+                       help="Show the pod's own DUT-facing pin assignments")
+    p.add_argument("label")
+    p.add_argument("--cached", action="store_true",
+                   help="Show the cached map instead of a live read")
+
+    # usb
+    p = sub.add_parser("usb",
+                       help="List the DUT USB devices the pod exports (live VID:PID)")
+    p.add_argument("label")
+
+    # attach
+    p = sub.add_parser(
+        "attach", help="Attach the pod's DUT USB over USB/IP; prints the DUT tty",
+        description="Brings the pod USB host + usbip server up (unless "
+                    "--no-ensure), attaches the exported device on this host "
+                    "(needs passwordless sudo for usbip), and reports the DUT's "
+                    "CDC tty. NB: activating the pod USB host can disturb Wi-Fi.")
+    p.add_argument("label")
+    p.add_argument("--no-ensure", action="store_true", dest="no_ensure",
+                   help="Do not (re)start the pod USB host + usbip server first")
+
+    # detach
+    p = sub.add_parser("detach", help="Detach a USB/IP vhci port (see 'usbip port')")
+    p.add_argument("label")
+    p.add_argument("--port", type=int, required=True,
+                   help="vhci port from 'usbip port'")
+
     # repl
     p = sub.add_parser("repl", help="Attach interactive REPL to a pod")
     p.add_argument("label")
@@ -687,6 +923,10 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "unregister": cmd_unregister,
         "dut": cmd_dut,
         "info": cmd_info,
+        "pins": cmd_pins,
+        "usb": cmd_usb,
+        "attach": cmd_attach,
+        "detach": cmd_detach,
         "repl": cmd_repl,
         "mount": cmd_mount,
         "exec": cmd_exec,

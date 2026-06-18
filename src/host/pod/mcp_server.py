@@ -98,6 +98,28 @@ def handle_dut(label: str, adopt: bool = False) -> dict:
     return reconcile_dut(entry.get("dut"), live)
 
 
+def handle_dut_usb(label: str) -> list:
+    """List the DUT USB devices the pod exports over USB/IP (live VID:PID + busid)."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    return Pod.from_entry(entry).usbip_list()
+
+
+def handle_attach_dut(label: str, ensure: bool = True) -> dict:
+    """Attach the pod's DUT USB over USB/IP; returns {busid, vid, pid, tty}.
+
+    Brings the pod USB host + usbip server up first (unless ensure=False) and
+    attaches on this host (needs passwordless sudo for usbip). The returned tty
+    is the DUT's own CDC REPL - connect to it with mpremote. NB: activating the
+    pod USB host can disturb the pod's Wi-Fi link.
+    """
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    return Pod.from_entry(entry).usbip_attach(ensure=ensure)
+
+
 def handle_dut_exec(label: str, code: str) -> str:
     """Execute MicroPython code on a pod. Returns stdout."""
     entry = get_pod(label)
@@ -330,6 +352,38 @@ def build_server():
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "adopt": {"type": "boolean", "description": "Snapshot live ids into the declared expected block.", "default": False},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="dut_usb",
+                description=(
+                    "List the DUT USB devices the pod exports over USB/IP - the "
+                    "live VID:PID and busid. Read-only; the pod's usbip server "
+                    "must already be running (use attach_dut to bring it up)."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="attach_dut",
+                description=(
+                    "Attach the pod's DUT USB over USB/IP to THIS host and return "
+                    "{busid, vid, pid, tty}. tty is the DUT's own CDC REPL - "
+                    "connect with mpremote. Brings the pod USB host + usbip "
+                    "server up first unless ensure=false. Needs passwordless sudo "
+                    "for usbip on the host. NB: activating the pod USB host can "
+                    "disturb the pod's Wi-Fi link."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "ensure": {"type": "boolean", "description": "Start the pod USB host + usbip server first.", "default": True},
                     },
                     "required": ["label"],
                 },
@@ -569,6 +623,13 @@ def build_server():
             elif name == "dut":
                 result = await asyncio.to_thread(
                     handle_dut, arguments["label"], arguments.get("adopt", False))
+            elif name == "dut_usb":
+                result = await asyncio.to_thread(
+                    handle_dut_usb, arguments["label"])
+            elif name == "attach_dut":
+                result = await asyncio.to_thread(
+                    handle_attach_dut, arguments["label"],
+                    arguments.get("ensure", True))
             elif name == "dut_exec":
                 result = await asyncio.to_thread(
                     handle_dut_exec, arguments["label"], arguments["code"])
