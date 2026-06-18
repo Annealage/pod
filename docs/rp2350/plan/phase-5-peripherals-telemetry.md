@@ -26,6 +26,18 @@ and the `power` reset path are gated on a future custom carrier.
 - DUT UART forwarded over a TCP socket (default port per mDNS TXT). Hardware UART
   or PIO UART depending on the Phase 1 pin/PIO allocation. Configurable
   baud/parity/bits.
+- Current state (2026-06-18): NOT yet implemented on RP2350 - there is no pod
+  TCP listener on the advertised port. The mDNS TXT already advertises
+  `uart-port=2000` (netboot `_advertise_mdns`), so the broadcast currently
+  promises a port nothing binds; implement the bridge or drop the TXT key until
+  it exists. The ESP32-S3 `uartbridge` C module does not port (IDF UART driver +
+  FreeRTOS task + BSD sockets); the RP2350 path is a new pure-MP bridge -
+  `machine.UART` (or PIO UART) on the DUT-UART pins, pumped to a TCP listener.
+- Implementation note: bind the listener dual-stack (`socket.socket(AF_INET6)` +
+  `bind(("::", port))`) like the other pod listeners, so the host reaches it over
+  the pod's stable IPv6 address. The host hook is the `uart_stream` stub in
+  `src/host/pod/client.py` (currently NotImplementedError, "pending Phase 5"),
+  surfaced as the `pod uart` CLI verb and the `tail_uart` MCP tool.
 
 ### F5.3 Power telemetry (INA228) - custom carrier, deferred
 - Not present on the bare Pico 2 W. When a custom carrier exists, reuse the S3
