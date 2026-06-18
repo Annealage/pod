@@ -115,16 +115,27 @@ def wait_for_new_tty(before, timeout=8.0, _sleep=time.sleep, _list=serial_device
     return None
 
 
-def ensure_server(pod):
-    """Bring the pod's USB host + usbip server up over the REPL (idempotent-ish).
+def ensure_server(pod, settle=6.0, _sleep=time.sleep):
+    """Bring the pod's USB host + usbip server up over the REPL, in the right order.
 
-    RISK: machine.USBHost().active(True) activates the native USB controller in
-    host mode and has been seen to disturb the Wi-Fi link. Call deliberately.
+    The export table is seeded exactly once, inside usbip.start()'s rescan of
+    mounted devices, so the DUT must already be enumerated when start() runs.
+    TinyUSB enumeration is pumped by the pod's asyncio idle poll, which only runs
+    BETWEEN execs - a blocking sleep inside a single exec would stall the
+    single-core loop and prevent enumeration. So this activates the host, waits
+    host-side for enumeration to settle, THEN starts usbip. The DUT must be
+    physically present and powered before activation.
+
+    RISK: machine.USBHost().active(True) drives the native USB controller into
+    host mode. It coexists with the Wi-Fi REPL on the dual-stack firmware, but it
+    is a deliberate action - the REPL is the pod's only management channel.
+
+    NB: the seed is one-shot per boot - if usbip was already started earlier with
+    an empty table (e.g. a prior wrong-order bring-up), start() here will not
+    re-seed and a reboot is needed. The firmware re-seeds on every start() to
+    avoid this; see usbhost_start().
     """
-    out = pod.exec(
-        "import machine, usbip\n"
-        "machine.USBHost().active(True)\n"
-        "usbip.start()\n"
-        "print('usbip-running', usbip.is_running())\n"
-        "print('busids', usbip.attached_devices())\n")
-    return out
+    pod.exec("import machine; machine.USBHost().active(True)")
+    _sleep(settle)
+    return pod.exec(
+        "import usbip; usbip.start(); print('usbip-running', usbip.is_running())")

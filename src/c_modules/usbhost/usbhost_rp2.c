@@ -767,6 +767,15 @@ bool tuh_enum_descriptor_configuration_cb(uint8_t daddr, uint8_t cfg_index,
 int usbhost_start(void)
 {
     if (s_state.started) {
+        /* Already started: re-seed the slot table. The first start() seeds it
+         * once, but a DUT that only reached the mounted state AFTER that (the
+         * host was activated and usbip.start() ran before TinyUSB finished
+         * enumerating, or a later hot-plug) would otherwise never appear, since
+         * the PendSV query accessors deliberately never rescan. rescan_mounted()
+         * is idempotent (skips already-enumerated addresses, drops vanished
+         * ones) and runs at thread level here, so calling it on every start()
+         * makes bring-up order-independent without a reboot. */
+        rescan_mounted();
         return 0;
     }
 
@@ -782,8 +791,10 @@ int usbhost_start(void)
     s_state.started = true;
 
     /* Seed the slot table with any device TinyUSB already mounted before
-     * usbhost_start(). There is no mount hook on rp2, so this seed plus the
-     * lazy re-scan in usbhost_get_devices() are the only enumeration triggers. */
+     * usbhost_start(). There is no mount hook on rp2, so this first seed plus
+     * the re-seed on every subsequent start() (the early-return branch above)
+     * are the only enumeration triggers; the PendSV query accessors never
+     * rescan. */
     rescan_mounted();
 
     USBHOST_DBG("started (rhport=%d)", BOARD_TUH_RHPORT);
