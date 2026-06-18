@@ -137,15 +137,11 @@ async def _repl_accept(port):
     # accidentally dials the wrong pod can't knock the active one off.
     #
     # The active client is tracked in `cur` and its disconnect is detected by polling
-    # THAT handle, never the dupterm slot: the dupterm layer (os_dupterm.c
-    # mp_os_deactivate) closes the socket on the client's EOF/error, so a dead handle
-    # polls NVAL/HUP/ERR while a live one polls RD/WR. Polling the socket touches no
-    # shared REPL state. We never read the socket: arepl owns the read via sys.stdin,
-    # into which os.dupterm aggregates the slot.
-    #
-    # KNOWN ISSUE (task #36): a session held idle a few seconds then closed leaves the
-    # socket REPL wedged until reboot (a pre-existing dupterm/arepl/lwIP bug, not this
-    # loop - reproduces on a plain evict loop too). Short sessions are unaffected.
+    # THAT handle: a peer close makes it poll HUP/ERR, a fully closed handle polls
+    # NVAL, while a live one polls RD/WR. Polling the socket touches no shared REPL
+    # state. We never read the socket: arepl owns the read via sys.stdin, into which
+    # os.dupterm aggregates the slot. On a detected disconnect we detach the slot
+    # before closing the socket (see the dead branch for why that order matters).
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", port))
@@ -157,8 +153,8 @@ async def _repl_accept(port):
     cur = None
     while True:
         try:
-            # Has the active session ended? The dupterm layer closes the client
-            # socket on disconnect, so the cached handle then polls dead.
+            # Has the active session ended? On disconnect the client handle polls
+            # dead (HUP/ERR on a peer close, NVAL once closed).
             if cur is not None:
                 dead = False
                 try:
@@ -172,9 +168,17 @@ async def _repl_accept(port):
                         live.unregister(cur)
                     except Exception:
                         pass
-                    # dupterm's mp_os_deactivate already closed it on a clean EOF
-                    # (double tcp_close is guarded to a no-op); close here too so an
-                    # RST'd handle that dupterm hasn't reaped yet doesn't leak.
+                    # Detach the dupterm slot BEFORE closing the socket, so the slot
+                    # never points at a closed fd. A lingering closed slot polls NVAL,
+                    # and a dupterm poll that doesn't mask closed slots would wake
+                    # arepl's blocking stdin read on a dead fd and park the single-core
+                    # loop (the REPL is the pod's only management path). Detaching is
+                    # the app-side guard; current MicroPython also masks it, so the two
+                    # together keep stdin on the UART alone and the loop live.
+                    try:
+                        os.dupterm(None, 0)
+                    except Exception:
+                        pass
                     try:
                         cur.close()
                     except Exception:
