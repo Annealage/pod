@@ -32,7 +32,7 @@ from pod.registry import (
     remove_pod,
     reconcile_dut,
 )
-from pod.client import Pod
+from pod.client import Pod, PodExecError
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -491,15 +491,21 @@ def cmd_attach(args):
 
 
 def cmd_detach(args):
-    """Detach a USB/IP vhci port (see 'usbip port')."""
-    _require_pod(args.label)
-    from pod import usbip as _u
+    """Detach a USB/IP vhci port, or all ports attached to this pod."""
+    entry = _require_pod(args.label)
     try:
-        _u.detach(args.port)
+        if args.port is not None:
+            from pod import usbip as _u
+            _u.detach(args.port)
+            print(f"Detached vhci port {args.port}.")
+        else:
+            res = Pod.from_entry(entry).usbip_detach()
+            ports = res.get("detached", [])
+            print(f"Detached vhci port(s) {ports}." if ports
+                  else "No vhci attachment to this pod.")
     except Exception as exc:  # noqa: BLE001 - surfaced to the operator
         print(f"detach failed: {exc}", file=sys.stderr)
         return 1
-    print(f"Detached vhci port {args.port}.")
     return 0
 
 
@@ -564,9 +570,33 @@ def cmd_mount(args):
 def cmd_exec(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
-    output = pod.exec(args.code)
+    try:
+        output = pod.exec(args.code)
+    except PodExecError as exc:
+        print(str(exc), file=sys.stderr)
+        if exc.stderr:
+            print("--- pod stderr ---", file=sys.stderr)
+            print(exc.stderr, file=sys.stderr)
+        return 1
     if output:
         print(output, end="")
+    return 0
+
+
+def cmd_dut_exec(args):
+    """Run MicroPython on the DUT (turnkey: ensure link + attach + mpremote)."""
+    entry = _require_pod(args.label)
+    try:
+        res = Pod.from_entry(entry).dut_exec(args.code)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        print(f"dut-exec failed: {exc}", file=sys.stderr)
+        return 1
+    if res.get("stdout"):
+        print(res["stdout"], end="")
+    if res.get("returncode"):
+        if res.get("stderr"):
+            print(res["stderr"], file=sys.stderr)
+        return 1
     return 0
 
 
@@ -581,7 +611,8 @@ def cmd_flash(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
     addr = int(args.addr, 0) if isinstance(args.addr, str) else args.addr
-    result = pod.flash_dut(args.image, target=args.target, addr=addr)
+    result = pod.flash_dut(args.image, target=args.target, addr=addr,
+                           keep_attached=args.keep_attached)
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -589,7 +620,7 @@ def cmd_flash(args):
 def cmd_reset(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
-    result = pod.reset_dut(mode=args.mode)
+    result = pod.reset_dut(mode=args.mode, keep_attached=args.keep_attached)
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -799,10 +830,11 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    help="Do not (re)start the pod USB host + usbip server first")
 
     # detach
-    p = sub.add_parser("detach", help="Detach a USB/IP vhci port (see 'usbip port')")
+    p = sub.add_parser("detach",
+                       help="Detach a USB/IP vhci port, or all ports for this pod")
     p.add_argument("label")
-    p.add_argument("--port", type=int, required=True,
-                   help="vhci port from 'usbip port'")
+    p.add_argument("--port", type=int, default=None,
+                   help="vhci port from 'usbip port' (omit to detach all for this pod)")
 
     # repl
     p = sub.add_parser("repl", help="Attach interactive REPL to a pod")
@@ -813,10 +845,16 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("label")
     p.add_argument("directory", metavar="dir", help="Local directory to mount")
 
-    # exec
-    p = sub.add_parser("exec", help="Execute MicroPython code on a pod")
+    # exec (pod-side)
+    p = sub.add_parser("exec", help="Execute MicroPython code on the POD itself")
     p.add_argument("label")
-    p.add_argument("code", help="MicroPython code string to execute")
+    p.add_argument("code", help="MicroPython code string to run on the pod")
+
+    # dut-exec (turnkey DUT, over USB/IP)
+    p = sub.add_parser("dut-exec",
+                       help="Run MicroPython on the DUT (ensure link + attach + mpremote)")
+    p.add_argument("label")
+    p.add_argument("code", help="MicroPython code string to run on the DUT")
 
     # cp
     p = sub.add_parser("cp", help="Copy a file to or from the pod")
@@ -830,12 +868,16 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("image", help="Firmware image path (raw binary)")
     p.add_argument("--addr", default="0", help="Flash base address (default: 0)")
     p.add_argument("--target", default=None, help="Target MCU identifier")
+    p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
+                   help="Do not detach a live USB/IP session first (risks a wedge)")
 
     # reset
     p = sub.add_parser("reset", help="Reset the DUT via the pod")
     p.add_argument("label")
     p.add_argument("--mode", default="sysreset", choices=["sysreset", "halt"],
                    help="Reset method (default: sysreset)")
+    p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
+                   help="Do not detach a live USB/IP session first (risks a wedge)")
 
     # gdb
     p = sub.add_parser("gdb", help="Start a local GDB RSP server to the DUT")
@@ -930,6 +972,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "repl": cmd_repl,
         "mount": cmd_mount,
         "exec": cmd_exec,
+        "dut-exec": cmd_dut_exec,
         "cp": cmd_cp,
         "flash": cmd_flash,
         "reset": cmd_reset,

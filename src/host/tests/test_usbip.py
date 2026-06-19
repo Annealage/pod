@@ -48,3 +48,24 @@ class TestPickNewTty:
     def test_none_when_nothing_new(self):
         s = {"/dev/ttyACM0"}
         assert pick_new_tty(s, s) is None
+
+
+from pod.usbip import parse_usbip_port
+
+USBIP_PORT = """\
+Imported USB devices
+====================
+Port 00: <Port in Use> at Full Speed(12Mbps)
+       unknown vendor : unknown product (f055:9802)
+       3-1 -> usbip://192.168.0.146:3240/1-1
+           -> remote bus/dev 001/002
+"""
+
+
+class TestParsePort:
+    def test_parses_port_remote_busid(self):
+        assert parse_usbip_port(USBIP_PORT) == [
+            {"port": 0, "remote": "192.168.0.146", "busid": "1-1"}]
+
+    def test_empty(self):
+        assert parse_usbip_port("Imported USB devices\n=====\n") == []

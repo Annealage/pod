@@ -24,7 +24,7 @@ import sys
 import threading
 from pod.discovery import discover_pods as _discover_pods
 from pod.registry import get_pod, load_registry, update_pod, reconcile_dut
-from pod.client import Pod
+from pod.client import Pod, PodExecError
 from pod.target import PodUnreachable
 from pod import enroll
 
@@ -120,13 +120,44 @@ def handle_attach_dut(label: str, ensure: bool = True) -> dict:
     return Pod.from_entry(entry).usbip_attach(ensure=ensure)
 
 
-def handle_dut_exec(label: str, code: str) -> str:
-    """Execute MicroPython code on a pod. Returns stdout."""
+def handle_detach_dut(label: str) -> dict:
+    """Detach every host vhci port currently attached to this pod's DUT."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    return Pod.from_entry(entry).usbip_detach()
+
+
+def handle_ensure_dut_link(label: str) -> dict:
+    """Bring the pod USB host + usbip server up (idempotent); list what it exports.
+
+    Safe to call repeatedly. USB host + usbip are NOT auto-started on pod boot;
+    this is the lazy bring-up that attach_dut also runs.
+    """
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
     pod = Pod.from_entry(entry)
-    return pod.exec(code)
+    from pod import usbip as _u
+    _u.ensure_server(pod)
+    return {"label": label, "exported": pod.usbip_list()}
+
+
+def handle_pod_exec(label: str, code: str) -> str:
+    """Run MicroPython on the POD's own interpreter. Returns stdout."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    return Pod.from_entry(entry).exec(code)
+
+
+def handle_dut_exec(label: str, code: str) -> dict:
+    """Run MicroPython on the DUT (turnkey): ensure the USB/IP link, attach, and
+    exec over the DUT's own CDC REPL. Returns {tty, returncode, stdout, stderr}."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    return Pod.from_entry(entry).dut_exec(code)
 
 
 def handle_mount_dir(label: str, directory: str) -> str:
@@ -140,16 +171,22 @@ def handle_mount_dir(label: str, directory: str) -> str:
 
 
 def handle_flash_dut(label: str, image: str, target: str = None,
-                     addr: int = 0) -> dict:
-    """Flash a firmware image to the DUT via the pod (streamed, no pod FS)."""
+                     addr: int = 0, keep_attached: bool = False) -> dict:
+    """Flash a firmware image to the DUT via the pod (streamed, no pod FS).
+
+    Detaches a live USB/IP session first (reflashing the DUT mid-forward wedges
+    the pod); keep_attached=True overrides.
+    """
     entry = get_pod(label)
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
     pod = Pod.from_entry(entry)
-    return pod.flash_dut(image, target=target, addr=addr)
+    return pod.flash_dut(image, target=target, addr=addr,
+                         keep_attached=keep_attached)
 
 
-def handle_reset_dut(label: str, mode: str = "sysreset") -> dict:
+def handle_reset_dut(label: str, mode: str = "sysreset",
+                     keep_attached: bool = False) -> dict:
     """Reset the DUT via the pod ('sysreset' to run, 'halt' to catch reset).
 
     Also the first recovery step for an unresponsive/wedged DUT: a SWD system
@@ -160,7 +197,7 @@ def handle_reset_dut(label: str, mode: str = "sysreset") -> dict:
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
     pod = Pod.from_entry(entry)
-    return pod.reset_dut(mode=mode)
+    return pod.reset_dut(mode=mode, keep_attached=keep_attached)
 
 
 def handle_read_dut(label: str, addr: int, length: int, out_path: str) -> str:
@@ -389,15 +426,63 @@ def build_server():
                 },
             ),
             Tool(
-                name="dut_exec",
-                description="Execute a MicroPython code string on the pod and return stdout.",
+                name="pod_exec",
+                description=(
+                    "Run a MicroPython code string on the POD's own interpreter "
+                    "and return stdout. This is pod-side (the pod's debug stack / "
+                    "peripherals), NOT the DUT. To run code on the DUT, use "
+                    "attach_dut and connect the returned tty (the DUT's own REPL)."),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
-                        "code": {"type": "string", "description": "MicroPython code to execute."},
+                        "code": {"type": "string", "description": "MicroPython code to run on the pod."},
                     },
                     "required": ["label", "code"],
+                },
+            ),
+            Tool(
+                name="dut_exec",
+                description=(
+                    "Run MicroPython on the DUT (turnkey): ensure the pod USB/IP "
+                    "link, attach the DUT, and exec the code over its own CDC "
+                    "REPL. Returns {tty, returncode, stdout, stderr}. For pod-side "
+                    "code use pod_exec instead."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "code": {"type": "string", "description": "MicroPython code to run ON THE DUT."},
+                    },
+                    "required": ["label", "code"],
+                },
+            ),
+            Tool(
+                name="detach_dut",
+                description=(
+                    "Detach every host vhci port currently attached to this pod's "
+                    "DUT (the inverse of attach_dut). Detach before reset/reflash "
+                    "of the DUT to avoid wedging the forwarder."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="ensure_dut_link",
+                description=(
+                    "Bring the pod USB host + usbip server up (idempotent) and "
+                    "return what it exports. USB host + usbip are NOT auto-started "
+                    "on pod boot; call this (or attach_dut) first. Safe to repeat."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                    },
+                    "required": ["label"],
                 },
             ),
             Tool(
@@ -432,6 +517,11 @@ def build_server():
                             "type": "string",
                             "description": "Target MCU identifier (optional).",
                         },
+                        "keep_attached": {
+                            "type": "boolean",
+                            "description": "Do not detach a live USB/IP session first (risks a forwarder wedge).",
+                            "default": False,
+                        },
                     },
                     "required": ["label", "image"],
                 },
@@ -458,6 +548,11 @@ def build_server():
                             "enum": ["sysreset", "halt"],
                             "description": "sysreset = reset and run; halt = reset and halt.",
                             "default": "sysreset",
+                        },
+                        "keep_attached": {
+                            "type": "boolean",
+                            "description": "Do not detach a live USB/IP session first (risks a forwarder wedge).",
+                            "default": False,
                         },
                     },
                     "required": ["label"],
@@ -630,6 +725,15 @@ def build_server():
                 result = await asyncio.to_thread(
                     handle_attach_dut, arguments["label"],
                     arguments.get("ensure", True))
+            elif name == "detach_dut":
+                result = await asyncio.to_thread(
+                    handle_detach_dut, arguments["label"])
+            elif name == "ensure_dut_link":
+                result = await asyncio.to_thread(
+                    handle_ensure_dut_link, arguments["label"])
+            elif name == "pod_exec":
+                result = await asyncio.to_thread(
+                    handle_pod_exec, arguments["label"], arguments["code"])
             elif name == "dut_exec":
                 result = await asyncio.to_thread(
                     handle_dut_exec, arguments["label"], arguments["code"])
@@ -639,11 +743,13 @@ def build_server():
             elif name == "flash_dut":
                 result = await asyncio.to_thread(
                     handle_flash_dut, arguments["label"], arguments["image"],
-                    arguments.get("target"), arguments.get("addr", 0))
+                    arguments.get("target"), arguments.get("addr", 0),
+                    arguments.get("keep_attached", False))
             elif name == "reset_dut":
                 result = await asyncio.to_thread(
                     handle_reset_dut, arguments["label"],
-                    arguments.get("mode", "sysreset"))
+                    arguments.get("mode", "sysreset"),
+                    arguments.get("keep_attached", False))
             elif name == "read_dut":
                 result = await asyncio.to_thread(
                     handle_read_dut, arguments["label"], arguments["addr"],
@@ -689,6 +795,13 @@ def build_server():
 
         except NotImplementedError as exc:
             return [TextContent(type="text", text=f"Not implemented: {exc}")]
+        except PodExecError as exc:
+            # Classified pod-exec failure: surface the reason + the ampremote
+            # stderr so the agent sees why, not a bare non-zero exit.
+            text = str(exc)
+            if exc.stderr:
+                text += "\n--- pod stderr ---\n" + exc.stderr
+            return [TextContent(type="text", text=text)]
         except PodUnreachable as exc:
             # No tier yielded an identity-confirmed target - unreachable, or a
             # DHCP-moved IPv4 whose fingerprint did not match. Distinct from a

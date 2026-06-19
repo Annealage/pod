@@ -299,3 +299,127 @@ class TestLogicAnalyser:
     def test_recv_exact_eof(self):
         with pytest.raises(EOFError):
             Pod._recv_exact(_FakeSock(b"abc", split=2), 6)
+
+
+class TestExecError:
+    def _failing_pod(self, stderr):
+        runner = MagicMock(return_value=MagicMock(
+            returncode=1, stdout="", stderr=stderr))
+        return Pod(address="10.0.0.1", runner=runner)
+
+    def test_raw_repl_classified(self):
+        from pod.client import PodExecError
+        p = self._failing_pod("ampremote: could not enter raw repl")
+        with pytest.raises(PodExecError) as e:
+            p.exec("print(1)")
+        assert "raw-REPL" in e.value.reason
+        assert "raw repl" in e.value.stderr
+
+    def test_syntax_classified(self):
+        from pod.client import PodExecError
+        p = self._failing_pod("SyntaxError: invalid syntax")
+        with pytest.raises(PodExecError) as e:
+            p.exec("def")
+        assert "syntax" in e.value.reason
+
+    def test_success_returns_stdout(self):
+        runner = MagicMock(return_value=MagicMock(returncode=0, stdout="ok\n"))
+        p = Pod(address="10.0.0.1", runner=runner)
+        assert p.exec("print('ok')") == "ok\n"
+
+
+class TestAttachedPorts:
+    def test_filters_by_pod_address(self, monkeypatch):
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [
+            {"port": 0, "remote": "192.168.0.146", "busid": "1-1"},
+            {"port": 1, "remote": "10.9.9.9", "busid": "1-1"}])
+        p = Pod(addr4="192.168.0.146", hostname="annealage-pod.local")
+        assert p.attached_ports() == [0]
+
+    def test_detach_all_detaches_matching(self, monkeypatch):
+        import pod.usbip as u
+        detached = []
+        monkeypatch.setattr(u, "ports", lambda: [
+            {"port": 0, "remote": "192.168.0.146", "busid": "1-1"}])
+        monkeypatch.setattr(u, "detach", lambda port: detached.append(port) or True)
+        p = Pod(addr4="192.168.0.146")
+        assert p.usbip_detach() == {"detached": [0]}
+        assert detached == [0]
+
+
+class TestMcpPodExec:
+    def test_pod_exec_runs_on_pod(self, monkeypatch):
+        import pod.mcp_server as m
+        monkeypatch.setattr(m, "get_pod",
+                            lambda label: {"addr4": "10.0.0.1", "repl_port": 8266})
+
+        class FakePod:
+            def exec(self, code):
+                return "rp2\n"
+        monkeypatch.setattr(m.Pod, "from_entry",
+                            classmethod(lambda cls, e: FakePod()))
+        assert m.handle_pod_exec("x", "print(1)") == "rp2\n"
+
+
+class TestDutExecTurnkey:
+    def test_flow_runs_mpremote_on_tty(self, monkeypatch):
+        import pod.usbip as u
+        monkeypatch.setattr('time.sleep', lambda *a: None)
+        runner = MagicMock(return_value=MagicMock(returncode=0, stdout="42\n", stderr=""))
+        p = Pod(addr4="10.0.0.1", runner=runner)
+        monkeypatch.setattr(u, "list_remote",
+                            lambda host: [{"busid": "1-1", "vid": "f055", "pid": "9802"}])
+        monkeypatch.setattr(p, "usbip_detach", lambda *a, **k: {"detached": []})
+        monkeypatch.setattr(p, "usbip_attach",
+                            lambda ensure=True: {"busid": "1-1", "tty": "/dev/ttyACM1"})
+        res = p.dut_exec("print(6*7)")
+        assert res["stdout"] == "42\n" and res["tty"] == "/dev/ttyACM1"
+        argv = runner.call_args[0][0]
+        assert argv[:5] == ["mpremote", "connect", "/dev/ttyACM1", "resume", "exec"]
+        assert argv[5] == "print(6*7)"
+
+    def test_raises_when_no_tty(self, monkeypatch):
+        import pod.usbip as u
+        monkeypatch.setattr('time.sleep', lambda *a: None)
+        p = Pod(addr4="10.0.0.1", runner=MagicMock())
+        monkeypatch.setattr(u, "list_remote", lambda host: [{"busid": "1-1"}])
+        monkeypatch.setattr(p, "usbip_detach", lambda *a, **k: None)
+        monkeypatch.setattr(p, "usbip_attach", lambda ensure=True: {"busid": "1-1", "tty": None})
+        with pytest.raises(RuntimeError):
+            p.dut_exec("print(1)")
+
+
+class TestMcpDutExec:
+    def test_dut_exec_delegates_to_turnkey(self, monkeypatch):
+        import pod.mcp_server as m
+        monkeypatch.setattr(m, "get_pod", lambda label: {"addr4": "10.0.0.1"})
+
+        class FakePod:
+            def dut_exec(self, code):
+                return {"tty": "/dev/ttyACM1", "stdout": "42\n",
+                        "returncode": 0, "stderr": ""}
+        monkeypatch.setattr(m.Pod, "from_entry",
+                            classmethod(lambda cls, e: FakePod()))
+        assert m.handle_dut_exec("x", "print(6*7)")["stdout"] == "42\n"
+
+
+class TestAttachGuard:
+    def _pod_and_detached(self, monkeypatch):
+        import pod.usbip as u
+        detached = []
+        monkeypatch.setattr(u, "ports",
+                            lambda: [{"port": 0, "remote": "192.168.0.146", "busid": "1-1"}])
+        monkeypatch.setattr(u, "detach", lambda port: detached.append(port) or True)
+        runner = MagicMock(return_value=MagicMock(returncode=0, stdout="{'ok': True}\n"))
+        return Pod(addr4="192.168.0.146", runner=runner), detached
+
+    def test_reset_detaches_live_attach(self, monkeypatch):
+        p, detached = self._pod_and_detached(monkeypatch)
+        p.reset_dut()
+        assert detached == [0]
+
+    def test_keep_attached_skips_detach(self, monkeypatch):
+        p, detached = self._pod_and_detached(monkeypatch)
+        p.reset_dut(keep_attached=True)
+        assert detached == []

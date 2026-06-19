@@ -85,6 +85,47 @@ def detach(port, runner=None):
     return True
 
 
+_PORT_RE = re.compile(r"^\s*Port (\d+):")
+_REMOTE_RE = re.compile(r"usbip://([^:/]+):\d+/(\S+)")
+
+
+def parse_usbip_port(text):
+    """Parse `usbip port` stdout into [{port, remote, busid}] (pure).
+
+    `remote` is the host/IP the vhci port is attached to, `busid` the exported
+    bus id, both from the `usbip://<remote>:<port>/<busid>` line under each Port.
+    """
+    out = []
+    cur = None
+    for line in (text or "").splitlines():
+        m = _PORT_RE.match(line)
+        if m:
+            cur = {"port": int(m.group(1)), "remote": None, "busid": None}
+            out.append(cur)
+            continue
+        if cur is not None:
+            r = _REMOTE_RE.search(line)
+            if r:
+                cur["remote"] = r.group(1)
+                cur["busid"] = r.group(2)
+    return out
+
+
+def ports(runner=None):
+    """The host's current vhci attachments: [{port, remote, busid}].
+
+    Returns [] on any failure (usbip absent, non-zero, no module) so callers can
+    treat "no attachments" and "can't tell" the same way.
+    """
+    try:
+        out = _run(["usbip", "port"], runner=runner)
+    except Exception:  # noqa: BLE001 - usbip missing / spawn error
+        return []
+    if out.returncode != 0:
+        return []
+    return parse_usbip_port(out.stdout)
+
+
 def serial_devices():
     """Current CDC serial device paths (by-id symlinks + raw ttyACM)."""
     return set(glob.glob("/dev/serial/by-id/*")) | set(glob.glob("/dev/ttyACM*"))

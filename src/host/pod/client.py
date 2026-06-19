@@ -37,6 +37,39 @@ def _last_dict(stdout: str) -> dict:
     return {"raw": stdout}
 
 
+def _classify_exec_failure(stderr, stdout):
+    """Best-effort label for why a pod exec failed, from ampremote output."""
+    blob = ((stderr or "") + "\n" + (stdout or "")).lower()
+    if "timed out" in blob or "timeout" in blob:
+        return "timeout reaching the pod"
+    if any(s in blob for s in ("could not enter raw repl", "failed to access",
+                               "no device", "could not connect",
+                               "no serial device")):
+        return "raw-REPL entry / connection failed"
+    if "syntaxerror" in blob:
+        return "syntax error in the submitted code"
+    if "traceback" in blob or "error:" in blob:
+        return "exception on the pod"
+    return "exec error"
+
+
+class PodExecError(RuntimeError):
+    """A pod exec failed. Carries the classified reason plus the ampremote
+    stdout/stderr, so callers see WHY (raw-REPL entry vs device exception vs
+    timeout) rather than a bare non-zero exit."""
+
+    def __init__(self, verb, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = (stdout or "").strip()
+        self.stderr = (stderr or "").strip()
+        self.reason = _classify_exec_failure(self.stderr, self.stdout)
+        detail = self.stderr or self.stdout
+        last = detail.splitlines()[-1] if detail else ""
+        super().__init__(
+            "pod %s failed: %s (exit %s)%s"
+            % (verb, self.reason, returncode, (": " + last) if last else ""))
+
+
 class Pod:
     """Control client for a single Annealage Pod over ampremote socket transport."""
 
@@ -132,11 +165,15 @@ class Pod:
     def exec(self, code: str) -> str:
         """Execute a MicroPython code string on the pod and return stdout.
 
-        Uses ampremote exec verb. Raises subprocess.CalledProcessError on
-        non-zero exit.
+        Runs the ampremote exec verb. Raises PodExecError (classified reason +
+        ampremote stderr) on non-zero exit, instead of a bare CalledProcessError,
+        so the failure mode is legible.
         """
         argv = self._argv("exec", code)
-        result = self._runner(argv, capture_output=True, text=True, check=True)
+        result = self._runner(argv, capture_output=True, text=True)
+        if getattr(result, "returncode", 0):
+            raise PodExecError("exec", result.returncode, result.stdout,
+                               getattr(result, "stderr", ""))
         return result.stdout
 
     def eval(self, expr: str) -> str:
@@ -178,7 +215,8 @@ class Pod:
         )
 
     def flash_dut(self, image: str, target: Optional[str] = None,
-                  addr: int = 0, verify: bool = True, port: int = 3333) -> dict:
+                  addr: int = 0, verify: bool = True, port: int = 3333,
+                  keep_attached: bool = False) -> dict:
         """Flash a firmware image to the DUT, streamed into pod RAM (no pod FS).
 
         The pod runs a TCP receiver that double-buffers the image into two RAM
@@ -186,7 +224,11 @@ class Pod:
         the image to its filesystem or reads the prior DUT contents. The host
         starts that receiver over the REPL and streams the file straight to it.
         Returns the on-pod result dict {ok, addr, bytes, err}.
+
+        Detaches a live USB/IP session first (re-enumerating the DUT mid-forward
+        wedges the pod); pass keep_attached=True to override.
         """
+        self._guard_live_attach(keep_attached)
         total = os.path.getsize(image)
         result: dict = {}
 
@@ -239,16 +281,80 @@ class Pod:
             raise result["exc"]
         return _last_dict(result.get("out", ""))
 
-    def reset_dut(self, mode: str = "sysreset") -> dict:
+    def _guard_live_attach(self, keep_attached: bool) -> list:
+        """Before an SWD op, detach any live usbip session to this pod.
+
+        Resetting/reflashing the DUT while it is attached over USB/IP wedges the
+        forwarder (it submits to the vanished endpoint and starves Wi-Fi). So by
+        default detach first; keep_attached=True overrides (you accept the risk).
+        Returns the ports that were attached.
+        """
+        ports = self.attached_ports()
+        if ports and not keep_attached:
+            import sys as _sys
+            print("pod: detaching live USB/IP attach (ports %s) before the SWD "
+                  "op - a DUT reset/flash while attached can wedge the "
+                  "forwarder. Pass keep_attached=True to override."
+                  % ports, file=_sys.stderr)
+            self.usbip_detach()
+        return ports
+
+    def reset_dut(self, mode: str = "sysreset", keep_attached: bool = False) -> dict:
         """Reset the DUT via the on-pod debug probe.
 
         mode: 'sysreset' (reset and run) or 'halt' (reset and halt at the
         vector). nRST and power-cycle reset need carrier hardware not present.
+
+        Detaches a live USB/IP session first (resetting the DUT mid-forward
+        wedges the pod); pass keep_attached=True to override.
         """
+        self._guard_live_attach(keep_attached)
         out = self.exec(
             "import annealage_pod.debug.ops as o; print(o.reset(%r))" % mode
         )
         return _last_dict(out)
+
+    def dut_exec(self, code: str) -> dict:
+        """Run MicroPython on the DUT (turnkey) and return its stdout.
+
+        Ensures the pod USB host + usbip server are up (unless already exporting),
+        re-attaches the DUT so the host tty is known, then runs `mpremote connect
+        <tty> resume exec <code>` on the DUT's own CDC REPL. Returns {tty,
+        returncode, stdout, stderr}. The host-side re-attach does not touch the
+        DUT (no physical re-enumeration), so it does not trip the forwarder wedge.
+        Distinct from exec(), which runs on the POD.
+        """
+        from pod import usbip as _u
+        try:
+            exported = _u.list_remote(self._usbip_host())
+        except Exception:  # noqa: BLE001 - server not up yet
+            exported = []
+        if not exported:
+            _u.ensure_server(self)
+        self.usbip_detach()                       # clear any stale host attachment
+        # The pod's usbip server is single-import; give it a moment to release
+        # the prior attachment (on TCP teardown) before the new OP_IMPORT, else
+        # it answers "Request Failed".
+        time.sleep(1.5)
+        dev = self.usbip_attach(ensure=False)     # fresh attach -> known tty
+        tty = dev.get("tty")
+        if not tty:
+            raise RuntimeError("DUT attached but no CDC tty appeared")
+        # A freshly-enumerated CDC tty needs a moment before it answers the
+        # raw-REPL handshake; settle, and retry the transient "could not enter
+        # raw repl" that occurs if mpremote races the cdc_acm bind.
+        out = None
+        for _ in range(3):
+            time.sleep(1.0)
+            out = self._runner(
+                ["mpremote", "connect", tty, "resume", "exec", code],
+                capture_output=True, text=True)
+            if getattr(out, "returncode", 0) == 0 or \
+                    "raw repl" not in (getattr(out, "stderr", "") or "").lower():
+                break
+        return {"tty": tty, "returncode": getattr(out, "returncode", 0),
+                "stdout": getattr(out, "stdout", ""),
+                "stderr": getattr(out, "stderr", "")}
 
     def pinmap(self) -> dict:
         """Report the pod's own DUT-facing GPIO assignments (SWD/nRST/I2C-target).
@@ -545,10 +651,20 @@ class Pod:
     # ── stubbed methods (pending future phases) ──────────────────────────
 
     def _usbip_host(self):
-        """A usbip-friendly host string (prefer hostname/IPv4; usbip IPv6 is spotty)."""
-        r = self._resolver
-        return (r.hostname or r.addr4 or (r.addr6[0] if r.addr6 else None)
-                or self.address)
+        """The host string for the usbip client.
+
+        Use the resolver's chosen target (IPv6-first, reachable, identity-checked)
+        so the usbip path follows the same connect strategy as every other
+        transport instead of a hostname/IPv4 that can be stale or unroutable.
+        usbip-utils handles a v6 literal (ULA) and link-local-with-zone. Falls
+        back to a static handle only if resolution fails entirely.
+        """
+        try:
+            return self._resolver.resolve()
+        except Exception:  # noqa: BLE001 - fall back to a static handle
+            r = self._resolver
+            return (r.hostname or r.addr4 or (r.addr6[0] if r.addr6 else None)
+                    or self.address)
 
     def usbip_list(self) -> list:
         """The DUT USB devices the pod exports over USB/IP (live VID:PID + busid)."""
@@ -579,10 +695,41 @@ class Pod:
         dev["tty"] = _u.wait_for_new_tty(before)
         return dev
 
-    def usbip_detach(self, port: int) -> bool:
-        """Detach a vhci port previously attached (see `usbip port`)."""
+    def attached_ports(self) -> list:
+        """Host vhci ports currently attached to THIS pod (matched by address).
+
+        Matches `usbip port`'s remote against this pod's static handles
+        (hostname/addr4/addr6), normalising away any %zone and trailing dot, so a
+        v4, ULA, or link-local attachment all match. Uses no network.
+        """
         from pod import usbip as _u
-        return _u.detach(port)
+
+        def _norm(a):
+            return (a or "").split("%")[0].rstrip(".")
+        r = self._resolver
+        mine = {_norm(a) for a in [r.hostname, r.addr4] + list(r.addr6)
+                if a}
+        if self._seed_address:
+            mine.add(_norm(self._seed_address))
+        return [p["port"] for p in _u.ports() if _norm(p.get("remote")) in mine]
+
+    def usbip_detach(self, port=None):
+        """Detach a vhci port, or (port=None) every port attached to this pod.
+
+        Returns True for an explicit port, or {"detached": [ports]} for the
+        detach-all form.
+        """
+        from pod import usbip as _u
+        if port is not None:
+            return _u.detach(port)
+        detached = []
+        for p in self.attached_ports():
+            try:
+                _u.detach(p)
+                detached.append(p)
+            except Exception:  # noqa: BLE001 - continue detaching the rest
+                pass
+        return {"detached": detached}
 
     def uart_stream(self) -> None:
         """Stream DUT UART output over TCP.
