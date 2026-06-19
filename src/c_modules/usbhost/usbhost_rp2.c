@@ -140,6 +140,10 @@ typedef struct {
      * completion and cancel both run on the cooperative main thread and
      * cannot interleave. */
     struct usbhost_inflight *current_inflight[32];
+    /* s_enum_gen[dev_addr-1] captured when this slot's endpoints were opened.
+     * If the live gen later differs, the address re-enumerated (DUT reset ->
+     * same address, fresh endpoints) and this slot's endpoints are stale. */
+    uint32_t           enum_gen;
 } usbhost_slot_t;
 
 typedef struct {
@@ -164,6 +168,15 @@ typedef struct {
 } usbhost_desc_cache_t;
 
 static usbhost_desc_cache_t s_desc_cache[CFG_TUH_DEVICE_MAX]; /* indexed by (dev_addr-1) */
+
+/* Per-address (re-)enumeration generation, bumped on every enumeration of an
+ * address (in the device-descriptor enum cb). enumerate_device stamps the slot
+ * with the gen its endpoints were opened under; a submit whose slot gen != the
+ * live gen targets a device that re-enumerated at the same address (the
+ * dominant DUT-reset case: tuh_mounted stays true, but the bulk/interrupt
+ * endpoints are no longer open). That submit is rejected cheaply instead of
+ * descending into tuh_edpt_xfer and flooding the HCD. Indexed by (dev_addr-1). */
+static uint32_t s_enum_gen[CFG_TUH_DEVICE_MAX];
 
 /* -------------------------------------------------------------------------
  * Helpers (reuse-verbatim from usbhost.c, mutex/locked suffix dropped)
@@ -491,6 +504,21 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
                     "rejecting (-ENODEV)", dev_addr, busid);
         return -ENODEV;
     }
+    /* Mounted, but did the address re-enumerate since this slot opened its
+     * endpoints (DUT reset -> same address)? Then the slot's bulk/interrupt
+     * endpoints are stale (re-enum re-opens only EP0; class drivers are off), so
+     * tuh_edpt_xfer would fail on every submit and the host's retries would flood
+     * the HCD and starve cyw43_poll. Reject cheaply (a plain gen compare - no
+     * descent, no hot-path clear_slot) with -ENODEV so the host stops;
+     * rescan_mounted (next usbip.start()) drops the stale slot and re-opens fresh
+     * endpoints. This is the case the #48 tuh_mounted gate alone does not cover. */
+    if (slot >= 0 && s_state.devices[slot].enum_gen != s_enum_gen[dev_addr - 1]) {
+        USBHOST_DBG("submit: dev=%u busid=%.32s re-enumerated (slot gen %u != "
+                    "live %u); rejecting (-ENODEV)", dev_addr, busid,
+                    (unsigned)s_state.devices[slot].enum_gen,
+                    (unsigned)s_enum_gen[dev_addr - 1]);
+        return -ENODEV;
+    }
     if (mps_unavailable) {
         USBHOST_DBG("submit: IN ep=0x%02x has no cached MPS, refusing (slot=%d dev=%u)",
                     ep_addr, slot, dev_addr);
@@ -580,7 +608,11 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
             s_state.devices[slot].current_inflight[inflight->ep_idx] = NULL;
         }
         inflight_free(inflight);
-        return -EIO;
+        /* We are past the tuh_mounted + re-enum gen guards, so a reject here
+         * means the endpoint is not claimable on the LIVE device - terminal, not
+         * retryable. Return -ENODEV (not -EIO, which the host re-submits and
+         * re-drives the flood). */
+        return -ENODEV;
     }
     return 0;
 }
@@ -676,6 +708,7 @@ static void enumerate_device(uint8_t dev_addr)
     s_state.devices[slot].dev_addr      = dev_addr;
     s_state.devices[slot].device        = desc;
     s_state.devices[slot].num_endpoints = num_eps;
+    s_state.devices[slot].enum_gen      = s_enum_gen[dev_addr - 1];
     memcpy(s_state.devices[slot].endpoints, eps, sizeof(eps[0]) * num_eps);
 
     /* Open non-zero endpoints. */
@@ -709,23 +742,32 @@ static void enumerate_device(uint8_t dev_addr)
  * NOT from the PendSV query accessors). */
 static void rescan_mounted(void)
 {
-    /* Add newly-mounted devices. */
-    for (uint8_t dev_addr = 1; dev_addr <= CFG_TUH_DEVICE_MAX; dev_addr++) {
-        if (tuh_mounted(dev_addr) && find_slot_by_devaddr(dev_addr) < 0) {
-            enumerate_device(dev_addr);
-        }
-    }
-    /* Drop slots whose device disappeared (unmount). The enum cache for that
-     * address is left stale; it is overwritten on the next mount of the same
-     * address by the enum cbs. */
+    /* Drop FIRST, then add, so a slot dropped for re-enumeration is re-added in
+     * the same pass (one usbip.start() re-syncs). Drop a slot when its device
+     * disappeared (unmount) OR when its address re-enumerated since the slot
+     * opened its endpoints (DUT reset -> same address: tuh_mounted stays true but
+     * the cached endpoints are stale). For an unmount the descriptor cache is
+     * stale too and is invalidated; for a re-enum the enum cbs already refreshed
+     * the cache, so keep it for the re-add below. */
     for (int i = 0; i < USBHOST_MAX_DEVICES; i++) {
-        if (s_state.devices[i].in_use &&
-            !tuh_mounted(s_state.devices[i].dev_addr)) {
-            uint8_t da = s_state.devices[i].dev_addr;
-            if (da >= 1 && da <= CFG_TUH_DEVICE_MAX) {
+        if (!s_state.devices[i].in_use) {
+            continue;
+        }
+        uint8_t da = s_state.devices[i].dev_addr;
+        bool gone = (da < 1 || da > CFG_TUH_DEVICE_MAX) || !tuh_mounted(da);
+        bool reenum = !gone && s_state.devices[i].enum_gen != s_enum_gen[da - 1];
+        if (gone || reenum) {
+            if (gone && da >= 1 && da <= CFG_TUH_DEVICE_MAX) {
                 s_desc_cache[da - 1].valid = false;
             }
             clear_slot(i);
+        }
+    }
+    /* (Re-)add mounted addresses that now have no slot - including ones just
+     * dropped for re-enumeration - opening fresh endpoints under the current gen. */
+    for (uint8_t dev_addr = 1; dev_addr <= CFG_TUH_DEVICE_MAX; dev_addr++) {
+        if (tuh_mounted(dev_addr) && find_slot_by_devaddr(dev_addr) < 0) {
+            enumerate_device(dev_addr);
         }
     }
 }
@@ -739,9 +781,13 @@ static void rescan_mounted(void)
 void tuh_enum_descriptor_device_cb(uint8_t daddr, const tusb_desc_device_t *desc_device)
 {
     if (daddr >= 1 && daddr <= CFG_TUH_DEVICE_MAX && desc_device) {
+        /* Every (re-)enumeration of this address bumps the gen, so a slot opened
+         * under an older gen is detectable as stale (DUT reset -> same addr). */
+        s_enum_gen[daddr - 1]++;
         s_desc_cache[daddr - 1].device = *desc_device;
-        USBHOST_DBG("dev_cache addr=%u vid=%04x pid=%04x",
-                    daddr, desc_device->idVendor, desc_device->idProduct);
+        USBHOST_DBG("dev_cache addr=%u vid=%04x pid=%04x gen=%u",
+                    daddr, desc_device->idVendor, desc_device->idProduct,
+                    (unsigned)s_enum_gen[daddr - 1]);
     }
 }
 
