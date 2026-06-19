@@ -344,14 +344,22 @@ class Pod:
         # raw-REPL handshake; settle, and retry the transient "could not enter
         # raw repl" that occurs if mpremote races the cdc_acm bind.
         out = None
+        last_err = ""
         for _ in range(3):
             time.sleep(1.0)
-            out = self._runner(
-                ["mpremote", "connect", tty, "resume", "exec", code],
-                capture_output=True, text=True)
+            try:
+                out = self._runner(
+                    ["mpremote", "connect", tty, "resume", "exec", code],
+                    capture_output=True, text=True, timeout=20)
+            except _subprocess.TimeoutExpired:
+                last_err = "mpremote timed out talking to %s" % tty
+                out = None
+                continue
             if getattr(out, "returncode", 0) == 0 or \
                     "raw repl" not in (getattr(out, "stderr", "") or "").lower():
                 break
+        if out is None:
+            return {"tty": tty, "returncode": 1, "stdout": "", "stderr": last_err}
         return {"tty": tty, "returncode": getattr(out, "returncode", 0),
                 "stdout": getattr(out, "stdout", ""),
                 "stderr": getattr(out, "stderr", "")}

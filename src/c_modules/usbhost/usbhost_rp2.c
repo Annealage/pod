@@ -480,15 +480,15 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
      * submit. The host keeps flooding SUBMITs at the dead endpoint, and the
      * per-submit tuh/HCD descent then monopolises core0 and starves cyw43_poll
      * -> Wi-Fi inbound death (the pod goes unreachable, recoverable only by an
-     * SWD reset). Reject cheaply BEFORE that descent and drop the stale slot so
-     * it stops being exported; once dropped, later submits hit the dev_addr==0
-     * fast path above. -ENODEV (not -EIO) tells the host the device is gone. */
+     * SWD reset). Reject cheaply BEFORE that descent: tuh_mounted() is a plain
+     * state read, so every flooded submit becomes a trivial early return and
+     * the loop keeps servicing lwIP. -ENODEV (not -EIO) tells the host the
+     * device is gone. The stale slot is left for rescan_mounted() (on the next
+     * usbip.start()) to drop - clearing it from this hot path, with URBs
+     * possibly in flight on the slot, is unsafe. */
     if (!tuh_mounted(dev_addr)) {
         USBHOST_DBG("submit: dev=%u busid=%.32s no longer mounted; "
-                    "dropping slot %d", dev_addr, busid, slot);
-        if (slot >= 0) {
-            clear_slot(slot);
-        }
+                    "rejecting (-ENODEV)", dev_addr, busid);
         return -ENODEV;
     }
     if (mps_unavailable) {
