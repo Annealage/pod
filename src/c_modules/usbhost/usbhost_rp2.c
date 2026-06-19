@@ -474,6 +474,23 @@ static int submit_xfer(const char busid[USBIP_BUSID_SIZE],
     if (dev_addr == 0) {
         return -ENODEV;
     }
+    /* If the device unmounted / re-enumerated since it was exported (e.g. the
+     * DUT was reset or reflashed while a forward was live), TinyUSB no longer
+     * has its endpoints, so tuh_edpt_xfer would fail TU_ASSERT(ep) on EVERY
+     * submit. The host keeps flooding SUBMITs at the dead endpoint, and the
+     * per-submit tuh/HCD descent then monopolises core0 and starves cyw43_poll
+     * -> Wi-Fi inbound death (the pod goes unreachable, recoverable only by an
+     * SWD reset). Reject cheaply BEFORE that descent and drop the stale slot so
+     * it stops being exported; once dropped, later submits hit the dev_addr==0
+     * fast path above. -ENODEV (not -EIO) tells the host the device is gone. */
+    if (!tuh_mounted(dev_addr)) {
+        USBHOST_DBG("submit: dev=%u busid=%.32s no longer mounted; "
+                    "dropping slot %d", dev_addr, busid, slot);
+        if (slot >= 0) {
+            clear_slot(slot);
+        }
+        return -ENODEV;
+    }
     if (mps_unavailable) {
         USBHOST_DBG("submit: IN ep=0x%02x has no cached MPS, refusing (slot=%d dev=%u)",
                     ep_addr, slot, dev_addr);
