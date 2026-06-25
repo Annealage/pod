@@ -53,6 +53,35 @@ def _classify_exec_failure(stderr, stdout):
     return "exec error"
 
 
+# Core register selector names -> regsel, mirroring swd_dap.CortexM numbering
+# (and the host gdbserver REG_MAP). Accepted by read_reg/write_reg in place of
+# the bare integer so an agent can say "pc" instead of 15.
+_REG_NAMES = {
+    "r0": 0, "r1": 1, "r2": 2, "r3": 3, "r4": 4, "r5": 5, "r6": 6, "r7": 7,
+    "r8": 8, "r9": 9, "r10": 10, "r11": 11, "r12": 12,
+    "sp": 13, "lr": 14, "pc": 15, "xpsr": 16, "msp": 17, "psp": 18,
+}
+
+
+def _resolve_regsel(reg) -> int:
+    """Resolve a register name or number to a regsel int (0..18).
+
+    Accepts an int, a name (pc/sp/lr/r0..), or a numeric string (the CLI passes
+    its positional arg as a string, so "15"/"0x0f" must work too).
+    """
+    if isinstance(reg, str):
+        key = reg.strip().lower()
+        if key in _REG_NAMES:
+            return _REG_NAMES[key]
+        try:
+            return int(key, 0)
+        except ValueError:
+            raise ValueError(
+                "unknown register %r (use 0..18 or %s)"
+                % (reg, "/".join(_REG_NAMES)))
+    return int(reg)
+
+
 class PodExecError(RuntimeError):
     """A pod exec failed. Carries the classified reason plus the ampremote
     stdout/stderr, so callers see WHY (raw-REPL entry vs device exception vs
@@ -386,6 +415,69 @@ class Pod:
             "import annealage_pod.debug.ops as o; print(o.discover())")
         return _last_dict(out)
 
+    # ── DUT register / memory peek-poke over SWD (on-pod debug stack) ──────
+    # Single-shot SWD debug-interface ops, distinct from the gdb session and
+    # from the USB/IP forward. Registers need the core halted (halt_dut /
+    # reset_dut mode='halt'); memory is a live MEM-AP access.
+
+    def halt_dut(self) -> dict:
+        """Halt the DUT core over SWD and hold it (no auto-resume).
+
+        Required before read_reg/write_reg. Freezes the target, including its
+        USB - any active USB/IP forward stalls until resume_dut. Returns
+        {ok, halted, dhcsr}.
+        """
+        return _last_dict(self.exec(
+            "import annealage_pod.debug.ops as o; print(o.halt())"))
+
+    def resume_dut(self) -> dict:
+        """Resume the DUT core over SWD after halt_dut / reset_dut mode='halt'."""
+        return _last_dict(self.exec(
+            "import annealage_pod.debug.ops as o; print(o.resume())"))
+
+    def read_reg(self, reg) -> dict:
+        """Read one DUT core register over SWD (core must be halted first).
+
+        reg is a regsel int 0..18 or a name (r0..r12, sp, lr, pc, xpsr, msp,
+        psp). Returns {ok, regsel, value} or {ok: False, err} if the core is
+        running. Registers are read via the debug DCRSR/DCRDR, which require a
+        halted core.
+        """
+        regsel = _resolve_regsel(reg)
+        return _last_dict(self.exec(
+            "import annealage_pod.debug.ops as o; print(o.read_reg(%d))" % regsel))
+
+    def write_reg(self, reg, value: int) -> dict:
+        """Write one DUT core register over SWD (core must be halted first)."""
+        regsel = _resolve_regsel(reg)
+        return _last_dict(self.exec(
+            "import annealage_pod.debug.ops as o; print(o.write_reg(%d, %d))"
+            % (regsel, value & 0xFFFFFFFF)))
+
+    def read_mem(self, addr: int, length: int) -> dict:
+        """Read DUT memory over SWD, returned inline as hex (<= 4096 bytes).
+
+        A live MEM-AP read - works whether the core runs or is halted (halt_dut
+        first for a coherent snapshot). For bulk dumps to a file use read_dut.
+        Returns {ok, addr, length, hex}.
+        """
+        return _last_dict(self.exec(
+            "import annealage_pod.debug.ops as o; print(o.read_mem(%d, %d))"
+            % (addr, length)))
+
+    def write_mem(self, addr: int, data) -> dict:
+        """Write DUT memory over SWD (RAM/peripherals only, <= 4096 bytes).
+
+        data is bytes or a hex string. Writes into the flash region
+        (addr < 0x20000000) are refused - flash needs erase, use flash_dut.
+        A live MEM-AP write. Returns {ok, addr, length}.
+        """
+        import binascii as _b
+        data_hex = data if isinstance(data, str) else _b.hexlify(bytes(data)).decode()
+        return _last_dict(self.exec(
+            "import annealage_pod.debug.ops as o; print(o.write_mem(%d, %r))"
+            % (addr, data_hex)))
+
     @staticmethod
     def _dump_stream_cmd(addr: int, length: int, port: int) -> str:
         """Build the on-pod dump_stream invocation (pure, for testability)."""
@@ -500,6 +592,49 @@ class Pod:
         if "exc" in result:
             raise result["exc"]
         return bound
+
+    # ── persistent streaming REPL session (ampremote transport) ───────────
+
+    def open_session(self, log_path=None, device=None, on_output=None,
+                     buffer_bytes=None, *, mount=None, pre_exec=None,
+                     pre_cp=None, soft_reset=False, unsafe_links=False,
+                     reconnect=True):
+        """Open a persistent streaming REPL session and return it (opened).
+
+        Streams the target's stdout to log_path + an in-memory tail buffer and
+        accepts injected stdin (session.send / .interrupt). The default target
+        is the pod's own socket REPL at the resolved IPv6-first endpoint (where
+        its asyncio app + aiorepl live); pass `device` to point the same session
+        at any mpremote device string instead (e.g. a DUT CDC tty). Holds the
+        pod's single socket-REPL slot for its lifetime - call .close() when done
+        (the target keeps running). Auto-reconnects across drops / target
+        reboots (reconnect=False to disable). See pod.session.ReplSession.
+
+        Chained setup before the persistent connect (mirrors `mpremote <cmd>...
+        repl`), applied in this order:
+          soft_reset -> pre_cp -> pre_exec  (each a normal one-shot ampremote
+              verb in its own connection; they are stateless and persist), then
+          mount      (kept on the SESSION's connection - the mount fs hook RPCs
+              back over it, so it cannot live in a throwaway process).
+        pre_exec is a list of code strings; pre_cp a list of (src, dst) pairs;
+        mount a host directory (stays mounted for the session's lifetime).
+        """
+        from pod import session as _session
+        if soft_reset:
+            # The ampremote soft-reset verb (own connection); best-effort.
+            self._runner(self._argv("soft-reset"), capture_output=True, text=True)
+        for src, dst in (pre_cp or []):
+            self.cp(src, dst)
+        for code in (pre_exec or []):
+            self.exec(code)
+        target = device or self._resolver.ampremote_target(self.repl_port)
+        kwargs = {"log_path": log_path, "on_output": on_output,
+                  "unsafe_links": unsafe_links, "reconnect": reconnect}
+        if mount is not None:
+            kwargs["mount"] = os.path.abspath(mount)
+        if buffer_bytes is not None:
+            kwargs["buffer_bytes"] = buffer_bytes
+        return _session.ReplSession(target, **kwargs).open()
 
     # ── DUT-facing peripherals (curated machine helpers, workstream E) ────
 

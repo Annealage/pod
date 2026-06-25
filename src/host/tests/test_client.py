@@ -139,6 +139,155 @@ class TestDutOps:
         assert "reset_halt=False" in cmd
 
 
+class TestResolveRegsel:
+    def test_names(self):
+        from pod.client import _resolve_regsel
+        assert _resolve_regsel("pc") == 15
+        assert _resolve_regsel("SP") == 13
+        assert _resolve_regsel("r0") == 0
+        assert _resolve_regsel("xpsr") == 16
+
+    def test_ints_passthrough(self):
+        from pod.client import _resolve_regsel
+        assert _resolve_regsel(7) == 7
+        assert _resolve_regsel("18") == 18  # numeric strings -> int()
+
+    def test_unknown_name_raises(self):
+        from pod.client import _resolve_regsel
+        with pytest.raises(ValueError):
+            _resolve_regsel("banana")
+
+
+class TestDutDebugPeek:
+    @staticmethod
+    def _code(fake_runner):
+        # exec argv is [ampremote, connect, target, exec, <code>]
+        return fake_runner.call_args[0][0][4]
+
+    def test_halt_code_and_result(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'halted': True, 'dhcsr': 131072}\n",
+            returncode=0)
+        result = pod_fake.halt_dut()
+        assert "o.halt()" in self._code(fake_runner)
+        assert result["ok"] is True and result["halted"] is True
+
+    def test_resume_code(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'halted': False}\n", returncode=0)
+        result = pod_fake.resume_dut()
+        assert "o.resume()" in self._code(fake_runner)
+        assert result["halted"] is False
+
+    def test_read_reg_by_name_resolves_regsel(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'regsel': 15, 'value': 268439552}\n",
+            returncode=0)
+        result = pod_fake.read_reg("pc")
+        assert "o.read_reg(15)" in self._code(fake_runner)
+        assert result["value"] == 268439552
+
+    def test_read_reg_by_int(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'regsel': 0, 'value': 1}\n", returncode=0)
+        pod_fake.read_reg(0)
+        assert "o.read_reg(0)" in self._code(fake_runner)
+
+    def test_read_reg_not_halted(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': False, 'err': 'core is running; halt() it first'}\n",
+            returncode=0)
+        result = pod_fake.read_reg("pc")
+        assert result["ok"] is False
+
+    def test_write_reg_masks_and_resolves(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'regsel': 13, 'value': 536887296}\n",
+            returncode=0)
+        pod_fake.write_reg("sp", 0x20004000)
+        code = self._code(fake_runner)
+        assert "o.write_reg(13, %d)" % 0x20004000 in code
+
+    def test_read_mem_code_and_hex(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'addr': 536870912, 'length': 4, "
+                   "'hex': 'deadbeef'}\n", returncode=0)
+        result = pod_fake.read_mem(0x20000000, 4)
+        assert "o.read_mem(%d, 4)" % 0x20000000 in self._code(fake_runner)
+        assert result["hex"] == "deadbeef"
+
+    def test_write_mem_from_bytes_hexlifies(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'addr': 536870912, 'length': 4}\n",
+            returncode=0)
+        pod_fake.write_mem(0x20000000, b"\xde\xad\xbe\xef")
+        code = self._code(fake_runner)
+        assert "o.write_mem(%d, 'deadbeef')" % 0x20000000 in code
+
+    def test_write_mem_accepts_hex_string(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'addr': 536870912, 'length': 2}\n",
+            returncode=0)
+        pod_fake.write_mem(0x20000000, "beef")
+        assert "o.write_mem(%d, 'beef')" % 0x20000000 in self._code(fake_runner)
+
+
+class TestMcpDutDebugPeek:
+    def _fake_pod(self, monkeypatch):
+        import pod.mcp_server as m
+        monkeypatch.setattr(m, "get_pod", lambda label: {"addr4": "10.0.0.1"})
+        calls = {}
+
+        class FakePod:
+            def halt_dut(self):
+                calls["halt"] = True
+                return {"ok": True, "halted": True, "dhcsr": 0x20000}
+
+            def resume_dut(self):
+                calls["resume"] = True
+                return {"ok": True, "halted": False}
+
+            def read_reg(self, reg):
+                calls["read_reg"] = reg
+                return {"ok": True, "regsel": 15, "value": 0x1000}
+
+            def write_reg(self, reg, value):
+                calls["write_reg"] = (reg, value)
+                return {"ok": True, "regsel": 13, "value": value}
+
+            def read_mem(self, addr, length):
+                calls["read_mem"] = (addr, length)
+                return {"ok": True, "addr": addr, "length": length, "hex": "00"}
+
+            def write_mem(self, addr, data):
+                calls["write_mem"] = (addr, data)
+                return {"ok": True, "addr": addr, "length": 1}
+
+        monkeypatch.setattr(m.Pod, "from_entry",
+                            classmethod(lambda cls, e: FakePod()))
+        return m, calls
+
+    def test_halt_resume(self, monkeypatch):
+        m, calls = self._fake_pod(monkeypatch)
+        assert m.handle_dut_halt("x")["halted"] is True
+        assert m.handle_dut_resume("x")["halted"] is False
+        assert calls["halt"] and calls["resume"]
+
+    def test_read_write_reg(self, monkeypatch):
+        m, calls = self._fake_pod(monkeypatch)
+        assert m.handle_dut_read_reg("x", "pc")["value"] == 0x1000
+        m.handle_dut_write_reg("x", "sp", 0x20004000)
+        assert calls["read_reg"] == "pc"
+        assert calls["write_reg"] == ("sp", 0x20004000)
+
+    def test_read_write_mem(self, monkeypatch):
+        m, calls = self._fake_pod(monkeypatch)
+        m.handle_dut_read_mem("x", 0x20000000, 16)
+        m.handle_dut_write_mem("x", 0x20000000, "deadbeef")
+        assert calls["read_mem"] == (0x20000000, 16)
+        assert calls["write_mem"] == (0x20000000, "deadbeef")
+
+
 class TestUsbipAttach:
     def test_attach_flow(self, pod, monkeypatch):
         import pod.usbip as u

@@ -80,6 +80,23 @@ machines). All functions take an optional `clkdiv` (default 8).
   resets and catches the reset vector.
 - `close() -> {ok}` - resume the target and drop the cached session.
 
+Single-shot register/memory peek-poke (the host `read_reg`/`write_reg`/
+`read_mem`/`write_mem` and their MCP/CLI tools drive these). Unlike `gdb_serve`,
+these never auto-resume, so a `halt()` holds across calls until `resume()`:
+
+- `halt() -> {ok, halted, dhcsr}` / `resume() -> {ok, halted}` - hold/release the
+  core. Required around register access; `halt()` freezes the DUT (incl. its USB).
+- `read_reg(regsel) -> {ok, regsel, value}` / `write_reg(regsel, value) -> {ok, ...}`
+  Core register access (regsel 0..18: R0..R12, SP=13, LR=14, PC=15, xPSR=16,
+  MSP=17, PSP=18). The core must be halted first - a running core returns
+  `{ok: False}` (registers go through the debug DCRSR/DCRDR, which need a halt).
+- `read_mem(addr, length) -> {ok, addr, length, hex}` (length <= 4096) - a live
+  MEM-AP read; works halted or running. For bulk dumps use `dump_stream`.
+- `write_mem(addr, hex) -> {ok, addr, length}` - a live MEM-AP write to RAM /
+  peripherals. Writes into the flash region (`addr < 0x20000000`) are refused
+  (flash needs erase - use `flash_stream`/`flash_file`). The aligned/unaligned
+  access and the flash guard are shared with `dbgsrv`.
+
 ### Recovering a wedged DUT (do this before a power-cycle)
 
 When the DUT is unresponsive or suspected wedged - hung firmware, a stuck

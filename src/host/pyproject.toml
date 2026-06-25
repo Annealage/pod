@@ -7,12 +7,24 @@ name = "annealage-pod-host"
 version = "0.1.0"
 description = "Host-side tooling for the Annealage Pod hardware-in-the-loop test rig."
 requires-python = ">=3.10"
-dependencies = []
+# ampremote (Andrew's async mpremote fork - improved TCP + raw-REPL support over
+# upstream) provides the `mpremote` import the pod tooling drives: the one-shot
+# exec/eval/cp/mount verbs and the persistent streaming REPL session
+# (pod.session, via mpremote SerialTransport). Not on PyPI - installed straight
+# from GitHub; the package lives in a subdirectory of the monorepo fork.
+dependencies = [
+  "ampremote @ git+https://github.com/andrewleech/ampremote@main#subdirectory=micropython/tools/mpremote",
+]
 
 [project.optional-dependencies]
 zeroconf = ["zeroconf"]
 mcp = ["mcp"]
-dev = ["pytest", "zeroconf", "mcp"]
+dev = [
+  "pytest",
+  "zeroconf",
+  "mcp",
+  "ampremote @ git+https://github.com/andrewleech/ampremote@main#subdirectory=micropython/tools/mpremote",
+]
 
 [project.scripts]
 pod = "pod.cli:main"

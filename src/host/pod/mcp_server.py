@@ -20,8 +20,11 @@ from main().
 """
 
 import asyncio
+import os
 import sys
+import tempfile
 import threading
+import time
 from pod.discovery import discover_pods as _discover_pods
 from pod.registry import get_pod, load_registry, update_pod, reconcile_dut
 from pod.client import Pod, PodExecError
@@ -270,6 +273,157 @@ def _pod_for(label: str) -> Pod:
     if entry is None:
         raise KeyError(f"Pod '{label}' not found in registry.")
     return Pod.from_entry(entry)
+
+
+# ── DUT register / memory over the SWD debug interface ────────────────────
+# These reach the DUT only over the pod's SWD debug probe (the on-pod
+# DP/AP/MEM-AP). They are unrelated to the USB/IP forward and the DUT's own CDC
+# REPL; they need the DUT wired + powered for SWD. Registers require a halted
+# core (dut_halt / reset_dut mode='halt').
+
+
+def handle_dut_halt(label: str) -> dict:
+    """Halt the DUT core over SWD (no auto-resume). Freezes the DUT incl. USB."""
+    return _pod_for(label).halt_dut()
+
+
+def handle_dut_resume(label: str) -> dict:
+    """Resume the DUT core over SWD after a dut_halt / reset_dut mode='halt'."""
+    return _pod_for(label).resume_dut()
+
+
+def handle_dut_read_reg(label: str, reg) -> dict:
+    """Read one DUT core register over SWD (core must be halted first)."""
+    return _pod_for(label).read_reg(reg)
+
+
+def handle_dut_write_reg(label: str, reg, value: int) -> dict:
+    """Write one DUT core register over SWD (core must be halted first)."""
+    return _pod_for(label).write_reg(reg, value)
+
+
+def handle_dut_read_mem(label: str, addr: int, length: int) -> dict:
+    """Read DUT memory over SWD, returned inline as hex (<= 4096 bytes)."""
+    return _pod_for(label).read_mem(addr, length)
+
+
+def handle_dut_write_mem(label: str, addr: int, data_hex: str) -> dict:
+    """Write DUT memory over SWD (RAM/peripherals only; flash is refused)."""
+    return _pod_for(label).write_mem(addr, data_hex)
+
+
+# ── persistent streaming REPL sessions ────────────────────────────────────
+# Long-lived connections held in this (long-running) server, keyed by label, so
+# an agent opens a session, tails the target's stdout, injects REPL commands,
+# and closes it across separate tool calls. The session streams to a log file
+# (the lossless record) plus an in-memory tail the agent reads by cursor.
+_REPL_SESSIONS: dict = {}
+
+
+def _default_repl_log(label: str) -> str:
+    return os.path.join(tempfile.gettempdir(), "pod-repl-%s.log" % label)
+
+
+def handle_repl_open(label: str, log_path: str = None, device: str = None,
+                     mount: str = None, exec: str = None, cp=None,
+                     soft_reset: bool = False, unsafe_links: bool = False,
+                     reconnect: bool = True) -> dict:
+    """Open (or return the existing) persistent streaming REPL session.
+
+    Streams the target's stdout to log_path and an in-memory tail buffer, and
+    accepts injected stdin via repl_send. Default target is the pod's socket
+    REPL; `device` points it at another mpremote device (e.g. a DUT tty).
+
+    Chained setup before connecting (mirrors `mpremote <cmd>... repl`):
+    soft_reset, then cp, then exec (each a one-shot verb), then mount kept on
+    the session connection. `exec` is a string or list of code strings; `cp` is
+    a [src, dst] pair or a list of pairs; `mount` is a host dir kept mounted for
+    the session's lifetime (the reason to use repl_open over mount_dir, which is
+    a one-shot that unmounts on return).
+    """
+    sess = _REPL_SESSIONS.get(label)
+    if sess is not None and sess["session"].running:
+        s = sess["session"]
+        return {"label": label, "target": s.target, "log_path": sess["log_path"],
+                "running": True, "mounted": bool(mount), "already_open": True}
+    pre_exec = [exec] if isinstance(exec, str) else (list(exec) if exec else None)
+    pre_cp = None
+    if cp:
+        pre_cp = [tuple(cp)] if cp and not isinstance(cp[0], (list, tuple)) \
+            else [tuple(p) for p in cp]
+    pod = _pod_for(label)
+    log_path = log_path or _default_repl_log(label)
+    s = pod.open_session(log_path=log_path, device=device, mount=mount,
+                         pre_exec=pre_exec, pre_cp=pre_cp, soft_reset=soft_reset,
+                         unsafe_links=unsafe_links, reconnect=reconnect)
+    _REPL_SESSIONS[label] = {"session": s, "log_path": log_path}
+    return {"label": label, "target": s.target, "log_path": log_path,
+            "running": s.running, "mounted": bool(mount)}
+
+
+def _require_repl(label: str):
+    sess = _REPL_SESSIONS.get(label)
+    if sess is None:
+        raise KeyError(
+            "No open REPL session for '%s' - call repl_open first." % label)
+    return sess["session"]
+
+
+def handle_repl_read(label: str, since: int = None) -> dict:
+    """Tail the session's buffered stdout after `since` (cursor from a prior read)."""
+    return _require_repl(label).read_since(since)
+
+
+def handle_repl_send(label: str, data: str, newline: bool = True,
+                     wait: float = 0.3) -> dict:
+    """Inject a command into the target's stdin; return output captured in `wait`.
+
+    Marks the stream cursor, writes `data` (a trailing newline submits a REPL
+    line unless newline=False), waits `wait` seconds, and returns the output
+    produced since - so a single call runs a command and reads its reply. Set
+    wait=0 to send without reading (poll later with repl_read).
+    """
+    s = _require_repl(label)
+    cursor = s.tell()
+    try:
+        sent = s.send(data, newline=newline)
+    except ConnectionError as exc:
+        return {"ok": False, "err": str(exc), "cursor": cursor}
+    if wait and wait > 0:
+        time.sleep(wait)
+    out = s.read_since(cursor)
+    out["sent"] = sent
+    return out
+
+
+def handle_repl_interrupt(label: str, wait: float = 0.3) -> dict:
+    """Send Ctrl-C to the target and return output captured in `wait` seconds."""
+    s = _require_repl(label)
+    cursor = s.tell()
+    try:
+        s.interrupt()
+    except ConnectionError as exc:
+        return {"ok": False, "err": str(exc), "cursor": cursor}
+    if wait and wait > 0:
+        time.sleep(wait)
+    return s.read_since(cursor)
+
+
+def handle_repl_close(label: str) -> dict:
+    """Close the session (the target keeps running) and drop it from the registry."""
+    sess = _REPL_SESSIONS.pop(label, None)
+    if sess is None:
+        return {"ok": True, "note": "no open session"}
+    result = sess["session"].close()
+    result["label"] = label
+    return result
+
+
+def handle_repl_list() -> list:
+    """List open REPL sessions."""
+    return [{"label": label, "target": s["session"].target,
+             "log_path": s["log_path"], "running": s["session"].running}
+            for label, s in _REPL_SESSIONS.items()]
 
 
 def handle_i2c_target(label: str, addr: int = 0x42, regs=None, bus: int = 1,
@@ -598,6 +752,293 @@ def build_server():
                 },
             ),
             Tool(
+                name="dut_halt",
+                description=(
+                    "Halt the DUT core over the pod's SWD debug interface (the "
+                    "on-pod probe) and hold it - no auto-resume. REQUIRED before "
+                    "dut_read_reg/dut_write_reg (registers need a halted core). "
+                    "Freezes the target where it is, including its USB, so any "
+                    "active USB/IP forward stalls until dut_resume. SWD only: "
+                    "needs the DUT wired + powered for SWD; unrelated to the "
+                    "USB/IP forward and the DUT's CDC REPL. Returns {ok, halted, "
+                    "dhcsr}."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="dut_resume",
+                description=(
+                    "Resume the DUT core over SWD after a dut_halt (or reset_dut "
+                    "mode='halt'). SWD debug interface only. Returns "
+                    "{ok, halted:false}."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="dut_read_reg",
+                description=(
+                    "Read one DUT core register over the pod's SWD debug "
+                    "interface. The core MUST be halted first (dut_halt, or "
+                    "reset_dut mode='halt') - registers are read through the "
+                    "debug DCRSR/DCRDR, which require a halted core; a running "
+                    "core returns {ok:false}. reg is a number 0..18 or a name: "
+                    "r0..r12, sp(13), lr(14), pc(15), xpsr(16), msp(17), "
+                    "psp(18). SWD only; not the USB/IP or CDC path. Returns "
+                    "{ok, regsel, value}."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "reg": {
+                            "type": ["integer", "string"],
+                            "description": "regsel 0..18 or name (r0..r12, sp, "
+                                           "lr, pc, xpsr, msp, psp).",
+                        },
+                    },
+                    "required": ["label", "reg"],
+                },
+            ),
+            Tool(
+                name="dut_write_reg",
+                description=(
+                    "Write one DUT core register over the pod's SWD debug "
+                    "interface. The core MUST be halted first (dut_halt, or "
+                    "reset_dut mode='halt'); a running core returns {ok:false}. "
+                    "reg is a number 0..18 or a name (r0..r12, sp, lr, pc, "
+                    "xpsr, msp, psp). SWD only. Returns {ok, regsel, value}."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "reg": {
+                            "type": ["integer", "string"],
+                            "description": "regsel 0..18 or name (r0..r12, sp, "
+                                           "lr, pc, xpsr, msp, psp).",
+                        },
+                        "value": {
+                            "type": "integer",
+                            "description": "32-bit value to write.",
+                        },
+                    },
+                    "required": ["label", "reg", "value"],
+                },
+            ),
+            Tool(
+                name="dut_read_mem",
+                description=(
+                    "Read DUT memory over the pod's SWD debug interface and "
+                    "return it inline as hex. Small reads only (<= 4096 bytes); "
+                    "for bulk dumps to a host file use read_dut. A live MEM-AP "
+                    "read - works whether the core runs or is halted (a read of "
+                    "a location the running core is changing may be "
+                    "non-coherent; dut_halt first for a coherent snapshot). SWD "
+                    "only; needs the DUT wired for SWD. Returns {ok, addr, "
+                    "length, hex}."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "addr": {"type": "integer", "description": "Source address."},
+                        "length": {
+                            "type": "integer",
+                            "description": "Bytes to read (1..4096).",
+                        },
+                    },
+                    "required": ["label", "addr", "length"],
+                },
+            ),
+            Tool(
+                name="dut_write_mem",
+                description=(
+                    "Write DUT memory over the pod's SWD debug interface "
+                    "(RAM/peripherals only). data_hex is a hex string "
+                    "(<= 4096 bytes). Writes into the flash region "
+                    "(addr < 0x20000000) are REFUSED - flash needs erase, use "
+                    "flash_dut. A live MEM-AP write. SWD only. Returns "
+                    "{ok, addr, length}."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "addr": {"type": "integer", "description": "Destination address."},
+                        "data_hex": {
+                            "type": "string",
+                            "description": "Bytes to write as a hex string "
+                                           "(e.g. 'deadbeef').",
+                        },
+                    },
+                    "required": ["label", "addr", "data_hex"],
+                },
+            ),
+            Tool(
+                name="repl_open",
+                description=(
+                    "Open a persistent streaming REPL session to the pod (built "
+                    "on ampremote). Streams the target's stdout to a log file "
+                    "AND an in-memory tail buffer, and lets you inject commands "
+                    "to its stdin with repl_send - the 'connect once, watch "
+                    "output, run REPL commands' loop. Default target is the "
+                    "pod's own socket REPL (where its asyncio app + aiorepl "
+                    "live); pass `device` to attach another mpremote device "
+                    "(e.g. a DUT CDC tty). Chain setup before connecting "
+                    "(mpremote-style): `soft_reset`, `cp`, `exec`, then `mount` "
+                    "(kept on the session connection - this is the reason to use "
+                    "repl_open over mount_dir, which is one-shot and unmounts on "
+                    "return). Holds the pod's single REPL slot until repl_close, "
+                    "so use repl_send (not pod_exec) to run code while open. "
+                    "Returns {label, target, log_path, running, mounted}."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "log_path": {
+                            "type": "string",
+                            "description": "File to append all output to "
+                                           "(default: a temp file, returned).",
+                        },
+                        "device": {
+                            "type": "string",
+                            "description": "mpremote device to attach instead of "
+                                           "the pod's socket REPL (e.g. a DUT tty).",
+                        },
+                        "mount": {
+                            "type": "string",
+                            "description": "Host dir to mount on the target for "
+                                           "the session lifetime.",
+                        },
+                        "exec": {
+                            "type": ["string", "array"],
+                            "items": {"type": "string"},
+                            "description": "Setup code to run before connecting "
+                                           "(string or list of strings).",
+                        },
+                        "cp": {
+                            "type": "array",
+                            "description": "File(s) to copy before connecting: "
+                                           "[src, dst] or a list of such pairs "
+                                           "(':path' = target side).",
+                        },
+                        "soft_reset": {
+                            "type": "boolean",
+                            "description": "Soft-reset the target before connecting.",
+                            "default": False,
+                        },
+                        "unsafe_links": {
+                            "type": "boolean",
+                            "description": "With mount, follow symlinks outside the root.",
+                            "default": False,
+                        },
+                        "reconnect": {
+                            "type": "boolean",
+                            "description": "Auto-reconnect across drops / target "
+                                           "reboots (marked inline in the stream).",
+                            "default": True,
+                        },
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="repl_read",
+                description=(
+                    "Tail an open REPL session's buffered stdout. Pass the "
+                    "`cursor` returned by a prior read to get only new output; "
+                    "omit it to read from the oldest buffered byte. Returns "
+                    "{text, cursor, dropped} - `dropped` counts bytes evicted "
+                    "from the in-memory buffer before `since` (they remain in "
+                    "the log file). The complete record is always in log_path."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "since": {
+                            "type": "integer",
+                            "description": "Cursor from a prior repl_read.",
+                        },
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="repl_send",
+                description=(
+                    "Inject a command into an open REPL session's stdin and "
+                    "return the output it produced. A trailing newline is added "
+                    "(submitting a REPL line) unless newline=false. Waits `wait` "
+                    "seconds then returns {text, cursor, dropped, sent} captured "
+                    "since the send; set wait=0 to fire-and-forget and poll with "
+                    "repl_read."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "data": {
+                            "type": "string",
+                            "description": "Text to send (a REPL command line).",
+                        },
+                        "newline": {
+                            "type": "boolean",
+                            "description": "Append CR-LF to submit the line.",
+                            "default": True,
+                        },
+                        "wait": {
+                            "type": "number",
+                            "description": "Seconds to wait before reading the "
+                                           "reply (0 = don't read).",
+                            "default": 0.3,
+                        },
+                    },
+                    "required": ["label", "data"],
+                },
+            ),
+            Tool(
+                name="repl_interrupt",
+                description=(
+                    "Send Ctrl-C to an open REPL session (interrupt a running "
+                    "REPL command or loop) and return any output produced in "
+                    "`wait` seconds."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "wait": {
+                            "type": "number",
+                            "description": "Seconds to wait before reading.",
+                            "default": 0.3,
+                        },
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="repl_close",
+                description=(
+                    "Close an open REPL session (the target keeps running) "
+                    "and free the pod's REPL slot. Returns {ok, received, label}."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="repl_list",
+                description="List the open REPL sessions (label, target, log_path, running).",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
                 name="i2c_target",
                 description=(
                     "Bring up a persistent hardware I2C target on the pod: a "
@@ -758,6 +1199,52 @@ def build_server():
                 result = await asyncio.to_thread(
                     handle_gdb_dut, arguments["label"],
                     arguments.get("listen_port", 0))
+            elif name == "dut_halt":
+                result = await asyncio.to_thread(
+                    handle_dut_halt, arguments["label"])
+            elif name == "dut_resume":
+                result = await asyncio.to_thread(
+                    handle_dut_resume, arguments["label"])
+            elif name == "dut_read_reg":
+                result = await asyncio.to_thread(
+                    handle_dut_read_reg, arguments["label"], arguments["reg"])
+            elif name == "dut_write_reg":
+                result = await asyncio.to_thread(
+                    handle_dut_write_reg, arguments["label"], arguments["reg"],
+                    arguments["value"])
+            elif name == "dut_read_mem":
+                result = await asyncio.to_thread(
+                    handle_dut_read_mem, arguments["label"], arguments["addr"],
+                    arguments["length"])
+            elif name == "dut_write_mem":
+                result = await asyncio.to_thread(
+                    handle_dut_write_mem, arguments["label"], arguments["addr"],
+                    arguments["data_hex"])
+            elif name == "repl_open":
+                result = await asyncio.to_thread(
+                    handle_repl_open, arguments["label"],
+                    arguments.get("log_path"), arguments.get("device"),
+                    arguments.get("mount"), arguments.get("exec"),
+                    arguments.get("cp"), arguments.get("soft_reset", False),
+                    arguments.get("unsafe_links", False),
+                    arguments.get("reconnect", True))
+            elif name == "repl_read":
+                result = await asyncio.to_thread(
+                    handle_repl_read, arguments["label"],
+                    arguments.get("since"))
+            elif name == "repl_send":
+                result = await asyncio.to_thread(
+                    handle_repl_send, arguments["label"], arguments["data"],
+                    arguments.get("newline", True), arguments.get("wait", 0.3))
+            elif name == "repl_interrupt":
+                result = await asyncio.to_thread(
+                    handle_repl_interrupt, arguments["label"],
+                    arguments.get("wait", 0.3))
+            elif name == "repl_close":
+                result = await asyncio.to_thread(
+                    handle_repl_close, arguments["label"])
+            elif name == "repl_list":
+                result = await asyncio.to_thread(handle_repl_list)
             elif name == "i2c_target":
                 result = await asyncio.to_thread(
                     handle_i2c_target, arguments["label"],

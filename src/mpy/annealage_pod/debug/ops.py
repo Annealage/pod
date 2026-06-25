@@ -200,6 +200,89 @@ def reset(mode="sysreset", clkdiv=8):
     return {"ok": True, "mode": mode}
 
 
+# -- Single-shot register / memory access over the SWD debug interface --------
+# The peek/poke surface the host pod tool (and its MCP tools) drive over the
+# REPL, distinct from gdb_serve: each call reuses the cached DP/AP/CM session,
+# touches the target once, and returns - no TCP server, no gdb session, and (the
+# key difference from gdb_serve) it never auto-resumes the core, so a halt holds
+# across calls until resume() is called.
+#
+# Core registers are read/written through the debug DCRSR/DCRDR, which require a
+# halted core; these helpers report STATUS-style {"ok": False} rather than
+# halting behind the caller's back (mirrors dbgsrv's _require_halted). Memory
+# goes over the MEM-AP and works whether the core runs or is halted - a live bus
+# access (a read of a location the running core is mutating may be non-coherent;
+# halt() first for a coherent snapshot). The aligned/unaligned memory access and
+# the flash-region write guard are reused from dbgsrv so there is one
+# implementation of each.
+
+_REGSEL_MAX = 18   # 0..15 + xPSR(16) + MSP(17) + PSP(18); mirrors dbgsrv.REGSEL_MAX
+
+
+def halt(clkdiv=8):
+    # Halt the core where it is and hold it (no auto-resume). Required before a
+    # register read/write; also freezes the DUT (incl. its USB) for the duration.
+    dp, ap, cm, fl = _ensure(clkdiv)
+    cm.halt()
+    return {"ok": True, "halted": True, "dhcsr": cm.read_dhcsr()}
+
+
+def resume(clkdiv=8):
+    # Resume a core halted by halt() / reset(mode="halt").
+    dp, ap, cm, fl = _ensure(clkdiv)
+    cm.resume()
+    return {"ok": True, "halted": False}
+
+
+def read_reg(regsel, clkdiv=8):
+    dp, ap, cm, fl = _ensure(clkdiv)
+    if regsel < 0 or regsel > _REGSEL_MAX:
+        return {"ok": False, "err": "regsel out of range 0..%d" % _REGSEL_MAX}
+    if not cm.is_halted():
+        return {"ok": False, "err": "core is running; halt() it first "
+                "(registers need a halted core)"}
+    return {"ok": True, "regsel": regsel, "value": cm.read_core_reg(regsel)}
+
+
+def write_reg(regsel, value, clkdiv=8):
+    dp, ap, cm, fl = _ensure(clkdiv)
+    if regsel < 0 or regsel > _REGSEL_MAX:
+        return {"ok": False, "err": "regsel out of range 0..%d" % _REGSEL_MAX}
+    if not cm.is_halted():
+        return {"ok": False, "err": "core is running; halt() it first "
+                "(registers need a halted core)"}
+    value &= 0xFFFFFFFF
+    cm.write_core_reg(regsel, value)
+    return {"ok": True, "regsel": regsel, "value": value}
+
+
+def read_mem(addr, length, clkdiv=8):
+    import binascii
+    from . import dbgsrv
+    if length < 0 or length > dbgsrv.MAX_DATA:
+        return {"ok": False, "err": "length out of range 0..%d "
+                "(use read_dut/dump_stream for bulk)" % dbgsrv.MAX_DATA}
+    dp, ap, cm, fl = _ensure(clkdiv)
+    data = dbgsrv._read_mem(ap, addr, length)
+    return {"ok": True, "addr": addr, "length": length,
+            "hex": binascii.hexlify(data).decode()}
+
+
+def write_mem(addr, data_hex, clkdiv=8):
+    import binascii
+    from . import dbgsrv
+    data = binascii.unhexlify(data_hex)
+    if len(data) > dbgsrv.MAX_DATA:
+        return {"ok": False, "err": "data exceeds %d bytes" % dbgsrv.MAX_DATA}
+    if addr < dbgsrv.FLASH_TOP:
+        return {"ok": False, "err": "addr 0x%08x is in the flash region "
+                "(< 0x%08x); flash needs erase - use flash_file/flash_stream"
+                % (addr, dbgsrv.FLASH_TOP)}
+    dp, ap, cm, fl = _ensure(clkdiv)
+    dbgsrv._write_mem(ap, addr, data)
+    return {"ok": True, "addr": addr, "length": len(data)}
+
+
 def gdb_serve(port=3335, clkdiv=8, reset_halt=True):
     # Bring the DP up ONCE, halt, and hand the live session to the binary debug
     # server (dbgsrv). The dbgsrv loop runs against this session and never calls

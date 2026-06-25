@@ -553,7 +553,9 @@ def cmd_info(args):
     return 0
 
 
-def cmd_repl(args):
+def cmd_repl_raw(args):
+    """Full raw-terminal REPL passthrough (`pod repl --raw`): arrow keys,
+    history, paste mode. Blocks until you disconnect."""
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
     pod.repl()
@@ -640,6 +642,128 @@ def cmd_gdb(args):
         resume_window_ms=args.resume_window_ms,
         on_listen=_announce,
     )
+    return 0
+
+
+def cmd_halt(args):
+    """Halt the DUT core over SWD (hold it; no auto-resume)."""
+    pod = Pod.from_entry(_require_pod(args.label))
+    result = pod.halt_dut()
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_resume(args):
+    """Resume the DUT core over SWD."""
+    pod = Pod.from_entry(_require_pod(args.label))
+    result = pod.resume_dut()
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_read_reg(args):
+    """Read one DUT core register over SWD (core must be halted)."""
+    pod = Pod.from_entry(_require_pod(args.label))
+    try:
+        result = pod.read_reg(args.reg)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if result.get("ok"):
+        print("reg %s = 0x%08x" % (args.reg, result["value"]))
+    else:
+        print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_write_reg(args):
+    """Write one DUT core register over SWD (core must be halted)."""
+    pod = Pod.from_entry(_require_pod(args.label))
+    try:
+        result = pod.write_reg(args.reg, int(args.value, 0))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_read_mem(args):
+    """Read DUT memory over SWD and print it as hex (<= 4096 bytes)."""
+    pod = Pod.from_entry(_require_pod(args.label))
+    result = pod.read_mem(int(args.addr, 0), args.length)
+    if result.get("ok"):
+        print("0x%08x: %s" % (result["addr"], result["hex"]))
+    else:
+        print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_write_mem(args):
+    """Write DUT memory over SWD (RAM/peripherals only; flash refused)."""
+    pod = Pod.from_entry(_require_pod(args.label))
+    result = pod.write_mem(int(args.addr, 0), args.data)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_repl(args):
+    """`pod repl`: streaming session by default, or `--raw` for a raw terminal."""
+    if getattr(args, "raw", False):
+        if args.mount or args.exec or args.cp or args.soft_reset:
+            print("pod repl --raw is a one-shot passthrough and cannot chain "
+                  "--mount/--exec/--cp/--soft-reset; drop --raw for those, or "
+                  "use `ampremote connect <t> mount <d> repl` for a raw "
+                  "terminal with a mount.", file=sys.stderr)
+            return 1
+        return cmd_repl_raw(args)
+    return cmd_repl_stream(args)
+
+
+def cmd_repl_stream(args):
+    """Persistent streaming REPL: tee the target's stdout to console + file,
+    send typed lines to its stdin. Optionally chain mount/exec/cp/soft-reset
+    setup first. Ctrl-C interrupts the target; EOF (Ctrl-D) exits, leaving the
+    target running. For a full raw terminal use `pod repl --raw`."""
+    pod = Pod.from_entry(_require_pod(args.label))
+
+    def _echo(data):
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+
+    pre_cp = [tuple(pair) for pair in (args.cp or [])]
+    try:
+        sess = pod.open_session(
+            log_path=args.log, device=args.device, on_output=_echo,
+            mount=args.mount, pre_exec=args.exec or None, pre_cp=pre_cp or None,
+            soft_reset=args.soft_reset, unsafe_links=args.unsafe_links,
+            reconnect=not args.no_reconnect)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        print(f"repl: connect failed: {exc}", file=sys.stderr)
+        return 1
+    extras = []
+    if args.log:
+        extras.append(f"log={args.log}")
+    if args.mount:
+        extras.append(f"mount={args.mount}")
+    note = ("  " + "  ".join(extras)) if extras else ""
+    print(f"[pod repl: {sess.target}{note}  |  Ctrl-C interrupts the target, "
+          f"Ctrl-D / EOF exits]", file=sys.stderr)
+    try:
+        while True:
+            try:
+                line = sys.stdin.readline()
+            except KeyboardInterrupt:
+                sess.interrupt()
+                continue
+            if not line:                 # EOF -> leave the target running
+                break
+            try:
+                sess.send(line.rstrip("\n"))
+            except ConnectionError as exc:
+                print(f"\n[pod repl: {exc}; line not sent]", file=sys.stderr)
+    finally:
+        sess.close()
     return 0
 
 
@@ -836,9 +960,39 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--port", type=int, default=None,
                    help="vhci port from 'usbip port' (omit to detach all for this pod)")
 
-    # repl
-    p = sub.add_parser("repl", help="Attach interactive REPL to a pod")
+    # repl (persistent streaming session by default; --raw for a raw terminal)
+    p = sub.add_parser(
+        "repl",
+        help="Persistent REPL: stream target stdout to console+file, type lines to its stdin",
+        description="Connect to the target (the pod's socket REPL by default), "
+                    "stream its stdout to the console and optionally a log "
+                    "file, and send typed lines to its stdin. Chain setup "
+                    "before connecting with --mount/--exec/--cp/--soft-reset. "
+                    "Ctrl-C interrupts the target; Ctrl-D / EOF exits, leaving "
+                    "it running. --raw gives a full raw terminal instead "
+                    "(arrow keys, history, paste) but cannot chain setup.")
     p.add_argument("label")
+    p.add_argument("--raw", action="store_true",
+                   help="Full raw-terminal passthrough instead of the streaming session")
+    p.add_argument("--log", default=None, metavar="FILE",
+                   help="Append all received output to this file")
+    p.add_argument("--device", default=None, metavar="DEV",
+                   help="Attach this mpremote device instead of the pod's "
+                        "socket REPL (e.g. a DUT CDC tty)")
+    p.add_argument("--mount", default=None, metavar="DIR",
+                   help="Mount a host dir on the target for the session "
+                        "(stays mounted until exit)")
+    p.add_argument("--exec", action="append", metavar="CODE", dest="exec",
+                   help="Run setup code on the target before connecting (repeatable)")
+    p.add_argument("--cp", action="append", nargs=2, metavar=("SRC", "DST"),
+                   help="Copy a file to/from the target before connecting "
+                        "(':path' = target side; repeatable)")
+    p.add_argument("--soft-reset", action="store_true", dest="soft_reset",
+                   help="Soft-reset the target before connecting")
+    p.add_argument("--unsafe-links", action="store_true", dest="unsafe_links",
+                   help="With --mount, follow symlinks pointing outside the mount root")
+    p.add_argument("--no-reconnect", action="store_true", dest="no_reconnect",
+                   help="Do not auto-reconnect after a dropped link (default: reconnect)")
 
     # mount
     p = sub.add_parser("mount", help="Mount a local directory on the pod")
@@ -894,6 +1048,39 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--resume-window-ms", type=int, default=200, metavar="MS",
                    dest="resume_window_ms",
                    help="RESUME_WAIT window in ms (default: 200)")
+
+    # halt / resume / read-reg / write-reg / read-mem / write-mem
+    # SWD debug-interface peek-poke. Registers need a halted core (halt first).
+    p = sub.add_parser("halt",
+                       help="Halt the DUT core over SWD (hold; no auto-resume)")
+    p.add_argument("label")
+
+    p = sub.add_parser("resume", help="Resume the DUT core over SWD")
+    p.add_argument("label")
+
+    p = sub.add_parser("read-reg",
+                       help="Read a DUT core register over SWD (core halted)")
+    p.add_argument("label")
+    p.add_argument("reg", help="regsel 0..18 or name (r0..r12, sp, lr, pc, "
+                                "xpsr, msp, psp)")
+
+    p = sub.add_parser("write-reg",
+                       help="Write a DUT core register over SWD (core halted)")
+    p.add_argument("label")
+    p.add_argument("reg", help="regsel 0..18 or name")
+    p.add_argument("value", help="32-bit value (e.g. 0x20004000)")
+
+    p = sub.add_parser("read-mem",
+                       help="Read DUT memory over SWD, print hex (<= 4096 bytes)")
+    p.add_argument("label")
+    p.add_argument("addr", help="Source address (e.g. 0x20000000)")
+    p.add_argument("length", type=int, help="Bytes to read (1..4096)")
+
+    p = sub.add_parser("write-mem",
+                       help="Write DUT memory over SWD (RAM/peripherals only)")
+    p.add_argument("label")
+    p.add_argument("addr", help="Destination address (>= 0x20000000)")
+    p.add_argument("data", help="Bytes as a hex string (e.g. deadbeef)")
 
     # i2c-target
     p = sub.add_parser("i2c-target",
@@ -977,6 +1164,12 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "flash": cmd_flash,
         "reset": cmd_reset,
         "gdb": cmd_gdb,
+        "halt": cmd_halt,
+        "resume": cmd_resume,
+        "read-reg": cmd_read_reg,
+        "write-reg": cmd_write_reg,
+        "read-mem": cmd_read_mem,
+        "write-mem": cmd_write_mem,
         "i2c-target": cmd_i2c_target,
         "i2c-regs": cmd_i2c_regs,
         "gpio": cmd_gpio,

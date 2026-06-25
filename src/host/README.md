@@ -19,9 +19,13 @@ pip install -e .[dev]       # + zeroconf, mcp, pytest
 ```
 
 Requirements:
-- `ampremote` on `PATH` (the REPL transport). This build has no `resume`
-  subcommand; `connect socket://HOST:PORT exec ...` does not soft-reset by
-  default, which is what the client relies on.
+- `ampremote` (Andrew's async `mpremote` fork - improved TCP + raw-REPL
+  support). It is NOT on PyPI; `pip install -e .` pulls it straight from GitHub
+  (`git+https://github.com/andrewleech/ampremote@main#subdirectory=micropython/tools/mpremote`),
+  installing both the `ampremote` console script (the REPL transport) and the
+  `mpremote` import (used by the persistent `pod repl` session). This build has
+  no `resume` subcommand; `connect socket://HOST:PORT exec ...` does not
+  soft-reset by default, which is what the client relies on.
 - `zeroconf` (optional) for mDNS discovery; without it, discovery shells out to
   `avahi-browse`.
 - `mcp` (optional) for the MCP server.
@@ -37,13 +41,22 @@ pod discover [--timeout S]            browse mDNS (_annealage-pod._tcp) for live
 pod register <label> --address IP [--repl-port 8266]
 pod list                              show registered pods
 pod info <label>                      show a registered pod's details
-pod repl <label>                      attach an interactive REPL
 pod mount <label> <dir>               mount a host directory on the pod
 pod exec <label> "<code>"             run MicroPython on the pod, print stdout
 pod cp <label> <src> <dst>            copy a file (':path' = pod side)
 pod flash <label> <image> [--addr 0xADDR] [--target T]
 pod reset <label> [--mode sysreset|halt]
 pod gdb <label> [--listen-port N] [--gdb-port 3335] [--no-reset-halt] [--resume-window-ms 200]
+pod halt <label>                      halt the DUT core over SWD (hold; no auto-resume)
+pod resume <label>                    resume the DUT core over SWD
+pod read-reg <label> <reg>            read a core register over SWD (core halted; reg 0..18 or pc/sp/lr/..)
+pod write-reg <label> <reg> <value>   write a core register over SWD (core halted)
+pod read-mem <label> <addr> <len>     read DUT memory over SWD, print hex (<= 4096 bytes)
+pod write-mem <label> <addr> <hex>    write DUT memory over SWD (RAM/peripherals; flash refused)
+pod repl <label> [--raw] [--log FILE] [--device DEV] [--mount DIR] [--exec CODE] [--cp SRC DST] [--soft-reset] [--no-reconnect]
+                                      persistent REPL: stream stdout to console+file, type lines to stdin
+                                      (auto-reconnects across drops; --raw = full raw terminal;
+                                       --mount/--exec/--cp/--soft-reset chain setup first)
 pod pins <label> [--cached]           show the pod's own DUT-facing pin assignments
 pod dut <label> [--dut-* ...] [--adopt]   show / set / verify the wired DUT (identity, wiring, usb, repl)
 pod usb <label>                       list the DUT USB devices the pod exports (live VID:PID)
@@ -119,6 +132,20 @@ p.reset_dut(mode="sysreset")                   # 'sysreset' (run) or 'halt'
 p.read_dut(0x0, 4096, "dump.bin")              # explicit target read -> host file
 p.gdb_endpoint(listen_port=0)                  # local GDB RSP server; blocks until detach
 
+# SWD register/memory peek-poke (single-shot; registers need a halted core):
+p.halt_dut(); p.resume_dut()                   # hold / release the core over SWD
+p.read_reg("pc")                               # -> {'value': ...}; reg 0..18 or pc/sp/lr/..
+p.write_reg("sp", 0x20004000)
+p.read_mem(0x20000000, 16)                     # -> {'hex': '...'}; live MEM-AP, <= 4096 bytes
+p.write_mem(0x20000000, b"\xde\xad\xbe\xef")   # RAM/peripherals only; flash refused
+
+# Persistent streaming REPL session (built on ampremote; pod socket REPL by default):
+s = p.open_session(log_path="pod.log", mount="./fw")  # connect; mount ./fw for the session
+s.send("import os; print(os.uname())")         # inject a REPL command line
+print(s.read_since()["text"])                  # tail buffered output (pass cursor for only-new)
+s.interrupt(); s.close()                        # Ctrl-C the target; close (it keeps running)
+# chain stateless setup too: open_session(pre_exec=[...], pre_cp=[("a.py",":a.py")], soft_reset=True)
+
 # DUT-facing peripherals (annealage_pod.peripherals resident on the pod):
 p.i2c_target(addr=0x42, regs=[0xAB, 0xCD])     # pod acts as I2C target (register file)
 p.i2c_target_regs(off=0, length=2)             # -> {'regs': [...]} read the file
@@ -149,6 +176,14 @@ agent drives the hardware loop with the same verbs:
 | `reset_dut` | reset the DUT (`sysreset` / `halt`) |
 | `read_dut` | read DUT memory to a host file (streamed) |
 | `gdb_dut` | start a local GDB RSP server to the DUT and return its endpoint |
+| `dut_halt` / `dut_resume` | halt/resume the DUT core over SWD (no auto-resume; halt freezes the DUT) |
+| `dut_read_reg` / `dut_write_reg` | read/write a core register over SWD (core must be halted) |
+| `dut_read_mem` / `dut_write_mem` | read/write DUT memory over SWD, inline hex (live MEM-AP; flash refused) |
+| `repl_open` / `repl_close` | open/close a persistent, auto-reconnecting streaming REPL session (stdout -> log + tail buffer; chain mount/exec/cp/soft_reset first) |
+| `repl_read` | tail the session's buffered stdout by cursor |
+| `repl_send` | inject a REPL command line to stdin and read back its output |
+| `repl_interrupt` | send Ctrl-C to the session |
+| `repl_list` | list open REPL sessions |
 | `i2c_target` | pod acts as a hardware I2C target backing a register file |
 | `i2c_target_regs` | read/write that register file from the host |
 | `gpio` | read or drive a pod GPIO |
@@ -159,6 +194,39 @@ agent drives the hardware loop with the same verbs:
 The loop an agent runs: edit DUT firmware -> `flash_dut` -> `reset_dut` ->
 observe (`dut_exec`, or have the pod present an `i2c_target` / `gpio` the DUT
 exercises) -> repeat.
+
+### Persistent REPL session
+
+`pod repl` / the `repl_*` tools hold a long-lived connection to the pod's socket
+REPL (built on ampremote's transport), where its asyncio app + aiorepl run. The
+target's stdout streams to a log file (the lossless record) and an in-memory
+tail buffer; injected lines go to its stdin, so you watch output and run REPL
+commands on the same live session. `--device` (CLI) / `device` (MCP) points the
+same session at any mpremote device instead, e.g. a DUT CDC tty. A session holds
+the pod's single socket-REPL slot for its lifetime, so while it is open use
+`repl_send` (not `pod_exec`, which would contend for the slot) to run code.
+
+Chain mpremote-style setup before the connect (like `mpremote mount ./fw exec
+"..." repl`): `--mount DIR` / `--exec CODE` / `--cp SRC DST` / `--soft-reset`
+(MCP: `mount`/`exec`/`cp`/`soft_reset`). The stateless steps run as ordinary
+one-shot verbs first; `mount` is kept on the session's own connection (the fs
+hook RPCs back over it, so it cannot live in a throwaway process), and is the
+reason to use `repl_open` over the one-shot `mount_dir`. Mounting briefly enters
+the raw REPL to install the hook (like `mpremote mount`), interrupting a running
+app's foreground.
+
+The session is stateful and **auto-reconnects** (like ampremote): the reader
+tells a dropped link (the read raises) from an idle gap (a read timeout returns
+nothing) and re-establishes the connection with backoff, re-applying the mount,
+so long-running logging survives Wi-Fi blips and target reboots. Reconnect
+boundaries are marked inline in the stream/log (`[pod-repl: connection dropped
+...]` / `[pod-repl: reconnected ...]`), the cursor/log are continuous across
+them, and `repl_send` mid-reconnect waits briefly then reports if still down.
+`--no-reconnect` (CLI) / `reconnect: false` (MCP) opts out.
+
+`pod repl` is line-oriented (Ctrl-C interrupts the target, Ctrl-D exits, leaving
+it running); add `--raw` for a full raw terminal (arrow keys, history, paste) -
+which is a one-shot passthrough and cannot chain setup.
 
 **DUT unresponsive / suspected wedged?** First try `reset_dut` (`pod reset
 <label>`): a SWD system reset re-inits the target's core *and* peripherals
