@@ -157,6 +157,53 @@ class TestResolveRegsel:
         with pytest.raises(ValueError):
             _resolve_regsel("banana")
 
+    def test_out_of_range_raises(self):
+        from pod.client import _resolve_regsel
+        for bad in (19, -1, "99", "0x40"):
+            with pytest.raises(ValueError):
+                _resolve_regsel(bad)
+
+
+class TestDutProtectRanges:
+    def test_floor_only_when_undeclared(self):
+        from pod.registry import dut_protect_ranges, CORTEX_M_SRAM_BASE
+        assert dut_protect_ranges({}) == [[0, CORTEX_M_SRAM_BASE]]
+        assert dut_protect_ranges(None) == [[0, CORTEX_M_SRAM_BASE]]
+
+    def test_low_flash_subsumed_by_floor(self):
+        # nRF52 / RP2350 flash sits below the SRAM base -> not appended
+        from pod.registry import dut_protect_ranges, CORTEX_M_SRAM_BASE
+        e = {"dut": {"flash_base": 0x10000000, "flash_size": 0x200000}}
+        assert dut_protect_ranges(e) == [[0, CORTEX_M_SRAM_BASE]]
+
+    def test_high_flash_appended(self):
+        from pod.registry import dut_protect_ranges, CORTEX_M_SRAM_BASE
+        e = {"dut": {"flash_base": 0x60000000, "flash_size": 0x100000}}
+        assert dut_protect_ranges(e) == [[0, CORTEX_M_SRAM_BASE],
+                                         [0x60000000, 0x60100000]]
+
+
+class TestWriteMemProtect:
+    def test_refuses_overlap_before_roundtrip(self, pod_fake, fake_runner):
+        result = pod_fake.write_mem(0x1000, b"\xaa\xbb", protect=[[0, 0x20000000]])
+        assert result["ok"] is False and "write-protected" in result["err"]
+        fake_runner.assert_not_called()
+
+    def test_allows_ram_and_encodes_protect(self, pod_fake, fake_runner):
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'addr': 536870912, 'length': 2}\n", returncode=0)
+        pod_fake.write_mem(0x20000000, b"\xaa\xbb", protect=[[0, 0x20000000]])
+        code = fake_runner.call_args[0][0][4]
+        assert "protect=[[0, 536870912]]" in code
+
+    def test_read_mem_length_out_of_range_raises(self, pod):
+        with pytest.raises(ValueError):
+            pod.read_mem(0x20000000, 5000)
+
+    def test_write_mem_oversize_raises(self, pod):
+        with pytest.raises(ValueError):
+            pod.write_mem(0x20000000, b"\x00" * 5000)
+
 
 class TestDutDebugPeek:
     @staticmethod
@@ -222,14 +269,15 @@ class TestDutDebugPeek:
             returncode=0)
         pod_fake.write_mem(0x20000000, b"\xde\xad\xbe\xef")
         code = self._code(fake_runner)
-        assert "o.write_mem(%d, 'deadbeef')" % 0x20000000 in code
+        assert "o.write_mem(%d, 'deadbeef', protect=None)" % 0x20000000 in code
 
     def test_write_mem_accepts_hex_string(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(
             stdout="{'ok': True, 'addr': 536870912, 'length': 2}\n",
             returncode=0)
         pod_fake.write_mem(0x20000000, "beef")
-        assert "o.write_mem(%d, 'beef')" % 0x20000000 in self._code(fake_runner)
+        assert ("o.write_mem(%d, 'beef', protect=None)" % 0x20000000
+                in self._code(fake_runner))
 
 
 class TestMcpDutDebugPeek:
@@ -239,8 +287,8 @@ class TestMcpDutDebugPeek:
         calls = {}
 
         class FakePod:
-            def halt_dut(self):
-                calls["halt"] = True
+            def halt_dut(self, keep_attached=False):
+                calls["halt"] = keep_attached
                 return {"ok": True, "halted": True, "dhcsr": 0x20000}
 
             def resume_dut(self):
@@ -259,8 +307,9 @@ class TestMcpDutDebugPeek:
                 calls["read_mem"] = (addr, length)
                 return {"ok": True, "addr": addr, "length": length, "hex": "00"}
 
-            def write_mem(self, addr, data):
+            def write_mem(self, addr, data, protect=None):
                 calls["write_mem"] = (addr, data)
+                calls["write_mem_protect"] = protect
                 return {"ok": True, "addr": addr, "length": 1}
 
         monkeypatch.setattr(m.Pod, "from_entry",
@@ -271,7 +320,7 @@ class TestMcpDutDebugPeek:
         m, calls = self._fake_pod(monkeypatch)
         assert m.handle_dut_halt("x")["halted"] is True
         assert m.handle_dut_resume("x")["halted"] is False
-        assert calls["halt"] and calls["resume"]
+        assert "halt" in calls and calls["resume"]
 
     def test_read_write_reg(self, monkeypatch):
         m, calls = self._fake_pod(monkeypatch)
@@ -571,4 +620,14 @@ class TestAttachGuard:
     def test_keep_attached_skips_detach(self, monkeypatch):
         p, detached = self._pod_and_detached(monkeypatch)
         p.reset_dut(keep_attached=True)
+        assert detached == []
+
+    def test_halt_detaches_live_attach(self, monkeypatch):
+        p, detached = self._pod_and_detached(monkeypatch)
+        p.halt_dut()
+        assert detached == [0]
+
+    def test_halt_keep_attached_skips_detach(self, monkeypatch):
+        p, detached = self._pod_and_detached(monkeypatch)
+        p.halt_dut(keep_attached=True)
         assert detached == []

@@ -12,7 +12,7 @@
 import struct
 import time
 
-from . import swd_dap, flash_nrf52, netutil
+from . import swd_dap, flash_nrf52, netutil, dbgsrv
 from .. import _rp2_pinmap
 
 _dp = None
@@ -216,70 +216,99 @@ def reset(mode="sysreset", clkdiv=8):
 # the flash-region write guard are reused from dbgsrv so there is one
 # implementation of each.
 
-_REGSEL_MAX = 18   # 0..15 + xPSR(16) + MSP(17) + PSP(18); mirrors dbgsrv.REGSEL_MAX
-
-
 def halt(clkdiv=8):
     # Halt the core where it is and hold it (no auto-resume). Required before a
     # register read/write; also freezes the DUT (incl. its USB) for the duration.
-    dp, ap, cm, fl = _ensure(clkdiv)
-    cm.halt()
-    return {"ok": True, "halted": True, "dhcsr": cm.read_dhcsr()}
+    try:
+        dp, ap, cm, fl = _ensure(clkdiv)
+        cm.halt()
+        return {"ok": True, "halted": True, "dhcsr": cm.read_dhcsr()}
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        return {"ok": False, "err": repr(e)}
 
 
 def resume(clkdiv=8):
     # Resume a core halted by halt() / reset(mode="halt").
-    dp, ap, cm, fl = _ensure(clkdiv)
-    cm.resume()
-    return {"ok": True, "halted": False}
+    try:
+        dp, ap, cm, fl = _ensure(clkdiv)
+        cm.resume()
+        return {"ok": True, "halted": False}
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        return {"ok": False, "err": repr(e)}
 
 
 def read_reg(regsel, clkdiv=8):
-    dp, ap, cm, fl = _ensure(clkdiv)
-    if regsel < 0 or regsel > _REGSEL_MAX:
-        return {"ok": False, "err": "regsel out of range 0..%d" % _REGSEL_MAX}
-    if not cm.is_halted():
-        return {"ok": False, "err": "core is running; halt() it first "
-                "(registers need a halted core)"}
-    return {"ok": True, "regsel": regsel, "value": cm.read_core_reg(regsel)}
+    # Validate the (cheap) argument before _ensure, which line-resets the DP.
+    if regsel < 0 or regsel > dbgsrv.REGSEL_MAX:
+        return {"ok": False, "err": "regsel out of range 0..%d" % dbgsrv.REGSEL_MAX}
+    try:
+        dp, ap, cm, fl = _ensure(clkdiv)
+        if not cm.is_halted():
+            return {"ok": False, "err": "core is running; halt() it first "
+                    "(registers need a halted core)"}
+        return {"ok": True, "regsel": regsel, "value": cm.read_core_reg(regsel)}
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        return {"ok": False, "err": repr(e)}
 
 
 def write_reg(regsel, value, clkdiv=8):
-    dp, ap, cm, fl = _ensure(clkdiv)
-    if regsel < 0 or regsel > _REGSEL_MAX:
-        return {"ok": False, "err": "regsel out of range 0..%d" % _REGSEL_MAX}
-    if not cm.is_halted():
-        return {"ok": False, "err": "core is running; halt() it first "
-                "(registers need a halted core)"}
+    if regsel < 0 or regsel > dbgsrv.REGSEL_MAX:
+        return {"ok": False, "err": "regsel out of range 0..%d" % dbgsrv.REGSEL_MAX}
     value &= 0xFFFFFFFF
-    cm.write_core_reg(regsel, value)
-    return {"ok": True, "regsel": regsel, "value": value}
+    try:
+        dp, ap, cm, fl = _ensure(clkdiv)
+        if not cm.is_halted():
+            return {"ok": False, "err": "core is running; halt() it first "
+                    "(registers need a halted core)"}
+        cm.write_core_reg(regsel, value)
+        return {"ok": True, "regsel": regsel, "value": value}
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        return {"ok": False, "err": repr(e)}
 
 
 def read_mem(addr, length, clkdiv=8):
     import binascii
-    from . import dbgsrv
     if length < 0 or length > dbgsrv.MAX_DATA:
         return {"ok": False, "err": "length out of range 0..%d "
                 "(use read_dut/dump_stream for bulk)" % dbgsrv.MAX_DATA}
-    dp, ap, cm, fl = _ensure(clkdiv)
-    data = dbgsrv._read_mem(ap, addr, length)
-    return {"ok": True, "addr": addr, "length": length,
-            "hex": binascii.hexlify(data).decode()}
+    try:
+        dp, ap, cm, fl = _ensure(clkdiv)
+        data = dbgsrv._read_mem(ap, addr, length)
+        return {"ok": True, "addr": addr, "length": length,
+                "hex": binascii.hexlify(data).decode()}
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        return {"ok": False, "err": repr(e)}
 
 
-def write_mem(addr, data_hex, clkdiv=8):
+def write_mem(addr, data_hex, protect=None, clkdiv=8):
     import binascii
-    from . import dbgsrv
-    data = binascii.unhexlify(data_hex)
+    try:
+        data = binascii.unhexlify(data_hex)
+    except ValueError as e:
+        return {"ok": False, "err": "bad hex data: %r" % e}
     if len(data) > dbgsrv.MAX_DATA:
         return {"ok": False, "err": "data exceeds %d bytes" % dbgsrv.MAX_DATA}
-    if addr < dbgsrv.FLASH_TOP:
-        return {"ok": False, "err": "addr 0x%08x is in the flash region "
-                "(< 0x%08x); flash needs erase - use flash_file/flash_stream"
+    # `protect` is the host's authoritative set of write-protected [lo, hi)
+    # ranges (the declared DUT flash geometry + the Cortex-M code-region floor).
+    # Without it (a direct REPL caller), fall back to the coarse code-region
+    # backstop: everything below the architectural Cortex-M SRAM base is
+    # flash/ROM and not word-writable.
+    end = addr + len(data)
+    if protect:
+        for lo, hi in protect:
+            if addr < hi and end > lo:
+                return {"ok": False, "err": "addr 0x%08x..0x%08x overlaps a "
+                        "write-protected range 0x%08x..0x%08x"
+                        % (addr, end, lo, hi)}
+    elif addr < dbgsrv.FLASH_TOP:
+        return {"ok": False, "err": "addr 0x%08x is in the code/flash region "
+                "(< 0x%08x, the Cortex-M SRAM base) and is not word-writable"
                 % (addr, dbgsrv.FLASH_TOP)}
-    dp, ap, cm, fl = _ensure(clkdiv)
-    dbgsrv._write_mem(ap, addr, data)
+    try:
+        dp, ap, cm, fl = _ensure(clkdiv)
+        dbgsrv._write_mem(ap, addr, data)
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        return {"ok": False, "err": repr(e)}
     return {"ok": True, "addr": addr, "length": len(data)}
 
 

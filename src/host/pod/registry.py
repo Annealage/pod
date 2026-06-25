@@ -245,3 +245,31 @@ def reconcile_dut(declared: Optional[dict], live: Optional[dict]) -> dict:
         all_match = all_match and match
     return {"verdict": "MATCH" if all_match else "MISMATCH", "fields": fields,
             "declared": declared, "live": live}
+
+
+# The architectural Cortex-M SRAM base. The address map is fixed by ARMv7-M/v8-M
+# for every Cortex-M part (Code 0x0..0x1FFFFFFF, SRAM 0x20000000.., Peripheral
+# 0x40000000..), so "below this is code/flash/ROM, not word-writable" holds
+# across nRF52, RP2350, STM32, etc. - it is not a per-vendor constant.
+CORTEX_M_SRAM_BASE = 0x20000000
+
+
+def dut_protect_ranges(entry: Optional[dict]):
+    """Write-protected [lo, hi) address ranges for guarding DUT word-writes.
+
+    Flash/ROM are not word-writable (flash needs erase), so dut_write_mem
+    refuses writes landing in these ranges. Always includes the Cortex-M code
+    region floor (everything below the SRAM base); appends any declared DUT
+    flash geometry (flash_base/flash_size) that extends above the floor - e.g.
+    external/QSPI flash mapped high - so a non-standard map is covered from the
+    registry rather than a hardcoded per-family table. The on-pod write_mem
+    applies the floor itself as a backstop when no ranges are supplied.
+    """
+    ranges = [[0, CORTEX_M_SRAM_BASE]]
+    dut = (entry or {}).get("dut") or {}
+    base, size = dut.get("flash_base"), dut.get("flash_size")
+    if base is not None and size:
+        lo, hi = int(base), int(base) + int(size)
+        if hi > CORTEX_M_SRAM_BASE:
+            ranges.append([lo, hi])
+    return ranges

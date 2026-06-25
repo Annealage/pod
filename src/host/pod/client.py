@@ -67,19 +67,26 @@ def _resolve_regsel(reg) -> int:
     """Resolve a register name or number to a regsel int (0..18).
 
     Accepts an int, a name (pc/sp/lr/r0..), or a numeric string (the CLI passes
-    its positional arg as a string, so "15"/"0x0f" must work too).
+    its positional arg as a string, so "15"/"0x0f" must work too). Raises
+    ValueError for an unknown name or an out-of-range number, so a bad regsel
+    fails locally instead of after a pod round-trip.
     """
+    hi = max(_REG_NAMES.values())
     if isinstance(reg, str):
         key = reg.strip().lower()
         if key in _REG_NAMES:
             return _REG_NAMES[key]
         try:
-            return int(key, 0)
+            regsel = int(key, 0)
         except ValueError:
             raise ValueError(
-                "unknown register %r (use 0..18 or %s)"
-                % (reg, "/".join(_REG_NAMES)))
-    return int(reg)
+                "unknown register %r (use 0..%d or %s)"
+                % (reg, hi, "/".join(_REG_NAMES)))
+    else:
+        regsel = int(reg)
+    if not 0 <= regsel <= hi:
+        raise ValueError("regsel %d out of range 0..%d" % (regsel, hi))
+    return regsel
 
 
 class PodExecError(RuntimeError):
@@ -420,13 +427,15 @@ class Pod:
     # from the USB/IP forward. Registers need the core halted (halt_dut /
     # reset_dut mode='halt'); memory is a live MEM-AP access.
 
-    def halt_dut(self) -> dict:
+    def halt_dut(self, keep_attached: bool = False) -> dict:
         """Halt the DUT core over SWD and hold it (no auto-resume).
 
         Required before read_reg/write_reg. Freezes the target, including its
-        USB - any active USB/IP forward stalls until resume_dut. Returns
-        {ok, halted, dhcsr}.
+        USB - any active USB/IP forward stalls. Detaches a live USB/IP session
+        first (a frozen DUT mid-forward wedges the pod, same as reset/flash);
+        keep_attached=True overrides. Returns {ok, halted, dhcsr}.
         """
+        self._guard_live_attach(keep_attached)
         return _last_dict(self.exec(
             "import annealage_pod.debug.ops as o; print(o.halt())"))
 
@@ -454,29 +463,53 @@ class Pod:
             "import annealage_pod.debug.ops as o; print(o.write_reg(%d, %d))"
             % (regsel, value & 0xFFFFFFFF)))
 
+    # MEM-AP single-transfer cap (mirrors dbgsrv.MAX_DATA); larger reads/writes
+    # belong on the streaming read_dut/flash_dut paths.
+    _MAX_MEM = 4096
+
     def read_mem(self, addr: int, length: int) -> dict:
         """Read DUT memory over SWD, returned inline as hex (<= 4096 bytes).
 
         A live MEM-AP read - works whether the core runs or is halted (halt_dut
         first for a coherent snapshot). For bulk dumps to a file use read_dut.
-        Returns {ok, addr, length, hex}.
+        Returns {ok, addr, length, hex}. Raises ValueError for an out-of-range
+        length (fails locally instead of after a pod round-trip).
         """
+        if not 0 <= length <= self._MAX_MEM:
+            raise ValueError("length %d out of range 0..%d (use read_dut for bulk)"
+                             % (length, self._MAX_MEM))
         return _last_dict(self.exec(
             "import annealage_pod.debug.ops as o; print(o.read_mem(%d, %d))"
             % (addr, length)))
 
-    def write_mem(self, addr: int, data) -> dict:
+    def write_mem(self, addr: int, data, protect=None) -> dict:
         """Write DUT memory over SWD (RAM/peripherals only, <= 4096 bytes).
 
-        data is bytes or a hex string. Writes into the flash region
-        (addr < 0x20000000) are refused - flash needs erase, use flash_dut.
-        A live MEM-AP write. Returns {ok, addr, length}.
+        data is bytes or a hex string. `protect` is a list of [lo, hi)
+        write-protected address ranges (the declared DUT flash geometry + the
+        Cortex-M code-region floor, via registry.dut_protect_ranges); a write
+        landing in one is refused here before the round-trip and re-checked
+        on-pod as a backstop. Without `protect`, the on-pod side still applies
+        the code-region backstop (addr < 0x20000000). A live MEM-AP write.
+        Returns {ok, addr, length}.
         """
         import binascii as _b
         data_hex = data if isinstance(data, str) else _b.hexlify(bytes(data)).decode()
+        nbytes = len(data_hex) // 2
+        if nbytes > self._MAX_MEM:
+            raise ValueError("data %d bytes exceeds %d" % (nbytes, self._MAX_MEM))
+        end = addr + nbytes
+        for lo, hi in (protect or []):
+            if addr < hi and end > lo:
+                return {"ok": False, "addr": addr,
+                        "err": "addr 0x%08x..0x%08x overlaps write-protected "
+                        "0x%08x..0x%08x" % (addr, end, int(lo), int(hi))}
+        prot_arg = ("None" if not protect
+                    else repr([[int(lo), int(hi)] for lo, hi in protect]))
         return _last_dict(self.exec(
-            "import annealage_pod.debug.ops as o; print(o.write_mem(%d, %r))"
-            % (addr, data_hex)))
+            "import annealage_pod.debug.ops as o;"
+            " print(o.write_mem(%d, %r, protect=%s))"
+            % (addr, data_hex, prot_arg)))
 
     @staticmethod
     def _dump_stream_cmd(addr: int, length: int, port: int) -> str:

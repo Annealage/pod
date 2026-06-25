@@ -26,7 +26,8 @@ import tempfile
 import threading
 import time
 from pod.discovery import discover_pods as _discover_pods
-from pod.registry import get_pod, load_registry, update_pod, reconcile_dut
+from pod.registry import (get_pod, load_registry, update_pod, reconcile_dut,
+                          dut_protect_ranges)
 from pod.client import Pod, PodExecError
 from pod.target import PodUnreachable
 from pod import enroll
@@ -282,9 +283,10 @@ def _pod_for(label: str) -> Pod:
 # core (dut_halt / reset_dut mode='halt').
 
 
-def handle_dut_halt(label: str) -> dict:
-    """Halt the DUT core over SWD (no auto-resume). Freezes the DUT incl. USB."""
-    return _pod_for(label).halt_dut()
+def handle_dut_halt(label: str, keep_attached: bool = False) -> dict:
+    """Halt the DUT core over SWD (no auto-resume). Freezes the DUT incl. USB;
+    detaches a live USB/IP session first unless keep_attached."""
+    return _pod_for(label).halt_dut(keep_attached=keep_attached)
 
 
 def handle_dut_resume(label: str) -> dict:
@@ -308,8 +310,12 @@ def handle_dut_read_mem(label: str, addr: int, length: int) -> dict:
 
 
 def handle_dut_write_mem(label: str, addr: int, data_hex: str) -> dict:
-    """Write DUT memory over SWD (RAM/peripherals only; flash is refused)."""
-    return _pod_for(label).write_mem(addr, data_hex)
+    """Write DUT memory over SWD; refuses the declared flash + code region."""
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError("Pod '%s' not found in registry." % label)
+    return Pod.from_entry(entry).write_mem(
+        addr, data_hex, protect=dut_protect_ranges(entry))
 
 
 # ── persistent streaming REPL sessions ────────────────────────────────────
@@ -766,6 +772,12 @@ def build_server():
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
+                        "keep_attached": {
+                            "type": "boolean",
+                            "description": "Do not detach a live USB/IP session "
+                                           "first (risks a forwarder wedge).",
+                            "default": False,
+                        },
                     },
                     "required": ["label"],
                 },
@@ -1201,7 +1213,8 @@ def build_server():
                     arguments.get("listen_port", 0))
             elif name == "dut_halt":
                 result = await asyncio.to_thread(
-                    handle_dut_halt, arguments["label"])
+                    handle_dut_halt, arguments["label"],
+                    arguments.get("keep_attached", False))
             elif name == "dut_resume":
                 result = await asyncio.to_thread(
                     handle_dut_resume, arguments["label"])
@@ -1298,6 +1311,10 @@ def build_server():
                 text=f"Pod unreachable or identity mismatch: {exc}")]
         except (LookupError, KeyError) as exc:
             return [TextContent(type="text", text=f"Error: {exc}")]
+        except ValueError as exc:
+            # Bad argument surfaced locally (e.g. an out-of-range regsel/length)
+            # before any pod round-trip.
+            return [TextContent(type="text", text=f"Invalid argument: {exc}")]
 
     return server
 

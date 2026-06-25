@@ -31,6 +31,7 @@ from pod.registry import (
     update_pod,
     remove_pod,
     reconcile_dut,
+    dut_protect_ranges,
 )
 from pod.client import Pod, PodExecError
 
@@ -648,7 +649,7 @@ def cmd_gdb(args):
 def cmd_halt(args):
     """Halt the DUT core over SWD (hold it; no auto-resume)."""
     pod = Pod.from_entry(_require_pod(args.label))
-    result = pod.halt_dut()
+    result = pod.halt_dut(keep_attached=args.keep_attached)
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -691,7 +692,11 @@ def cmd_write_reg(args):
 def cmd_read_mem(args):
     """Read DUT memory over SWD and print it as hex (<= 4096 bytes)."""
     pod = Pod.from_entry(_require_pod(args.label))
-    result = pod.read_mem(int(args.addr, 0), args.length)
+    try:
+        result = pod.read_mem(int(args.addr, 0), int(args.length, 0))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if result.get("ok"):
         print("0x%08x: %s" % (result["addr"], result["hex"]))
     else:
@@ -700,9 +705,11 @@ def cmd_read_mem(args):
 
 
 def cmd_write_mem(args):
-    """Write DUT memory over SWD (RAM/peripherals only; flash refused)."""
-    pod = Pod.from_entry(_require_pod(args.label))
-    result = pod.write_mem(int(args.addr, 0), args.data)
+    """Write DUT memory over SWD (RAM/peripherals only; flash/code region refused)."""
+    entry = _require_pod(args.label)
+    pod = Pod.from_entry(entry)
+    result = pod.write_mem(int(args.addr, 0), args.data,
+                           protect=dut_protect_ranges(entry))
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -1054,6 +1061,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p = sub.add_parser("halt",
                        help="Halt the DUT core over SWD (hold; no auto-resume)")
     p.add_argument("label")
+    p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
+                   help="Do not detach a live USB/IP session first (risks a wedge)")
 
     p = sub.add_parser("resume", help="Resume the DUT core over SWD")
     p.add_argument("label")
@@ -1074,7 +1083,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                        help="Read DUT memory over SWD, print hex (<= 4096 bytes)")
     p.add_argument("label")
     p.add_argument("addr", help="Source address (e.g. 0x20000000)")
-    p.add_argument("length", type=int, help="Bytes to read (1..4096)")
+    p.add_argument("length", help="Bytes to read, 1..4096 (decimal or 0x..)")
 
     p = sub.add_parser("write-mem",
                        help="Write DUT memory over SWD (RAM/peripherals only)")
