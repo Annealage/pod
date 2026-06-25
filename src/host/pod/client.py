@@ -651,6 +651,10 @@ class Pod:
               back over it, so it cannot live in a throwaway process).
         pre_exec is a list of code strings; pre_cp a list of (src, dst) pairs;
         mount a host directory (stays mounted for the session's lifetime).
+        pre_exec code must RETURN - it runs as a one-shot exec in its own
+        connection before the session opens, so a non-returning snippet (e.g. a
+        bare loop) hangs that exec; start long-running work via session.send
+        after connecting instead.
         """
         from pod import session as _session
         if soft_reset:

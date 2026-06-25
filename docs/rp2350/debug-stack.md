@@ -92,10 +92,15 @@ these never auto-resume, so a `halt()` holds across calls until `resume()`:
   `{ok: False}` (registers go through the debug DCRSR/DCRDR, which need a halt).
 - `read_mem(addr, length) -> {ok, addr, length, hex}` (length <= 4096) - a live
   MEM-AP read; works halted or running. For bulk dumps use `dump_stream`.
-- `write_mem(addr, hex) -> {ok, addr, length}` - a live MEM-AP write to RAM /
-  peripherals. Writes into the flash region (`addr < 0x20000000`) are refused
-  (flash needs erase - use `flash_stream`/`flash_file`). The aligned/unaligned
-  access and the flash guard are shared with `dbgsrv`.
+- `write_mem(addr, hex, protect=None) -> {ok, addr, length}` - a live MEM-AP
+  write to RAM / peripherals. `protect` is a list of `[lo, hi)` write-protected
+  ranges the host supplies from the declared DUT flash geometry plus the
+  Cortex-M code-region floor (see `registry.dut_protect_ranges`); a write
+  overlapping one is refused. Without `protect` (a direct REPL caller) it falls
+  back to the code-region backstop - everything below `0x20000000`, the
+  architectural Cortex-M SRAM base, is flash/ROM and not word-writable. Flash
+  programming proper goes through `flash_stream`/`flash_file` where available.
+  The aligned/unaligned access is shared with `dbgsrv`.
 
 ### Recovering a wedged DUT (do this before a power-cycle)
 

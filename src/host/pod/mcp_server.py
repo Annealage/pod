@@ -351,7 +351,9 @@ def handle_repl_open(label: str, log_path: str = None, device: str = None,
     if sess is not None and sess["session"].running:
         s = sess["session"]
         return {"label": label, "target": s.target, "log_path": sess["log_path"],
-                "running": True, "mounted": bool(mount), "already_open": True}
+                "running": True, "mounted": s.mounted, "already_open": True,
+                "note": "session already open; mount/exec/cp/soft_reset args "
+                        "were ignored - repl_close first to change them"}
     pre_exec = [exec] if isinstance(exec, str) else (list(exec) if exec else None)
     pre_cp = None
     if cp:
@@ -364,7 +366,7 @@ def handle_repl_open(label: str, log_path: str = None, device: str = None,
                          unsafe_links=unsafe_links, reconnect=reconnect)
     _REPL_SESSIONS[label] = {"session": s, "log_path": log_path}
     return {"label": label, "target": s.target, "log_path": log_path,
-            "running": s.running, "mounted": bool(mount)}
+            "running": s.running, "mounted": s.mounted}
 
 
 def _require_repl(label: str):

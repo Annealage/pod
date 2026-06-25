@@ -11,9 +11,11 @@ requires-python = ">=3.10"
 # upstream) provides the `mpremote` import the pod tooling drives: the one-shot
 # exec/eval/cp/mount verbs and the persistent streaming REPL session
 # (pod.session, via mpremote SerialTransport). Not on PyPI - installed straight
-# from GitHub; the package lives in a subdirectory of the monorepo fork.
+# from GitHub; the package lives in a subdirectory of the monorepo fork. Pinned
+# to a commit (not @main) so the transport contract this depends on is
+# reproducible; bump the SHA deliberately when picking up fork fixes.
 dependencies = [
-  "ampremote @ git+https://github.com/andrewleech/ampremote@main#subdirectory=micropython/tools/mpremote",
+  "ampremote @ git+https://github.com/andrewleech/ampremote@999188c8816f15900a8fce1d552a6de8f39645de#subdirectory=micropython/tools/mpremote",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +25,7 @@ dev = [
   "pytest",
   "zeroconf",
   "mcp",
-  "ampremote @ git+https://github.com/andrewleech/ampremote@main#subdirectory=micropython/tools/mpremote",
+  "ampremote @ git+https://github.com/andrewleech/ampremote@999188c8816f15900a8fce1d552a6de8f39645de#subdirectory=micropython/tools/mpremote",
 ]
 
 [project.scripts]

@@ -134,6 +134,8 @@ class ReplSession:
     def _make_transport(self):
         if self._transport_factory is not None:
             return self._transport_factory(self.target, self._read_timeout)
+        # The ampremote/mpremote distribution installs as the `mpremote` import
+        # package (see pyproject); SerialTransport over a pyserial socket:// URL.
         from mpremote.transport_serial import SerialTransport
         return SerialTransport(self.target, timeout=self._read_timeout)
 

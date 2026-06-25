@@ -152,6 +152,7 @@ class _FakeSession:
     def __init__(self, target="socket://x:8266"):
         self.target = target
         self.running = True
+        self.mounted = False
         self._cursor = 0
         self.sent = []
         self.interrupted = False
@@ -363,6 +364,7 @@ def mcp_repl(monkeypatch):
     class FakePod:
         def open_session(self, **kwargs):
             opened.update(kwargs)
+            fake.mounted = bool(kwargs.get("mount"))
             return fake
 
     monkeypatch.setattr(m.Pod, "from_entry", classmethod(lambda cls, e: FakePod()))

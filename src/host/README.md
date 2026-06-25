@@ -137,7 +137,7 @@ p.halt_dut(); p.resume_dut()                   # hold / release the core over SW
 p.read_reg("pc")                               # -> {'value': ...}; reg 0..18 or pc/sp/lr/..
 p.write_reg("sp", 0x20004000)
 p.read_mem(0x20000000, 16)                     # -> {'hex': '...'}; live MEM-AP, <= 4096 bytes
-p.write_mem(0x20000000, b"\xde\xad\xbe\xef")   # RAM/peripherals only; flash refused
+p.write_mem(0x20000000, b"\xde\xad\xbe\xef")   # RAM/peripherals; flash + code region refused
 
 # Persistent streaming REPL session (built on ampremote; pod socket REPL by default):
 s = p.open_session(log_path="pod.log", mount="./fw")  # connect; mount ./fw for the session
@@ -209,11 +209,16 @@ the pod's single socket-REPL slot for its lifetime, so while it is open use
 Chain mpremote-style setup before the connect (like `mpremote mount ./fw exec
 "..." repl`): `--mount DIR` / `--exec CODE` / `--cp SRC DST` / `--soft-reset`
 (MCP: `mount`/`exec`/`cp`/`soft_reset`). The stateless steps run as ordinary
-one-shot verbs first; `mount` is kept on the session's own connection (the fs
-hook RPCs back over it, so it cannot live in a throwaway process), and is the
-reason to use `repl_open` over the one-shot `mount_dir`. Mounting briefly enters
-the raw REPL to install the hook (like `mpremote mount`), interrupting a running
-app's foreground.
+one-shot verbs first (so `--exec` code must RETURN - a bare loop hangs that
+one-shot; start long-running work via `repl_send` after connecting); `mount` is
+kept on the session's own connection (the fs hook RPCs back over it, so it
+cannot live in a throwaway process), and is the reason to use `repl_open` over
+the one-shot `mount_dir`. Mounting briefly enters the raw REPL to install the
+hook (like `mpremote mount`), which interrupts a running app's foreground - and
+it is re-applied once per reconnect, so on a flapping link with `--mount` expect
+one interrupt per restored connection (a reconnect that cannot re-mount keeps
+streaming unmounted rather than retrying). `repl_open` reports the real
+`mounted` state.
 
 The session is stateful and **auto-reconnects** (like ampremote): the reader
 tells a dropped link (the read raises) from an idle gap (a read timeout returns
