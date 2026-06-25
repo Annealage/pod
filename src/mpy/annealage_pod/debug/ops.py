@@ -329,7 +329,6 @@ def gdb_serve(port=3335, clkdiv=8, reset_halt=True):
     # comparators in flash, which a later flash_stream (it never calls FPB.init)
     # would inherit and spuriously trap on. The host 'D' detach still issues its
     # own clear/resume; this is the backstop for the paths 'D' never reaches.
-    from . import dbgsrv
     dp, ap, cm, fl = _ensure(clkdiv)
     if reset_halt:
         cm.reset_and_halt()
