@@ -290,6 +290,44 @@ class TestReplSession:
         finally:
             s.close()
 
+    def test_mounted_reconnect_reapplies_mount(self):
+        # A mounted link that drops on the first read; the reader must detect the
+        # drop (the intercept's underlying read raises) and re-apply the mount on
+        # the fresh transport.
+        s1, s2 = _OneShotSerial(), _FakeSerial()
+        t1, t2 = _FakeTransport(s1), _FakeTransport(s2)
+        s = ReplSession("socket://x", mount="/host/dir", read_timeout=0.02,
+                        reconnect_min=0.01, reconnect_max=0.05,
+                        transport_factory=_seq_factory([t1, t2]))
+        s.open()
+        try:
+            assert _wait_until(lambda: s.reconnects >= 1, timeout=3)
+            assert ("mount_local", "/host/dir", False) in t2.calls
+            assert s.mounted is True
+        finally:
+            s.close()
+
+    def test_send_during_reconnect_raises(self):
+        s1 = _OneShotSerial()                 # drops immediately
+
+        def factory(target, timeout):
+            if not factory.calls:
+                factory.calls.append(1)
+                return _FakeTransport(s1)
+            raise OSError("link still down")  # reconnect keeps failing
+        factory.calls = []
+
+        s = ReplSession("socket://x", read_timeout=0.02, reconnect_min=0.01,
+                        reconnect_max=0.02, transport_factory=factory)
+        s.open()
+        s._send_wait = 0.05                   # don't wait the full 5s in the test
+        try:
+            assert _wait_until(lambda: not s.connected, timeout=2)
+            with pytest.raises(ConnectionError):
+                s.send("print(1)")
+        finally:
+            s.close()
+
     def test_mount_sequence_and_demux(self, fake_serial, tmp_path):
         s = ReplSession("socket://x", mount="/host/dir", read_timeout=0.02,
                         log_path=str(tmp_path / "l.txt"),

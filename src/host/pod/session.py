@@ -81,7 +81,10 @@ class ReplSession:
         self.log_path = log_path
         self._on_output = on_output
         self._buffer_bytes = buffer_bytes
-        self._read_timeout = read_timeout
+        # A None timeout would make the reader block forever and never observe
+        # _stop; force a bounded poll.
+        self._read_timeout = (read_timeout if read_timeout is not None
+                              else DEFAULT_READ_TIMEOUT)
         self._reconnect = reconnect
         self._reconnect_min = reconnect_min
         self._reconnect_max = reconnect_max
@@ -107,10 +110,16 @@ class ReplSession:
         """Open the transport, start the reader thread. Returns self.
 
         The INITIAL connect is synchronous and propagates the transport's error
-        (mpremote's TransportError) so a dead target surfaces immediately. Later
-        drops are handled by the reader's reconnect loop, not raised.
+        (mpremote's TransportError) so a dead target surfaces immediately, and
+        so does an initial mount failure. Later drops are handled by the
+        reader's reconnect loop, not raised.
         """
         self._connect()                 # initial connect; raises on failure
+        try:
+            self._ensure_mounted(strict=True)   # initial mount; raises on failure
+        except Exception:
+            self._teardown_transport()
+            raise
         if self.log_path:
             # Unbuffered append: the log is the lossless record even if the
             # process is killed; nothing about the stream is held only in RAM.
@@ -129,14 +138,29 @@ class ReplSession:
         return SerialTransport(self.target, timeout=self._read_timeout)
 
     def _connect(self):
-        """(Re)create the transport and apply the mount. Raises on failure."""
+        """Open the bare transport (the socket only). No raw-REPL entry, so a
+        flapping link does not interrupt the target's app on every attempt;
+        mounting (which must enter the raw REPL) is a separate, once-per-live-
+        connection step in _ensure_mounted. Raises on socket-open failure."""
         self._transport = self._make_transport()
-        if self._mount:
-            try:
-                self._apply_mount()
-            except Exception:           # noqa: BLE001 - re-raise after cleanup
-                self._teardown_transport()
+
+    def _ensure_mounted(self, strict):
+        """Apply the mount on the current (live) transport, at most once per
+        connection. The mount fs hook RPCs back over this link so it must live
+        on the session; installing it enters the raw REPL, which interrupts the
+        target's foreground (so this runs once per restored link, not per
+        reconnect attempt). strict=True (initial open) re-raises a failure;
+        strict=False (reconnect) notes it and continues streaming UNMOUNTED so a
+        persistently-failing mount cannot storm the app with Ctrl-C.
+        """
+        if not self._mount or getattr(self._transport, "mounted", False):
+            return
+        try:
+            self._apply_mount()
+        except Exception as exc:        # noqa: BLE001 - degrade, don't storm
+            if strict:
                 raise
+            self._note("mount failed (%r); continuing unmounted" % exc)
 
     def _apply_mount(self):
         """Install the mount fs hook over this connection, then return to the
@@ -144,15 +168,17 @@ class ReplSession:
         SerialIntercept that mount_local leaves in place services the device's
         filesystem RPC inline under the friendly REPL (see _reader). Done before
         the reader thread reads this transport, so there is only ever one reader
-        of the stream. Re-run on every reconnect (a rebooted target has no hook).
+        of the stream.
         """
         t = self._transport
-        if not getattr(t, "in_raw_repl", False):
+        entered = not getattr(t, "in_raw_repl", False)
+        if entered:
             t.enter_raw_repl(soft_reset=False)
         try:
             t.mount_local(self._mount, unsafe_links=self._unsafe_links)
         finally:
-            t.exit_raw_repl()
+            if entered:                 # only undo the state we changed
+                t.exit_raw_repl()
 
     def _teardown_transport(self):
         """Close and drop the current transport (used for a dead/dropped link)."""
@@ -178,20 +204,39 @@ class ReplSession:
         """True while a live transport is attached (False mid-reconnect)."""
         return self._connected.is_set()
 
+    @property
+    def mounted(self):
+        """Whether a mount is currently active on the live transport (the real
+        state, which may be False if a reconnect could not re-apply it)."""
+        return bool(getattr(self._transport, "mounted", False))
+
     def close(self):
         """Stop the reader, unmount, close the transport and log. Leaves the
         target running. Returns {ok, received, reconnects, error}. Idempotent.
         """
+        # Was the link live at close time? (vs mid-reconnect). Captured before
+        # _stop so the reader's own _connected.clear() on exit can't confuse it.
+        alive = self._connected.is_set()
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self._read_timeout + 2)
+            if self._thread.is_alive():
+                # Reader stuck in a blocking read (e.g. SerialIntercept's own
+                # timeout); force the socket closed to abort it, then reap. This
+                # forfeits a clean unmount, so skip it below.
+                alive = False
+                if self._transport is not None:
+                    try:
+                        self._transport.serial.close()
+                    except Exception:   # noqa: BLE001
+                        pass
+                self._thread.join(timeout=2)
         if self._transport is not None:
             # Best-effort unmount so the device's /remote does not linger
-            # RPC-dead (a stale mount would EEXIST the next mount). The reader
-            # is stopped and leaves a live transport intact on a clean stop, so
-            # the main thread now owns it. mpremote's own repl leaves the mount
-            # on detach; we tidy it where we can.
-            if getattr(self._transport, "mounted", False):
+            # RPC-dead (a stale mount would EEXIST the next mount). Only when the
+            # link was live at close - over a dropped/dead link the unmount RPC
+            # would just block out to the transport timeout before failing.
+            if alive and getattr(self._transport, "mounted", False):
                 try:
                     if not getattr(self._transport, "in_raw_repl", False):
                         self._transport.enter_raw_repl(soft_reset=False)
@@ -266,9 +311,11 @@ class ReplSession:
         return False
 
     def _reconnect_loop(self):
-        """Reconnect with exponential backoff until it succeeds or stop is set.
-
-        Returns True once connected, False if stopped (or it should give up).
+        """Reopen the transport with exponential backoff. Loops until it
+        reconnects (returns True) or close()/_stop ends it (returns False);
+        there is no attempt cap - a session reconnects for as long as it is
+        held open. Re-applies the mount once on the restored link (best-effort:
+        a failed re-mount continues unmounted rather than storming the app).
         """
         delay = self._reconnect_min
         while not self._stop.is_set():
@@ -282,6 +329,7 @@ class ReplSession:
                 continue
             self._connected.set()
             self.reconnects += 1
+            self._ensure_mounted(strict=False)
             self._note("reconnected to %s" % self.target)
             return True
         return False
