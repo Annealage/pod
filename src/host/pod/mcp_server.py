@@ -1275,7 +1275,7 @@ def build_server():
                     arguments.get("width", 1), arguments.get("rate", 1000000),
                     arguments.get("depth", 8000), arguments.get("trigger"),
                     arguments.get("out_path", "capture.vcd"),
-                    arguments.get("sm_id", 10), arguments.get("names"))
+                    arguments.get("sm_id", 0), arguments.get("names"))
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
             return [TextContent(type="text", text=str(result))]
