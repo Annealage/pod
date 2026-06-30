@@ -1,9 +1,10 @@
 # RP2350 pod: development plan (overview)
 
-Master plan for the RP2350 (Pico 2 W) variant of the Annealage Pod. This is a
-dynamic, risk-ordered plan: each phase ends at a decision gate that is validated
-on hardware before the next phase commits, and the plan is re-cut as spikes land.
-It is the counterpart to the ESP32-S3 `docs/esp32-s3/spec.md` and `docs/esp32-s3/architecture.md`.
+Master plan for the RP2350 (Pico 2 W), the canonical, current Annealage Pod
+target. This is a dynamic, risk-ordered plan: each phase ends at a decision gate
+that is validated on hardware before the next phase commits, and the plan is
+re-cut as spikes land. It supersedes the prior ESP32-S3 design captured in
+`docs/esp32-s3/spec.md` and `docs/esp32-s3/architecture.md`.
 
 Read first: `docs/rp2350/spike-findings.md` (what is already proven on hardware)
 and `docs/rp2350/dev-notes.md` (gotchas and recipes).
@@ -30,10 +31,10 @@ DUT. Carrier-hardware-dependent capabilities (INA228 telemetry, power-rail
 switching, level translation) are gated on a future custom PCB and are called out
 as such per phase. Opto-relays are out of scope for this design.
 
-This is a parallel variant, not a replacement: the ESP32-S3 design stays
-supported. Maximise shared code (MP package, USB/IP protocol logic, RP_INFRA API
-mimicry, INA228, slave register-table model); accept divergence in the silicon
-backends.
+The RP2350 is the canonical target; the prior ESP32-S3 design is frozen and
+receives no new features. Maximise shared code (MP package, USB/IP protocol
+logic, RP_INFRA API mimicry, INA228, slave register-table model); accept
+divergence in the silicon backends.
 
 ## 2. Why this shape (architecture deltas from ESP32-S3)
 
@@ -125,8 +126,9 @@ Layering:
   FLM flasher), `reset [--mode swd|nrst|power]`, `telemetry`, `uart`
   (tail/bridge), `usbip` (attach helper), `gdb` (proxy to the on-pod GDB server),
   `exec`, `cp`. (`telemetry` and `--mode power` need custom carrier hardware.)
-- **`pod` MCP server**: `pod mcp` starts an MCP (stdio) server over the same core
-  library. Tools map to the CLI verbs: `discover_pods`, `pod_info`, `flash_dut`,
+- **`pod` MCP server**: the `pod-mcp` console script starts an MCP (stdio) server
+  over the same core library. Tools map to the CLI verbs: `discover_pods`,
+  `pod_info`, `flash_dut`,
   `reset_dut`, `read_telemetry`, `dut_exec`, `mount_dir`,
   `tail_uart`, `attach_usbip`, `gdb_*`. Leverages `ampremote` for all transport.
 

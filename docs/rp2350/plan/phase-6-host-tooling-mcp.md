@@ -46,8 +46,8 @@ Thin frontend over the core library. Provisional subcommands:
 - `pod exec <label> <code>` / `pod cp ...`.
 
 ### H6.3 `pod` MCP server
-- `pod mcp` starts an MCP (stdio) server over the same core library, so the CLI
-  and the agent share one implementation.
+- the `pod-mcp` console script starts an MCP (stdio) server over the same core
+  library, so the CLI and the agent share one implementation.
 - Tools (map to CLI verbs): `discover_pods`, `pod_info`, `flash_dut`,
   `reset_dut`, `read_telemetry`, `dut_exec`, `mount_dir`,
   `tail_uart`, `attach_usbip`, `gdb_attach`/`gdb_*`.
@@ -65,7 +65,7 @@ Thin frontend over the core library. Provisional subcommands:
   `tail_uart` after Phase 5 (`read_telemetry` once custom carrier hardware exists).
 - Implement the MCP server over the library; validate each tool against a live
   pod.
-- Package the CLI and MCP entry points (`pod`, `pod mcp`).
+- Package the CLI and MCP entry points (`pod`, `pod-mcp`).
 
 ## Deliverables
 

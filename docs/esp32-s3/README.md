@@ -1,4 +1,4 @@
-# Annealage Pod - ESP32-S3 variant (parallel target)
+# Annealage Pod - ESP32-S3 variant (prior, superseded design)
 
 These documents describe the **ESP32-S3** build of the Annealage Pod: a single
 ESP32-S3 + ESP-IDF + MicroPython, with C user modules for USB/IP, a synthetic
@@ -17,7 +17,7 @@ will mis-wire a Pico 2 W.**
 
 Contents:
 
-- `spec.md` - the ESP32-S3 design of record (what the pod does).
+- `spec.md` - the ESP32-S3 design spec (what that variant of the pod did).
 - `architecture.md` - how the ESP32-S3 parts compose (companion to the spec).
 - `spec-appendix-A-pinmap.md` - ESP32-S3 GPIO assignment and the Octoprobe v0.7
   DUT-carrier pin map.

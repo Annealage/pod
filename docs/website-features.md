@@ -1,7 +1,7 @@
 # Annealage Pod - feature reference (website source-of-truth)
 
 This file is the verified capability reference for Annealage Pod, written from the
-RP2350 codebase, docs, and git history (branch `rp2350-pivot`, 2026-06-25). It is the
+RP2350 codebase, docs, and git history (branch `main`, 2026-06-25). It is the
 durable source-of-truth the marketing `/pod` page and the `/docs/pod` Starlight pages
 should be checked against, so the site cannot drift from the code again.
 

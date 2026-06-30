@@ -5,11 +5,12 @@ Companion to `dev-notes.md` (gotchas/recipes). The phased plan builds on these.
 
 ## Context
 
-The Annealage Pod is adding an RP2350 (Pico 2 W) target as a parallel variant
-alongside the ESP32-S3 design (`docs/esp32-s3/spec.md`, `docs/esp32-s3/architecture.md`). The pivot
-inverts one core decision: instead of synthesising a CMSIS-DAP-v2 probe over
-USB/IP for a host-side pyOCD to drive, the debugger runs **on the pod** in
-MicroPython, driving SWD directly. The host talks to the pod over Wi-Fi.
+The Annealage Pod's canonical target is the RP2350 (Pico 2 W); the ESP32-S3
+design (`docs/esp32-s3/spec.md`, `docs/esp32-s3/architecture.md`) is the prior,
+superseded design. The RP2350 inverts one core decision: instead of synthesising
+a CMSIS-DAP-v2 probe over USB/IP for a host-side pyOCD to drive, the debugger
+runs **on the pod** in MicroPython, driving SWD directly. The host talks to the
+pod over Wi-Fi.
 
 Spike hardware:
 

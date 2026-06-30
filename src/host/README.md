@@ -21,11 +21,11 @@ pip install -e .[dev]       # + zeroconf, mcp, pytest
 Requirements:
 - `ampremote` (Andrew's async `mpremote` fork - improved TCP + raw-REPL
   support). It is NOT on PyPI; `pip install -e .` pulls it straight from GitHub
-  (`git+https://github.com/andrewleech/ampremote@main#subdirectory=micropython/tools/mpremote`),
-  installing both the `ampremote` console script (the REPL transport) and the
-  `mpremote` import (used by the persistent `pod repl` session). This build has
-  no `resume` subcommand; `connect socket://HOST:PORT exec ...` does not
-  soft-reset by default, which is what the client relies on.
+  at the commit pinned in `pyproject.toml` (the source of truth for the exact
+  revision), installing both the `ampremote` console script (the REPL transport)
+  and the `mpremote` import (used by the persistent `pod repl` session). This
+  build has no `resume` subcommand; `connect socket://HOST:PORT exec ...` does
+  not soft-reset by default, which is what the client relies on.
 - `zeroconf` (optional) for mDNS discovery; without it, discovery shells out to
   `avahi-browse`.
 - `mcp` (optional) for the MCP server.
@@ -68,7 +68,7 @@ pod gpio <label> <pin> [--value 0|1] [--pull up|down]            read or drive a
 pod adc <label> <pin>                                            sample a pod ADC channel
 pod release <label> [--name '*']                                 release pod peripheral instance(s)
 pod la <label> [--pins 16-23] [--rate 1e6] [--depth N] [--trigger 16:rise] [--out cap.vcd]
-pod mcp                               start the MCP stdio server (alias: pod-mcp)
+pod-mcp                               start the MCP stdio server (separate console script)
 ```
 
 The registry lives at `~/.config/pod/pods.json` (override with `POD_CONFIG_DIR`).
@@ -163,8 +163,8 @@ filesystem, and the prior DUT contents are only read by the explicit
 
 ## MCP server
 
-`pod mcp` (or `pod-mcp`) starts an MCP stdio server over the same library, so an
-agent drives the hardware loop with the same verbs:
+The `pod-mcp` console script starts an MCP stdio server over the same library, so
+an agent drives the hardware loop with the same verbs:
 
 | Tool | Action |
 |---|---|
@@ -253,13 +253,15 @@ paths are validated against hardware, not in the unit tests.
 ## USB/IP DUT access
 
 When the DUT's native USB is wired to the **pod's** USB host port, the pod exports
-it over USB/IP (TCP 3240) and the host attaches it as a local device, so you talk
-to the DUT's own REPL:
+it over USB/IP (TCP 3240) and the host attaches it as a local device. Device
+enumeration and attach are validated; bulk-transfer forwarding is not working yet
+on RP2350 (only control and interrupt endpoints forward), so connecting to the
+DUT's own REPL over the forwarded USB is not functional end-to-end yet:
 
 ```bash
 pod usb lab1                 # list exported devices (live VID:PID + busid)
 pod attach lab1              # bring the pod USB host + usbip server up, attach, print the DUT tty
-mpremote connect <tty>       # the printed /dev/serial/by-id path -> the DUT REPL
+mpremote connect <tty>       # the printed /dev/serial/by-id path; the DUT REPL (needs working bulk forwarding)
 pod detach lab1 --port N     # release (N from `usbip port`)
 ```
 
@@ -337,9 +339,12 @@ hardware-validated end-to-end, including the live Wi-Fi capture round-trip
 on PIO2, the CYW43 Wi-Fi block, now fixed). For DUT wiring and usage, see
 "Using the logic analyser" in `../../docs/rp2350/logic-analyser.md`.
 USB/IP DUT access (`pod usb` / `pod attach` / `pod detach`, MCP `dut_usb` /
-`attach_dut`) is implemented and host-unit-tested, driven by the standard `usbip`
-client against the pod's existing server (see "USB/IP DUT access" above). The
-attach path is exercised when the DUT's USB is on the pod host port; on a bench
-where the DUT enumerates straight to the host it is `agent-direct` and not used.
+`attach_dut`) is driven by the standard `usbip` client against the pod's existing
+server (see "USB/IP DUT access" above). Device enumeration and attach are
+validated; bulk-transfer forwarding is not working yet on RP2350 (only control
+and interrupt endpoints forward), so connecting to the DUT's own REPL over the
+forwarded USB is not functional end-to-end yet. The attach path is exercised when
+the DUT's USB is on the pod host port; on a bench where the DUT enumerates
+straight to the host it is `agent-direct` and not used.
 `uart_stream` / `telemetry` (Phase 5) remain stubbed and raise with the pending
 phase.
