@@ -46,6 +46,8 @@ from pod.gdbserver import (
     OP_WRITE_MEM,
     OP_RESUME_WAIT,
     OP_BP_SET,
+    OP_WATCH_SET,
+    OP_WATCH_CLEAR,
     INTERRUPT_BYTE,
     SIGINT,
     SIGTRAP,
@@ -112,6 +114,10 @@ class FakePodLink:
         self.bp_set_addrs = []
         self.bp_clear_addrs = []
         self.bp_clear_all_count = 0
+        self.watch_set_args = []            # (addr, length, func)
+        self.watch_clear_args = []          # (addr, length, func)
+        self.watch_fail = set()             # addrs whose watch_set raises PodError
+        self.watch_slot = 0                 # scripted slot returned by watch_set
         self.written = []                   # (addr, bytes)
         self.write_regs_calls = []
         self.write_reg_calls = []
@@ -179,6 +185,15 @@ class FakePodLink:
 
     def bp_clear_all(self):
         self.bp_clear_all_count += 1
+
+    def watch_set(self, addr, length, func):
+        self.watch_set_args.append((addr, length, func))
+        if addr in self.watch_fail:
+            raise PodError(STATUS_XFER)
+        return self.watch_slot
+
+    def watch_clear(self, addr, length, func):
+        self.watch_clear_args.append((addr, length, func))
 
 
 def make_server(link=None):
@@ -679,6 +694,105 @@ class TestBreakpointPolicy:
         reply = server.handle_packet(b"z0,1000,2")
         assert reply == "OK"
         assert link.bp_clear_addrs == [0x1000]
+
+
+# ── watchpoint policy (DWT) ──────────────────────────────────────────────────
+
+
+class TestWatchpointPolicy:
+    def test_z2_write_watch_func_6(self):
+        link = FakePodLink()
+        server = make_server(link)
+        reply = server.handle_packet(b"Z2,20001000,4")
+        assert reply == "OK"
+        assert link.watch_set_args == [(0x20001000, 4, 6)]
+
+    def test_z3_read_watch_func_5(self):
+        link = FakePodLink()
+        server = make_server(link)
+        reply = server.handle_packet(b"Z3,20001000,4")
+        assert reply == "OK"
+        assert link.watch_set_args == [(0x20001000, 4, 5)]
+
+    def test_z4_access_watch_func_7(self):
+        link = FakePodLink()
+        server = make_server(link)
+        reply = server.handle_packet(b"Z4,20001000,4")
+        assert reply == "OK"
+        assert link.watch_set_args == [(0x20001000, 4, 7)]
+
+    def test_kind_field_is_watch_length(self):
+        link = FakePodLink()
+        server = make_server(link)
+        server.handle_packet(b"Z2,20001000,1")
+        server.handle_packet(b"Z2,20001004,2")
+        assert link.watch_set_args == [
+            (0x20001000, 1, 6),
+            (0x20001004, 2, 6),
+        ]
+
+    def test_odd_kind_falls_back_to_4(self):
+        link = FakePodLink()
+        server = make_server(link)
+        # kind 3 is not a DWT-supported width; clamp to 4.
+        server.handle_packet(b"Z2,20001000,3")
+        assert link.watch_set_args == [(0x20001000, 4, 6)]
+
+    def test_z2_clear_sends_matching_triple(self):
+        link = FakePodLink()
+        server = make_server(link)
+        server.handle_packet(b"Z2,20001000,4")
+        reply = server.handle_packet(b"z2,20001000,4")
+        assert reply == "OK"
+        assert link.watch_clear_args == [(0x20001000, 4, 6)]
+
+    def test_z3_clear_sends_func_5(self):
+        link = FakePodLink()
+        server = make_server(link)
+        server.handle_packet(b"Z3,20001000,2")
+        reply = server.handle_packet(b"z3,20001000,2")
+        assert reply == "OK"
+        assert link.watch_clear_args == [(0x20001000, 2, 5)]
+
+    def test_z4_clear_sends_func_7(self):
+        link = FakePodLink()
+        server = make_server(link)
+        server.handle_packet(b"Z4,20001000,4")
+        reply = server.handle_packet(b"z4,20001000,4")
+        assert reply == "OK"
+        assert link.watch_clear_args == [(0x20001000, 4, 7)]
+
+    def test_watch_set_failure_returns_error(self):
+        link = FakePodLink()
+        link.watch_fail = {0x20002000}
+        server = make_server(link)
+        reply = server.handle_packet(b"Z2,20002000,4")
+        assert reply == "E01"
+
+    def test_set_records_watchpoint_bookkeeping(self):
+        link = FakePodLink()
+        server = make_server(link)
+        server.handle_packet(b"Z2,20001000,4")
+        assert (0x20001000, 4, 6) in server._watchpoints
+        server.handle_packet(b"z2,20001000,4")
+        assert (0x20001000, 4, 6) not in server._watchpoints
+
+
+class TestWatchPodLinkCodec:
+    def test_watch_set_request_and_slot(self):
+        sock = FakeSocket(frame(STATUS_OK, struct.pack("<B", 1)))
+        link = PodLink(sock)
+        slot = link.watch_set(0x20001000, 4, 5)
+        assert slot == 1
+        args = struct.pack("<IBB", 0x20001000, 4, 5)
+        assert sock.sent == struct.pack("<BBH", OP_WATCH_SET, 0, len(args)) + args
+
+    def test_watch_clear_request(self):
+        sock = FakeSocket(frame(STATUS_OK))
+        link = PodLink(sock)
+        link.watch_clear(0x20001000, 2, 6)
+        args = struct.pack("<IBB", 0x20001000, 2, 6)
+        assert sock.sent == struct.pack("<BBH", OP_WATCH_CLEAR, 0, len(args)) + args
 
 
 # ── run control + interrupt + stop reply ─────────────────────────────────────

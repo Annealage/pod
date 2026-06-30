@@ -20,10 +20,29 @@ _ap = None
 _cm = None
 _flash = None
 _fpb = None
+_dwt = None
+_flm = None
+
+
+# Selectable flash backend. The default ("native") is the validated per-family
+# NVM path (flash_nrf52.NRF52Flash), driven directly through the NVMC; it is the
+# only backend exercised on hardware and must stay the default so it cannot
+# regress. "flm" selects the generic CMSIS flash-algorithm runner
+# (flm.FLMFlasher + flm_<part>.FLASH_ALGO), which runs a standard algorithm blob
+# on the target itself - the path that generalises to any chip with a CMSIS
+# pack, but which is not yet hardware-validated here. Callers opt into it
+# explicitly per call (loader="flm"); _select_loader keeps the choice out of the
+# hot path.
+def _flm_algo():
+    # The CMSIS flash algorithm for the connected DUT. nRF52840 is the only
+    # extracted pack present; a real multi-DUT pod would pick this from the
+    # discovered part id. Imported lazily so the native path never loads it.
+    from . import flm_nrf52840
+    return flm_nrf52840.FLASH_ALGO
 
 
 def _ensure(clkdiv=8):
-    global _dp, _ap, _cm, _flash, _fpb
+    global _dp, _ap, _cm, _flash, _fpb, _dwt
     if _dp is None:
         from . import pio_arbiter
         pio_arbiter.claim("swd", 1)   # PIO1 (PIO2 = CYW43 Wi-Fi, PIO0 = analyser)
@@ -33,8 +52,67 @@ def _ensure(clkdiv=8):
         _cm = swd_dap.CortexM(_ap)
         _flash = flash_nrf52.NRF52Flash(_ap, _cm)
         _fpb = swd_dap.FPB(_ap)
+        _dwt = swd_dap.DWT(_ap)
     _dp.connect()
     return _dp, _ap, _cm, _flash
+
+
+def _select_loader(loader):
+    # Return the flash backend for this operation. "native" (default) is the
+    # cached NRF52Flash created by _ensure; "flm" lazily builds and caches an
+    # FLMFlasher over the same MEM-AP / CortexM so repeated FLM flashes reuse
+    # the loaded algorithm session. _ensure must have run first.
+    global _flm
+    if loader == "native":
+        return _flash
+    if loader == "flm":
+        from . import flm
+        if _flm is None:
+            _flm = flm.FLMFlasher(_ap, _cm, _flm_algo())
+        return _flm
+    raise ValueError("unknown loader %r (use 'native' or 'flm')" % loader)
+
+
+def _flm_erase_range(flm_fl, addr, length):
+    # Erase the page-aligned region covering [addr, addr+length) by sectors,
+    # using one Init(erase)/UnInit bracket. Mirrors NRF52Flash.erase_range so
+    # the FLM flash_file / flash_stream paths erase once up front and then
+    # program with erase=False, matching the native path's behaviour.
+    page = flm_fl.page_size
+    flm_fl.load()
+    flm_fl.init(1)                                 # operation 1 = erase
+    try:
+        p = addr & ~(page - 1)
+        end = addr + length
+        while p < end:
+            flm_fl.erase_sector(p)
+            p += page
+    finally:
+        flm_fl.uninit(1)
+
+
+def _flm_program_file(flm_fl, addr, fileobj, verify):
+    # Program target flash from an open binary file through the FLM backend,
+    # holding only one page in RAM at a time. Erases the covered region once,
+    # then programs page by page with erase=False. Returns bytes written.
+    if addr % 4:
+        raise ValueError("program addr not word-aligned")
+    try:
+        fileobj.seek(0, 2)
+        length = fileobj.tell()
+        fileobj.seek(0)
+    except (OSError, AttributeError):
+        raise ValueError("length required for non-seekable file")
+    _flm_erase_range(flm_fl, addr, length)
+    page = flm_fl.page_size
+    n = 0
+    while True:
+        buf = fileobj.read(page)
+        if not buf:
+            break
+        flm_fl.program(addr + n, buf, erase=False, verify=verify)
+        n += len(buf)
+    return n
 
 
 def info(clkdiv=8):
@@ -68,22 +146,34 @@ def discover(clkdiv=8):
         return {"ok": False, "err": repr(e)}
 
 
-def flash_file(addr, path, clkdiv=8, verify=True, chunk_words=256):
+def flash_file(addr, path, clkdiv=8, verify=True, chunk_words=256,
+               loader="native"):
     # Program target flash from a pod-side file, bounded memory, then resume.
+    # loader: "native" (default, validated NVMC path) or "flm" (generic CMSIS
+    # algorithm). See _select_loader.
     dp, ap, cm, fl = _ensure(clkdiv)
+    fl = _select_loader(loader)
     f = open(path, "rb")
     try:
         t0 = time.ticks_ms()
-        n = fl.program_file(addr, f, erase=True, verify=verify,
-                            chunk_words=chunk_words)
+        if loader == "native":
+            n = fl.program_file(addr, f, erase=True, verify=verify,
+                                chunk_words=chunk_words)
+        else:
+            # FLMFlasher has no file/streaming API. Seek to size, erase the
+            # whole covered region once (so a multi-page image is not partially
+            # erased), then feed the image in page-sized chunks with erase=False
+            # so the whole file is never resident in pod RAM.
+            n = _flm_program_file(fl, addr, f, verify)
         dt = time.ticks_diff(time.ticks_ms(), t0)
     finally:
         f.close()
     cm.resume()
-    return {"ok": True, "addr": addr, "bytes": n, "ms": dt}
+    return {"ok": True, "addr": addr, "bytes": n, "ms": dt, "loader": loader}
 
 
-def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True):
+def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True,
+                 loader="native"):
     # Flash a DUT image streamed over TCP straight into pod RAM, no filesystem.
     # The image is received into a RAM buffer a chunk at a time and programmed
     # to the DUT over SWD; the whole image is never resident (only one chunk
@@ -97,7 +187,9 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True):
     import socket
 
     dp, ap, cm, fl = _ensure(clkdiv)
-    fl.prepare()
+    fl = _select_loader(loader)
+    if loader == "native":
+        fl.prepare()
     page = fl.page_size
     err = None
 
@@ -114,7 +206,10 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True):
         # in TCP while we erase)
         start = addr & ~(page - 1)
         span = ((addr & (page - 1)) + total_len + page - 1) & ~(page - 1)
-        fl.erase_range(start, span)
+        if loader == "native":
+            fl.erase_range(start, span)
+        else:
+            _flm_erase_range(fl, start, span)
 
         buf = bytearray(chunk)
         mv = memoryview(buf)
@@ -145,7 +240,8 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True):
             cl.close()
         srv.close()
         cm.resume()
-    return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err}
+    return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err,
+            "loader": loader}
 
 
 def dump_stream(addr, length, port=3334, clkdiv=8):
@@ -323,10 +419,11 @@ def gdb_serve(port=3335, clkdiv=8, reset_halt=True):
     # the REPL stdout (as flash_stream does).
     #
     # The finally puts the DUT in a defined state on EVERY exit path (clean
-    # detach, socket drop, EOF, exception): the FPB comparators are unconditionally
-    # disabled and cleared and the core is resumed. Without this, an abnormal
-    # teardown (gdb killed, Wi-Fi drop) would leave the core halted with live FPB
-    # comparators in flash, which a later flash_stream (it never calls FPB.init)
+    # detach, socket drop, EOF, exception): the FPB comparators and the DWT
+    # data watchpoints are unconditionally disabled and cleared and the core is
+    # resumed. Without this, an abnormal teardown (gdb killed, Wi-Fi drop) would
+    # leave the core halted with live FPB comparators in flash or DWT
+    # comparators armed, which a later flash_stream (it never inits the FPB/DWT)
     # would inherit and spuriously trap on. The host 'D' detach still issues its
     # own clear/resume; this is the backstop for the paths 'D' never reaches.
     dp, ap, cm, fl = _ensure(clkdiv)
@@ -336,7 +433,7 @@ def gdb_serve(port=3335, clkdiv=8, reset_halt=True):
         cm.halt()
     err = None
     try:
-        dbgsrv.serve(dp, ap, cm, _fpb, port=port)
+        dbgsrv.serve(dp, ap, cm, _fpb, _dwt, port=port)
     except Exception as e:  # noqa: BLE001 - return as a result, not a raise
         err = repr(e)
     finally:
@@ -345,6 +442,11 @@ def gdb_serve(port=3335, clkdiv=8, reset_halt=True):
             if _fpb is not None:
                 _fpb.disable()
                 _fpb.clear_all()
+        except Exception:
+            pass
+        try:
+            if _dwt is not None:
+                _dwt.disable()
         except Exception:
             pass
         try:
@@ -357,7 +459,7 @@ def gdb_serve(port=3335, clkdiv=8, reset_halt=True):
 def close():
     # Resume the target, fully release the SWD PIO (so PIO1 is reclaimable, e.g.
     # by the analyser swap), and drop the cached session (next call re-creates it).
-    global _dp, _ap, _cm, _flash, _fpb
+    global _dp, _ap, _cm, _flash, _fpb, _dwt, _flm
     try:
         if _cm is not None:
             _cm.resume()
@@ -378,6 +480,8 @@ def close():
     _cm = None
     _flash = None
     _fpb = None
+    _dwt = None
+    _flm = None
     return {"ok": True}
 
 

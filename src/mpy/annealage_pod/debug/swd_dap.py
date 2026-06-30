@@ -103,6 +103,28 @@ FP_COMP0 = 0xE0002008
 FP_CTRL_KEY = 1 << 1
 FP_CTRL_ENABLE = 1 << 0
 
+# --- Data Watchpoint and Trace unit (DWT, ARMv7-M / Cortex-M4) ----------------
+# DWT comparators match data accesses by address, unlike the FPB which matches
+# only the code/flash region. A data-address watchpoint compares COMP against
+# the access address (low MASK bits ignored to cover the access width) and traps
+# per FUNCTION (load / store / either). The DWT clock is gated by DEMCR.TRCENA
+# (defined above); init() sets it so a watchpoint works outside a reset path.
+DWT_CTRL = 0xE0001000          # NUMCOMP in bits[31:28]
+DWT_COMP0 = 0xE0001020         # per-comparator stride 16: COMP+0, MASK+4, FUNCTION+8
+DWT_MASK0 = 0xE0001024
+DWT_FUNCTION0 = 0xE0001028
+DWT_COMP_STRIDE = 16
+# Data-address watch FUNCTION codes (ARMv7-M). These map to gdb watch types:
+# Z2(write)=6, Z3(read)=5, Z4(access)=7.
+DWT_FN_DISABLED = 0
+DWT_FN_WATCH_WRITE = 6
+DWT_FN_WATCH_READ = 5
+DWT_FN_WATCH_ACCESS = 7
+_DWT_FUNCS = (DWT_FN_WATCH_WRITE, DWT_FN_WATCH_READ, DWT_FN_WATCH_ACCESS)
+# MASK = number of low address bits to ignore so the comparator matches the
+# whole access width (1B -> 0, 2B -> 1, 4B -> 2).
+_DWT_LEN_MASK = {1: 0, 2: 1, 4: 2}
+
 
 class TransferError(Exception):
     def __init__(self, msg, ack=None):
@@ -466,3 +488,80 @@ class FPB:
         for n in range(self.nb_code):
             self.ap.write32(FP_COMP0 + 4 * n, 0)
             self._comp[n] = None
+
+
+class DWT:
+    # Data Watchpoint and Trace unit (ARMv7-M / Cortex-M4). Lazily initialised on
+    # first use; comparators match any address region (RAM or flash). The host
+    # treats a TransferError from set_watchpoint (no free comparator / bad args,
+    # surfaced as wire status 1) as a failure to arm. FUNCTION is written last so
+    # a comparator only traps once COMP/MASK are valid, and is cleared to 0 to
+    # disarm.
+    def __init__(self, ap):
+        self.ap = ap
+        self.numcomp = 0
+        self._comp = []        # per-slot: {addr, length, func} or None
+        self._inited = False
+
+    def _func_addr(self, slot):
+        return DWT_FUNCTION0 + DWT_COMP_STRIDE * slot
+
+    def init(self):
+        # Gate the DWT clock so comparators work even outside a reset_and_halt
+        # path (reset_and_halt sets TRCENA too, but a watchpoint may be armed on
+        # an already-running session).
+        self.ap.write32(DEMCR, self.ap.read32(DEMCR) | DEMCR_TRCENA)
+        self.numcomp = (self.ap.read32(DWT_CTRL) >> 28) & 0xF
+        for n in range(self.numcomp):
+            self.ap.write32(DWT_FUNCTION0 + DWT_COMP_STRIDE * n, DWT_FN_DISABLED)
+        self._comp = [None] * self.numcomp
+        self._inited = True
+
+    def set_watchpoint(self, addr, length, func):
+        if not self._inited:
+            self.init()
+        if length not in _DWT_LEN_MASK or func not in _DWT_FUNCS:
+            raise TransferError("DWT bad watch args (len=%d func=%d)" % (length, func))
+        want = {"addr": addr, "length": length, "func": func}
+        if want in self._comp:
+            return self._comp.index(want)
+        try:
+            slot = self._comp.index(None)
+        except ValueError:
+            raise TransferError("no free DWT comparator")
+        # addr should be naturally aligned to length; MASK ignores the low bits
+        # so the comparator covers the whole access width.
+        mask = _DWT_LEN_MASK[length]
+        base = DWT_COMP0 + DWT_COMP_STRIDE * slot
+        self.ap.write32(base, addr)             # COMP
+        self.ap.write32(base + 4, mask)         # MASK
+        self.ap.write32(base + 8, func)         # FUNCTION last: arms the comparator
+        self._comp[slot] = want
+        return slot
+
+    def clear_watchpoint(self, addr, length, func):
+        want = {"addr": addr, "length": length, "func": func}
+        if want not in self._comp:
+            return False
+        slot = self._comp.index(want)
+        self.ap.write32(self._func_addr(slot), DWT_FN_DISABLED)
+        self._comp[slot] = None
+        return True
+
+    def clear_all(self):
+        if not self._inited:
+            return
+        for n in range(self.numcomp):
+            self.ap.write32(self._func_addr(n), DWT_FN_DISABLED)
+            self._comp[n] = None
+
+    def disable(self):
+        # Disarm every comparator without requiring a prior init(), a safe
+        # teardown backstop so a watchpoint is not left armed for the next
+        # operation (e.g. a flash that never inits the DWT) to inherit.
+        if self._inited:
+            self.clear_all()
+            return
+        numcomp = (self.ap.read32(DWT_CTRL) >> 28) & 0xF
+        for n in range(numcomp):
+            self.ap.write32(DWT_FUNCTION0 + DWT_COMP_STRIDE * n, DWT_FN_DISABLED)

@@ -57,6 +57,8 @@ OP_WRITE_MEM = 0x31
 OP_BP_SET = 0x40
 OP_BP_CLEAR = 0x41
 OP_BP_CLEAR_ALL = 0x42
+OP_WATCH_SET = 0x43
+OP_WATCH_CLEAR = 0x44
 
 # Status codes (§2.1)
 STATUS_OK = 0
@@ -101,6 +103,13 @@ SIGINT = 2
 SIGTRAP = 5
 SIGBUS = 7
 SIGSEGV = 11
+
+# gdb Z/z watchpoint type -> DWT data-address FUNCTION code (mirrors swd_dap.py):
+# Z2 write -> 6, Z3 read -> 5, Z4 access (read+write) -> 7.
+_WATCH_FUNC = {2: 6, 3: 5, 4: 7}
+# DWT MASK supports byte-count widths 1, 2, 4; gdb's watch "kind" carries the
+# byte count. Anything else falls back to a 4-byte watch.
+_WATCH_LENGTHS = (1, 2, 4)
 
 
 # ── register map (the ONE place gdb-regnum <-> pod-regsel is reconciled, §4.5) ─
@@ -386,6 +395,15 @@ class PodLink:
     def bp_clear_all(self):
         self._checked(OP_BP_CLEAR_ALL)
 
+    # data watchpoints (DWT)
+
+    def watch_set(self, addr, length, func):
+        data = self._checked(OP_WATCH_SET, struct.pack("<IBB", addr, length, func))
+        return data[0]
+
+    def watch_clear(self, addr, length, func):
+        self._checked(OP_WATCH_CLEAR, struct.pack("<IBB", addr, length, func))
+
 
 # ── RSP framing helpers (pure, testable) ──────────────────────────────────────
 
@@ -547,6 +565,9 @@ class GdbServer:
         self._sw_bps = {}
         self._hw_bps = set()
         self._promoted = set()
+        # data watchpoints realised via the DWT, keyed by the exact
+        # (addr, length, func) triple so z<type> disarms the comparator it set.
+        self._watchpoints = {}
 
         self._gdb_sock = None           # set during serve_forever for interrupts
 
@@ -1052,29 +1073,62 @@ class GdbServer:
         return ""
 
     def _parse_z(self, text):
-        # Z<type>,addr,kind  or  z<type>,addr,kind
+        # Z<type>,addr,kind  or  z<type>,addr,kind. For Z0/Z1 kind is the
+        # breakpoint length (ignored here, the host owns the patch width); for
+        # Z2/Z3/Z4 kind is the watchpoint byte count and IS load-bearing for the
+        # DWT MASK. Default to 4 when the kind field is absent.
         bp_type = int(text[1:2], 16)
         rest = text[3:] if text[2:3] == "," else text[2:]
-        addr_s, _, _kind = rest.partition(",")
+        addr_s, _, kind_s = rest.partition(",")
         addr = int(addr_s, 16)
-        return bp_type, addr
+        kind = int(kind_s, 16) if kind_s else 4
+        return bp_type, addr, kind
 
     def _handle_Z(self, text):
-        bp_type, addr = self._parse_z(text)
+        bp_type, addr, kind = self._parse_z(text)
         if bp_type == 0:
             return self._set_breakpoint(addr, gdb_hw=False)
         if bp_type == 1:
             return self._set_breakpoint(addr, gdb_hw=True)
-        # Z2-Z4 watchpoints out of scope: empty reply.
+        if bp_type in _WATCH_FUNC:
+            return self._set_watchpoint(bp_type, addr, kind)
         return ""
 
     def _handle_z(self, text):
-        bp_type, addr = self._parse_z(text)
+        bp_type, addr, kind = self._parse_z(text)
         if bp_type == 0:
             return self._clear_breakpoint(addr, gdb_hw=False)
         if bp_type == 1:
             return self._clear_breakpoint(addr, gdb_hw=True)
+        if bp_type in _WATCH_FUNC:
+            return self._clear_watchpoint(bp_type, addr, kind)
         return ""
+
+    def _set_watchpoint(self, bp_type, addr, kind):
+        # Arm a DWT data watchpoint. The DFSR.DWTTRAP -> SIGTRAP decode already
+        # reports a fired watchpoint; gdb re-reads memory on the stop and matches
+        # the changed value against its watchpoint table, so no extra stop-reply
+        # field is required.
+        func = _WATCH_FUNC[bp_type]
+        length = kind if kind in _WATCH_LENGTHS else 4
+        try:
+            self.link.watch_set(addr, length, func)
+        except PodError:
+            return "E01"
+        self._watchpoints[(addr, length, func)] = bp_type
+        return "OK"
+
+    def _clear_watchpoint(self, bp_type, addr, kind):
+        # Best-effort disarm, matching _clear_breakpoint returning OK even for an
+        # unknown address.
+        func = _WATCH_FUNC[bp_type]
+        length = kind if kind in _WATCH_LENGTHS else 4
+        try:
+            self.link.watch_clear(addr, length, func)
+        except PodError:
+            return "E01"
+        self._watchpoints.pop((addr, length, func), None)
+        return "OK"
 
     # ── serve loop ──────────────────────────────────────────────────────────
 

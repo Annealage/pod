@@ -61,6 +61,8 @@ OP_WRITE_MEM = 0x31
 OP_BP_SET = 0x40
 OP_BP_CLEAR = 0x41
 OP_BP_CLEAR_ALL = 0x42
+OP_WATCH_SET = 0x43
+OP_WATCH_CLEAR = 0x44
 
 REGSEL_MAX = 18                 # 0..15 + xPSR(16) + MSP(17) + PSP(18)
 POLL_SLEEP_MS = 1               # brief on-pod spin between selects in RESUME_WAIT
@@ -200,7 +202,7 @@ class _NotHalted(Exception):
     pass
 
 
-def _dispatch(cl, opcode, args, dp, ap, cm, fpb):
+def _dispatch(cl, opcode, args, dp, ap, cm, fpb, dwt):
     # Flat opcode dispatch onto the primitives. struct.unpack_from raises on a
     # short args frame; that and out-of-range regsel become STATUS_BADARGS via
     # the serve loop's (ValueError, IndexError) handler.
@@ -341,8 +343,18 @@ def _dispatch(cl, opcode, args, dp, ap, cm, fpb):
         fpb.clear_all()
         _reply(cl, STATUS_OK)
 
+    elif opcode == OP_WATCH_SET:
+        addr, length, func = struct.unpack_from("<IBB", args, 0)
+        slot = dwt.set_watchpoint(addr, length, func)   # TransferError -> STATUS_XFER
+        _reply(cl, STATUS_OK, struct.pack("<B", slot & 0xFF))
+
+    elif opcode == OP_WATCH_CLEAR:
+        addr, length, func = struct.unpack_from("<IBB", args, 0)
+        dwt.clear_watchpoint(addr, length, func)
+        _reply(cl, STATUS_OK)
+
     else:
-        # Unknown / reserved (incl. 0x43 WP_SET, 0x44 WP_CLEAR).
+        # Unknown / reserved opcode.
         _reply(cl, STATUS_BADOP)
 
 
@@ -351,12 +363,12 @@ class _Disconnect(Exception):
     pass
 
 
-def serve(dp, ap, cm, fpb, port=3335):
+def serve(dp, ap, cm, fpb, dwt, port=3335):
     # Own the socket lifecycle: bind, accept one client, frame loop, close on all
-    # paths. The dp/ap/cm/fpb session is created once by ops.gdb_serve and passed
-    # in (the PIO SM is not recreated, avoiding PIO instruction-memory leaks under
-    # the persistent REPL). The core is left in whatever state the last command
-    # set; this server never auto-resumes.
+    # paths. The dp/ap/cm/fpb/dwt session is created once by ops.gdb_serve and
+    # passed in (the PIO SM is not recreated, avoiding PIO instruction-memory
+    # leaks under the persistent REPL). The core is left in whatever state the
+    # last command set; this server never auto-resumes.
     # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
     srv = socket.socket(socket.AF_INET6)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -386,7 +398,7 @@ def serve(dp, ap, cm, fpb, port=3335):
             if arg_len and args is None:
                 break
             try:
-                _dispatch(cl, opcode, args, dp, ap, cm, fpb)
+                _dispatch(cl, opcode, args, dp, ap, cm, fpb, dwt)
             except _Disconnect:
                 break
             except _NotHalted:
