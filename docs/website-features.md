@@ -75,7 +75,7 @@ debug-and-test workflow is validated on hardware today; two areas are still land
 | Networking + discovery (mDNS, IPv6-first) | `[validated]` | Browsable `_annealage-pod._tcp`, dual-stack |
 | Management REPL over Wi-Fi | `[validated]` | Socket REPL, persistent auto-reconnect session |
 | USB/IP DUT export - enumerate + attach | `[validated]` | Host sees + binds the DUT |
-| USB/IP DUT export - forwarded DUT REPL | `[landing]` | Full CDC session demonstrated (2026-06-18); currently unreliable |
+| USB/IP DUT export - forwarded DUT REPL | `[validated]` | CDC REPL over the forward; heavy attach/detach churn can wedge Wi-Fi |
 | DUT UART-over-TCP bridge | `[planned]` | Advertised in mDNS, not yet bound on RP2350 |
 | INA228 power telemetry, opto-relays, power switching | `[carrier]` | Needs the upcoming carrier board |
 
@@ -129,14 +129,14 @@ The pod can present hardware peripherals to a DUT-as-controller: a hardware I2C 
 GPIO drive/read and ADC sampling. Validated against an nRF52840 controller. This is a
 thin pass-through over MicroPython's `machine` module, not a gated API.
 
-### USB/IP DUT export `[validated]` enumerate + attach / `[landing]` forwarded REPL
+### USB/IP DUT export `[validated]`
 The pod's native USB port hosts the DUT, and an in-tree C USB/IP server (port 3240)
 exports it over Wi-Fi so a host can `usbip attach` and bind the DUT with a normal class
-driver. Device enumeration and attach are validated. A full forwarded CDC REPL session
-(`usbip attach` then `mpremote connect` over the attached tty) has been demonstrated on
-hardware (2026-06-18, a real nRF52840 REPL round-trip), but it is not yet reliable: it
-succeeds intermittently and often fails (attach errors, no CDC tty, or a forwarder/Wi-Fi
-wedge). Treat the forwarded DUT REPL as landing, not shipping.
+driver. Device enumeration, attach, and a full forwarded CDC REPL session (`usbip
+attach` then `mpremote connect` over the attached tty) are validated on an nRF52840,
+across repeated attach / round-trip / detach cycles. One caveat: sustained rapid
+USB-host attach/detach churn can wedge the pod's CYW43 Wi-Fi (a separate, known
+coexistence issue) and needs a reset; normal attach, use, and detach is reliable.
 
 ### Networking and discovery `[validated]`
 The pod advertises a browsable mDNS service `_annealage-pod._tcp` (`annealage-pod.local`)
