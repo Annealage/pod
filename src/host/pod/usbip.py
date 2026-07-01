@@ -86,7 +86,11 @@ def detach(port, runner=None):
 
 
 _PORT_RE = re.compile(r"^\s*Port (\d+):")
-_REMOTE_RE = re.compile(r"usbip://([^:/]+):\d+/(\S+)")
+# usbip://<remote>:<tcp>/<busid>. The remote is greedy up to the final ":<tcp>/"
+# so an unbracketed IPv6 literal (usbip://fd32:7709::8946:3240/1-1, printed by
+# `usbip port` with its own inner colons) is captured whole rather than clipped
+# at its first colon. Brackets, if present, are stripped by the alternation.
+_REMOTE_RE = re.compile(r"usbip://(?:\[([^\]]+)\]|(.+)):\d+/(\S+)")
 
 
 def parse_usbip_port(text):
@@ -94,6 +98,7 @@ def parse_usbip_port(text):
 
     `remote` is the host/IP the vhci port is attached to, `busid` the exported
     bus id, both from the `usbip://<remote>:<port>/<busid>` line under each Port.
+    An IPv6-literal remote is returned unbracketed (e.g. fd32:7709::8946).
     """
     out = []
     cur = None
@@ -106,8 +111,8 @@ def parse_usbip_port(text):
         if cur is not None:
             r = _REMOTE_RE.search(line)
             if r:
-                cur["remote"] = r.group(1)
-                cur["busid"] = r.group(2)
+                cur["remote"] = r.group(1) or r.group(2)
+                cur["busid"] = r.group(3)
     return out
 
 
@@ -116,9 +121,13 @@ def ports(runner=None):
 
     Returns [] on any failure (usbip absent, non-zero, no module) so callers can
     treat "no attachments" and "can't tell" the same way.
+
+    Runs under sudo: `usbip port` reads the vhci records from sysfs, and without
+    root it only prints the port headers (the remote/busid detail lines are
+    omitted), which would leave every attachment unmatchable for detach.
     """
     try:
-        out = _run(["usbip", "port"], runner=runner)
+        out = _run(["usbip", "port"], sudo=True, runner=runner)
     except Exception:  # noqa: BLE001 - usbip missing / spawn error
         return []
     if out.returncode != 0:

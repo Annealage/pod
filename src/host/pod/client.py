@@ -879,13 +879,22 @@ class Pod:
         """Host vhci ports currently attached to THIS pod (matched by address).
 
         Matches `usbip port`'s remote against this pod's static handles
-        (hostname/addr4/addr6), normalising away any %zone and trailing dot, so a
-        v4, ULA, or link-local attachment all match. Uses no network.
+        (hostname/addr4/addr6). Normalises an IP literal to its canonical
+        compressed form (stripping surrounding brackets, any %zone, and casing)
+        via ipaddress, so a v4, ULA, global, or link-local attachment matches
+        regardless of how each side spelled the address; a hostname falls back to
+        a lowercased, trailing-dot-stripped compare. Uses no network.
         """
         from pod import usbip as _u
 
         def _norm(a):
-            return (a or "").split("%")[0].rstrip(".")
+            a = (a or "").split("%")[0].strip().rstrip(".")
+            if a.startswith("[") and a.endswith("]"):
+                a = a[1:-1]
+            try:
+                return ipaddress.ip_address(a).compressed
+            except ValueError:
+                return a.lower()
         r = self._resolver
         mine = {_norm(a) for a in [r.hostname, r.addr4] + list(r.addr6)
                 if a}
