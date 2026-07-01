@@ -254,14 +254,15 @@ paths are validated against hardware, not in the unit tests.
 
 When the DUT's native USB is wired to the **pod's** USB host port, the pod exports
 it over USB/IP (TCP 3240) and the host attaches it as a local device. Device
-enumeration and attach are validated; bulk-transfer forwarding is not working yet
-on RP2350 (only control and interrupt endpoints forward), so connecting to the
-DUT's own REPL over the forwarded USB is not functional end-to-end yet:
+enumeration and attach are validated. A full forwarded DUT REPL over that link has
+been demonstrated on hardware (2026-06-18) but is not yet reliable: it succeeds
+intermittently and often fails (attach errors, no CDC tty, or a forwarder/Wi-Fi
+wedge). Treat the forwarded REPL as landing:
 
 ```bash
 pod usb lab1                 # list exported devices (live VID:PID + busid)
 pod attach lab1              # bring the pod USB host + usbip server up, attach, print the DUT tty
-mpremote connect <tty>       # the printed /dev/serial/by-id path; the DUT REPL (needs working bulk forwarding)
+mpremote connect <tty>       # the printed /dev/serial/by-id path -> the DUT REPL (when forwarding succeeds)
 pod detach lab1 --port N     # release (N from `usbip port`)
 ```
 
@@ -341,10 +342,10 @@ on PIO2, the CYW43 Wi-Fi block, now fixed). For DUT wiring and usage, see
 USB/IP DUT access (`pod usb` / `pod attach` / `pod detach`, MCP `dut_usb` /
 `attach_dut`) is driven by the standard `usbip` client against the pod's existing
 server (see "USB/IP DUT access" above). Device enumeration and attach are
-validated; bulk-transfer forwarding is not working yet on RP2350 (only control
-and interrupt endpoints forward), so connecting to the DUT's own REPL over the
-forwarded USB is not functional end-to-end yet. The attach path is exercised when
-the DUT's USB is on the pod host port; on a bench where the DUT enumerates
-straight to the host it is `agent-direct` and not used.
+validated; a full forwarded DUT REPL over the link was demonstrated on hardware
+(2026-06-18) but is not yet reliable (intermittent - attach errors, no CDC tty, or
+a forwarder/Wi-Fi wedge). The attach path is exercised when the DUT's USB is on the
+pod host port; on a bench where the DUT enumerates straight to the host it is
+`agent-direct` and not used.
 `uart_stream` / `telemetry` (Phase 5) remain stubbed and raise with the pending
 phase.

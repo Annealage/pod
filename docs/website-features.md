@@ -75,13 +75,13 @@ debug-and-test workflow is validated on hardware today; two areas are still land
 | Networking + discovery (mDNS, IPv6-first) | `[validated]` | Browsable `_annealage-pod._tcp`, dual-stack |
 | Management REPL over Wi-Fi | `[validated]` | Socket REPL, persistent auto-reconnect session |
 | USB/IP DUT export - enumerate + attach | `[validated]` | Host sees + binds the DUT |
-| USB/IP DUT export - bulk data transfer | `[landing]` | Control + interrupt EPs forward; bulk does not yet |
+| USB/IP DUT export - forwarded DUT REPL | `[landing]` | Full CDC session demonstrated (2026-06-18); currently unreliable |
 | DUT UART-over-TCP bridge | `[planned]` | Advertised in mDNS, not yet bound on RP2350 |
 | INA228 power telemetry, opto-relays, power switching | `[carrier]` | Needs the upcoming carrier board |
 
 How to frame this on the page: lead with the validated core (debug, flash, GDB, logic
 analyser, peripherals, networking). Present USB/IP as "enumerate and attach a DUT's USB
-to your host; bulk forwarding is landing." Do not list UART-over-TCP, opto-relays, or
+to your host; a full forwarded DUT REPL session is demonstrated but not yet reliable." Do not list UART-over-TCP, opto-relays, or
 INA228 telemetry as present features on the bare-Pico product; UART is planned and the
 power/relay features belong to the carrier tease below.
 
@@ -128,14 +128,14 @@ The pod can present hardware peripherals to a DUT-as-controller: a hardware I2C 
 GPIO drive/read and ADC sampling. Validated against an nRF52840 controller. This is a
 thin pass-through over MicroPython's `machine` module, not a gated API.
 
-### USB/IP DUT export `[validated]` enumerate + attach / `[landing]` bulk
+### USB/IP DUT export `[validated]` enumerate + attach / `[landing]` forwarded REPL
 The pod's native USB port hosts the DUT, and an in-tree C USB/IP server (port 3240)
 exports it over Wi-Fi so a host can `usbip attach` and bind the DUT with a normal class
-driver. Device enumeration and attach are validated (a real CDC composite device
-enumerates and attaches over Wi-Fi). Bulk-transfer forwarding is the open piece: the
-RP2350 host serialises control and bulk through one hardware endpoint and the
-control-to-bulk transition currently trips a host-controller error, so bulk data does
-not yet move. Control and interrupt endpoints forward.
+driver. Device enumeration and attach are validated. A full forwarded CDC REPL session
+(`usbip attach` then `mpremote connect` over the attached tty) has been demonstrated on
+hardware (2026-06-18, a real nRF52840 REPL round-trip), but it is not yet reliable: it
+succeeds intermittently and often fails (attach errors, no CDC tty, or a forwarder/Wi-Fi
+wedge). Treat the forwarded DUT REPL as landing, not shipping.
 
 ### Networking and discovery `[validated]`
 The pod advertises a browsable mDNS service `_annealage-pod._tcp` (`annealage-pod.local`)

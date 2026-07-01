@@ -609,9 +609,9 @@ def build_server():
                     "Run MicroPython on the DUT (turnkey): ensure the pod USB/IP "
                     "link, attach the DUT, and exec the code over its own CDC "
                     "REPL. Returns {tty, returncode, stdout, stderr}. For pod-side "
-                    "code use pod_exec instead. Depends on USB/IP bulk-transfer "
-                    "forwarding, which is not working yet on RP2350, so this may "
-                    "not function end-to-end there."),
+                    "code use pod_exec instead. Relies on the USB/IP-forwarded DUT "
+                    "REPL, which is not yet reliable on RP2350 (intermittent), so "
+                    "this may fail to produce a tty."),
                 inputSchema={
                     "type": "object",
                     "properties": {
