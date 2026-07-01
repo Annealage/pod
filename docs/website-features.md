@@ -93,7 +93,8 @@ power/relay features belong to the carrier tease below.
 The pod speaks SWD over a PIO state machine (pod GP14 = SWDIO, GP15 = SWCLK) at
 9.375 MHz, with an ADIv5 DebugPort / MEM-AP stack and a Cortex-M control layer (halt,
 resume, reset-and-halt, single-step, core-register and memory access, fault-cause
-readout) and FPB hardware breakpoints. Validated against an nRF52840 (DPIDR
+readout), FPB hardware breakpoints, and DWT data watchpoints (write/read/access,
+reachable over GDB). Validated against an nRF52840 (DPIDR
 `0x2BA01477`, CPUID read, 100/100 clean transfers).
 
 ### Flashing a DUT over Wi-Fi `[validated]`

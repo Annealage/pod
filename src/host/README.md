@@ -47,6 +47,7 @@ pod cp <label> <src> <dst>            copy a file (':path' = pod side)
 pod flash <label> <image> [--addr 0xADDR] [--target T]
 pod reset <label> [--mode sysreset|halt]
 pod gdb <label> [--listen-port N] [--gdb-port 3335] [--no-reset-halt] [--resume-window-ms 200]
+                                      (GDB path supports DWT data watchpoints: Z2/Z3/Z4 = write/read/access, plus FPB breakpoints)
 pod halt <label>                      halt the DUT core over SWD (hold; no auto-resume)
 pod resume <label>                    resume the DUT core over SWD
 pod read-reg <label> <reg>            read a core register over SWD (core halted; reg 0..18 or pc/sp/lr/..)
@@ -175,7 +176,7 @@ an agent drives the hardware loop with the same verbs:
 | `flash_dut` | flash a DUT image (streamed into pod RAM, no pod FS) |
 | `reset_dut` | reset the DUT (`sysreset` / `halt`) |
 | `read_dut` | read DUT memory to a host file (streamed) |
-| `gdb_dut` | start a local GDB RSP server to the DUT and return its endpoint |
+| `gdb_dut` | start a local GDB RSP server to the DUT and return its endpoint (supports DWT data watchpoints via gdb Z2/Z3/Z4 = write/read/access, plus FPB hardware breakpoints) |
 | `dut_halt` / `dut_resume` | halt/resume the DUT core over SWD (no auto-resume; halt freezes the DUT) |
 | `dut_read_reg` / `dut_write_reg` | read/write a core register over SWD (core must be halted) |
 | `dut_read_mem` / `dut_write_mem` | read/write DUT memory over SWD, inline hex (live MEM-AP; flash refused) |

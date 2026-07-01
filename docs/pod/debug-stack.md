@@ -65,14 +65,19 @@ reuses it across calls (so repeated host commands do not re-create PIO state
 machines). All functions take an optional `clkdiv` (default 8).
 
 - `info() -> {dpidr, cpuid, part, flash_kb, ram_kb}` - identify the target.
-- `flash_stream(addr, total_len, port=3333, chunk=4096, verify=True) -> {ok, addr, bytes, err}`
+- `flash_stream(addr, total_len, port=3333, chunk=4096, verify=True, loader="native") -> {ok, addr, bytes, err}`
   Open a short-lived TCP receiver on `port`; the host connects and streams the
   image straight into a pod RAM buffer that is erased-once then programmed +
   verified chunk by chunk. Nothing is written to the pod filesystem. This is
   what `Pod.flash_dut` drives.
-- `flash_file(addr, path, verify=True, chunk_words=256) -> {ok, addr, bytes, ms}`
+- `flash_file(addr, path, verify=True, chunk_words=256, loader="native") -> {ok, addr, bytes, ms}`
   Program from a pod-resident file in bounded chunks. Use when the image is
   already on the pod; otherwise prefer `flash_stream` (no filesystem).
+
+Both take a `loader` selecting the flash backend: `loader="native"` (default) is
+the per-family native path (the validated nRF52 NVMC loader, `flash_nrf52`);
+`loader="flm"` runs the generic CMSIS-FLM algorithm in target SRAM (`flm`, see
+"Generic CMSIS-FLM flashing" below). Both are validated on the nRF52840.
 - `dump_stream(addr, length, port=3334) -> {ok, addr, bytes, err}`
   Open a short-lived TCP sender on `port`; reads the target in bounded blocks
   and streams them to the host. The only path that returns target contents.
@@ -205,6 +210,13 @@ Hardware breakpoints use the Cortex-M FPB (`CortexM.set_breakpoint` /
 `clear_breakpoint` in `swd_dap.py`). Ctrl-C interrupt is carried as a framed
 flag on the `RESUME_WAIT` re-arm (no out-of-band byte), so a continue is
 interruptible within one wait-window without corrupting the wire framing.
+
+Data watchpoints use the Cortex-M DWT. gdb's watchpoint packets map to DWT
+comparator FUNCTION codes: `Z2` (write watchpoint) -> FUNCTION 6, `Z3` (read
+watchpoint) -> FUNCTION 5, `Z4` (access watchpoint) -> FUNCTION 7. The RSP
+translator issues `dbgsrv` `OP_WATCH_SET` / `OP_WATCH_CLEAR`, which drive
+`swd_dap.DWT` to program / free a comparator. Comparators are cleared on session
+teardown alongside the FPB. Validated on the nRF52840.
 
 Usage:
 
