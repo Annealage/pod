@@ -141,5 +141,5 @@ Uncommitted / in-flight (intentionally not committed):
   in section 3 step 1.
 - `Makefile` + `tools/uf2_to_bin.py` - the build formalization (commit when ready;
   fold in the section-2 flash-safety hardening first).
-- `docs/rp2350/plan/phase-4-usb-host-usbip.md` - a pre-existing forwarder re-cut,
+- `docs/pod/plan/phase-4-usb-host-usbip.md` - a pre-existing forwarder re-cut,
   unrelated to this session; commit with the forwarder work.

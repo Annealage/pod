@@ -3,13 +3,13 @@
 # Samples `width` contiguous GPIOs once per PIO clock and DMA-streams packed
 # 32-bit words into a RAM ring; an optional trigger gates the start. The capture
 # program and sampling were validated on the rig (a 1 kHz PWM recovered exactly
-# at 100 kHz polled and 1 MHz DMA); see docs/rp2350/logic-analyser.md.
+# at 100 kHz polled and 1 MHz DMA); see docs/pod/logic-analyser.md.
 #
 # PIO budget: the LA runs on PIO0 (SM0 by default). On the RP2350 Pico 2 W,
 # CYW43 Wi-Fi runs on PIO2 and SWD on PIO1, so PIO0 is the free block. Building
 # a state machine on PIO2 while Wi-Fi is live hard-wedges the chip (it corrupts
 # the running CYW43 SM), which is why the LA must NOT use PIO2. Authoritative
-# block map: annealage_pod.debug.pio_arbiter.PIO_MAP (see docs/rp2350/logic-analyser.md).
+# block map: annealage_pod.debug.pio_arbiter.PIO_MAP (see docs/pod/logic-analyser.md).
 #
 # DMA register facts, validated on this silicon (RP2350):
 #   PIO block base = 0x50200000 + block*0x100000   (PIO0/1/2)

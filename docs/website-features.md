@@ -16,7 +16,7 @@ Conventions used here:
   validation in progress; `[carrier]` = needs the upcoming purpose-built carrier board,
   not available on a bare Pico; `[planned]` = not yet built.
 - Capability altitude only. Exact API signatures live in the repo docs under
-  `docs/rp2350/` and `src/host/README.md`; this file names tools/commands/ports but is
+  `docs/pod/` and `src/host/README.md`; this file names tools/commands/ports but is
   not an API dump.
 
 ---
@@ -266,7 +266,7 @@ shared between the suggested SPI0 and the LA default block; use one at a time, o
 LA to GP2-GP9.
 
 The deep, hobbyist-followable wiring reference (with electrical rules, the full pin-budget
-table, and collision warnings) lives at `docs/rp2350/hardware-setup.md`.
+table, and collision warnings) lives at `docs/pod/hardware-setup.md`.
 
 ---
 

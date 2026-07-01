@@ -6,8 +6,8 @@ that is validated on hardware before the next phase commits, and the plan is
 re-cut as spikes land. It supersedes the prior ESP32-S3 design captured in
 `docs/esp32-s3/spec.md` and `docs/esp32-s3/architecture.md`.
 
-Read first: `docs/rp2350/spike-findings.md` (what is already proven on hardware)
-and `docs/rp2350/dev-notes.md` (gotchas and recipes).
+Read first: `docs/pod/spike-findings.md` (what is already proven on hardware)
+and `docs/pod/dev-notes.md` (gotchas and recipes).
 
 ## 1. Goal and shape
 
@@ -178,7 +178,7 @@ Deferred:
 
 ## 9. Pointers
 
-- `docs/rp2350/spike-findings.md`, `docs/rp2350/dev-notes.md`
+- `docs/pod/spike-findings.md`, `docs/pod/dev-notes.md`
 - ESP32-S3 baseline: `docs/esp32-s3/spec.md`, `docs/esp32-s3/architecture.md`, `docs/esp32-s3/design/`
 - On-device probe reference: `github.com/essele/pico_debug`
 - Spike code: `prototypes/rp2350-swd-spike/`

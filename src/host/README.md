@@ -8,7 +8,7 @@ a DUT through the pod's on-pod debug stack. It is the network-native sibling of
 Transport is `ampremote` (the `socket://` mpremote fork) for the REPL, plus
 direct TCP sockets for the binary flash/read streams (ports 3333 / 3334) and
 the GDB debug-command server (port 3335). The on-pod side is
-`annealage_pod.debug` (see `../../docs/rp2350/debug-stack.md`).
+`annealage_pod.debug` (see `../../docs/pod/debug-stack.md`).
 
 ## Install
 
@@ -30,7 +30,7 @@ Requirements:
   `avahi-browse`.
 - `mcp` (optional) for the MCP server.
 - The pod must have `annealage_pod.debug` resident at `/lib` for the DUT
-  flash/reset/read verbs (deploy steps in `../../docs/rp2350/debug-stack.md`).
+  flash/reset/read verbs (deploy steps in `../../docs/pod/debug-stack.md`).
 
 You can also run without installing: `cd src/host && python -m pod.cli ...`.
 
@@ -101,7 +101,7 @@ is thin passthrough plus a few curated helpers, not a heavy abstraction:
   so `pod i2c-target` brings it up and it stays up until `pod release`.
 
 These map to `annealage_pod.peripherals` on the pod (see
-`../../docs/rp2350/peripherals.md`).
+`../../docs/pod/peripherals.md`).
 
 ```bash
 # Pod becomes an I2C device at 0x42 backing a register file [0xAB, 0xCD, ...].
@@ -238,7 +238,7 @@ which is a one-shot passthrough and cannot chain setup.
 (including USB), so a DUT whose USB/serial hung (e.g. after a `soft_reset`)
 re-enumerates cleanly with no physical replug or power-cycle. Use `--mode halt`
 to catch the reset vector. Only resort to a physical power-cycle if the reset
-itself errors (SWD not connected). See `../../docs/rp2350/debug-stack.md`.
+itself errors (SWD not connected). See `../../docs/pod/debug-stack.md`.
 
 ## Tests
 
@@ -338,7 +338,7 @@ The PIO logic analyser (`logic_analyse` / `pod la`, Track 2) is implemented and
 hardware-validated end-to-end, including the live Wi-Fi capture round-trip
 (capture -> stream -> VCD, reliable on PIO0; the earlier hang was the LA running
 on PIO2, the CYW43 Wi-Fi block, now fixed). For DUT wiring and usage, see
-"Using the logic analyser" in `../../docs/rp2350/logic-analyser.md`.
+"Using the logic analyser" in `../../docs/pod/logic-analyser.md`.
 USB/IP DUT access (`pod usb` / `pod attach` / `pod detach`, MCP `dut_usb` /
 `attach_dut`) is driven by the standard `usbip` client against the pod's existing
 server (see "USB/IP DUT access" above). Device enumeration and attach are

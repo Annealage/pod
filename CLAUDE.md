@@ -18,31 +18,31 @@ and naming conventions.
 
 ## RP2350 docs (read these before working on the RP2350 target)
 
-- `docs/rp2350/hardware-setup.md`: the single DUT-to-pod wiring reference (SWD,
+- `docs/pod/hardware-setup.md`: the single DUT-to-pod wiring reference (SWD,
   USB host, UART, I2C, SPI, GPIO/ADC, logic-analyser taps, power/ground), written
   to be followable by a hobbyist. Marks each interface VERIFIED vs SUGGESTED
   (untested), and lists the open hardware decisions (DUT UART/SPI/nRST pins,
   USB-host cabling/power) still needed. The other RP2350 docs link here for "what
   wires where".
-- `docs/rp2350/dev-notes.md`: development gotchas and recipes that cost real
+- `docs/pod/dev-notes.md`: development gotchas and recipes that cost real
   debugging time. Notably: `mpremote resume` caches imported modules (re-copy AND
   `sys.modules.pop` after edits); `probe-rs download --binary-format uf2`
   mis-flashes the multi-section RP2350 UF2 (flatten to a program bin and flash as
   `--binary-format bin --base-address 0x10000000`); the SWD bit-bang turnaround
   framing.
-- `docs/rp2350/spike-findings.md`: hardware-validated bring-up results (on-pod SWD
+- `docs/pod/spike-findings.md`: hardware-validated bring-up results (on-pod SWD
   DP/AP/MEM-AP, Wi-Fi dupterm TCP REPL + `ampremote` socket transport + mount) and
   the settled architecture points (native USB host, on-pod probe, mDNS service
   discovery).
-- `docs/rp2350/debug-stack.md`: usage of the on-pod debug stack
+- `docs/pod/debug-stack.md`: usage of the on-pod debug stack
   (`annealage_pod.debug`) - the layered SWD / DAP / nRF52-flash modules, the
   high-level `ops` entry points, hardware wiring, deployment, and the
   no-filesystem streaming flash/read.
-- `docs/rp2350/peripherals.md`: the pod's DUT-facing peripherals
+- `docs/pod/peripherals.md`: the pod's DUT-facing peripherals
   (`annealage_pod.peripherals`) - the thin machine-passthrough philosophy and
   the curated helpers (hardware I2C target / GPIO / ADC), distinct from the SWD
   debug stack.
-- `docs/rp2350/logic-analyser.md`: the PIO logic analyser
+- `docs/pod/logic-analyser.md`: the PIO logic analyser
   (`annealage_pod.debug.logic_analyser`) + the PIO arbiter. Validated end-to-end
   including the live Wi-Fi capture round-trip (LA on PIO0; the earlier hang was
   the LA colliding with CYW43 Wi-Fi on PIO2). Includes DUT wiring + usage and the
@@ -50,7 +50,7 @@ and naming conventions.
 - `src/host/README.md`: usage of the host `pod` tooling - the CLI, the `Pod`
   Python client, the MCP server, and the discover/register/flash/reset/read
   workflow over Wi-Fi.
-- `docs/rp2350/plan/`: the phased development plan. Start at `overview.md` (goals,
+- `docs/pod/plan/`: the phased development plan. Start at `overview.md` (goals,
   architecture deltas, workstreams, phase map + gates, host `pod` CLI/MCP design,
   risk register), then `phase-1-foundation.md` .. `phase-7-integration-hardening.md`.
   Dynamic plan: each phase ends at a hardware-validated gate, then the remainder is
@@ -63,6 +63,6 @@ and naming conventions.
   `VID:PID:Serial`, never by `/dev/ttyACMx` (multiple boards and CMSIS-DAP probes
   are attached at once). Use `mpy-dev list` for the registry.
 - Drive MicroPython devices with `mpremote connect <by-id> resume ...`; see the
-  `resume` caching caveat in `docs/rp2350/dev-notes.md`.
+  `resume` caching caveat in `docs/pod/dev-notes.md`.
 - `prototypes/` is throwaway spike code, not built into firmware. Firmware images
   (`*.uf2`, `*.bin`) are gitignored.

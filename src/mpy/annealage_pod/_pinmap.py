@@ -10,7 +10,7 @@
 # PLATFORM SCOPE: these numbers are the ESP32-S3 carrier map. They are only
 # valid on the ESP32-S3 pod (GP0-GP48). The RP2350 Pico 2 W pod has a different,
 # much smaller pin budget (GP0-GP22, GP26-GP28) and a different cluster: SWD is
-# GP14/GP15 and the local I2C is GP10/GP11 (docs/rp2350/hardware-setup.md). The
+# GP14/GP15 and the local I2C is GP10/GP11 (docs/pod/hardware-setup.md). The
 # `power`/`relays`/`dut`/`carrier`/`compat` cluster that imports this map is
 # unported ESP32-S3 carrier code (hardware-setup.md §8). The live RP2350 boot
 # path (board main.py -> netboot.start()) and the on-pod debug/peripherals
@@ -117,5 +117,5 @@ def assert_esp32_carrier(what):
             "annealage_pod._pinmap: {} uses the ESP32-S3 carrier GPIO map, which "
             "is not ported to the RP2350 (GP0-GP22, GP26-GP28). The "
             "power/relays/carrier/compat cluster is ESP32-S3-only; see "
-            "docs/rp2350/hardware-setup.md section 8.".format(what)
+            "docs/pod/hardware-setup.md section 8.".format(what)
         )

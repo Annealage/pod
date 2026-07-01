@@ -4,7 +4,7 @@
 probe-rs's UF2 loader mishandles the multi-section RP2350 UF2: it flashes only
 the first (metadata) section and skips the real program, so the board does not
 boot even though it re-enumerates. Flatten the UF2 to a single program-region
-bin and flash it as raw bin at 0x10000000 instead. See docs/rp2350/dev-notes.md.
+bin and flash it as raw bin at 0x10000000 instead. See docs/pod/dev-notes.md.
 """
 
 import struct

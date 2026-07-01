@@ -2,8 +2,8 @@
 
 MicroPython board variant for the RP2350 (Pico 2 W) pod. Raspberry Pi Pico 2 W
 base: CYW43 Wi-Fi + Bluetooth, with the native USB controller usable as a host
-for the DUT (`machine.USBHost`, host-on-demand). See `docs/rp2350/` for the
-pivot plan and findings, and `docs/rp2350/dev-notes.md` for build/flash gotchas.
+for the DUT (`machine.USBHost`, host-on-demand). See `docs/pod/` for the
+pivot plan and findings, and `docs/pod/dev-notes.md` for build/flash gotchas.
 
 This board is for a bare Pico 2 W plus jumper wires to a DUT. Carrier-hardware
 capabilities (INA228 power telemetry, power-rail switching, level translation)
@@ -25,7 +25,7 @@ drops the USB-CDC REPL, and both the Wi-Fi REPL and the UART REPL keep working
 through it (`active(False)` does not re-enumerate the CDC; a `machine.reset()`
 restores device mode). Host *enumeration* of a DUT on the port is still pending
 (no DUT has been on the USB port yet); that is a Phase 4 deliverable, see
-`docs/rp2350/plan/phase-4-usb-host-usbip.md`.
+`docs/pod/plan/phase-4-usb-host-usbip.md`.
 
 The frozen boot module (`netboot.py`, started by the frozen `main.py`) brings up
 Wi-Fi and exposes the REPL on a TCP socket via `os.dupterm`, so the pod is
@@ -55,7 +55,7 @@ Toolchain: `arm-none-eabi-gcc`, `cmake`, `ninja`/`make`. From the MicroPython
 submodule's `ports/rp2`, with this repo's board directory passed as `BOARD_DIR`.
 
 Initialise submodules (the SDK's picotool check needs the fetch flag; see
-`docs/rp2350/dev-notes.md` for why):
+`docs/pod/dev-notes.md` for why):
 
 ```
 BOARD_DIR=<repo>/src/boards/ANNEALAGE_POD_RP2350
@@ -120,7 +120,7 @@ ampremote connect socket://<pod-ip>:8266 mount <local-dir> exec "..."
 ```
 
 mDNS service discovery (so the IP need not be known) is a planned addition; see
-`docs/rp2350/plan/phase-1-foundation.md`.
+`docs/pod/plan/phase-1-foundation.md`.
 
 ## Reach the pod over UART (backup REPL)
 
@@ -151,7 +151,7 @@ Verified end-to-end (2026-06-08): a full REPL into the pod over this path, and i
 survives `machine.USBHost().active(True)` (USB-CDC drops, UART REPL stays up).
 GP0/GP1 are reserved for this REPL - not available as DUT/LA pins. The probe's
 bridge pins are GP4/GP5 on stock debugprobe firmware; verify yours. See
-`docs/rp2350/dev-notes.md` § 9.
+`docs/pod/dev-notes.md` § 9.
 
 ## How to develop the pod firmware: the connections at a glance
 
@@ -168,7 +168,7 @@ serial path so the pod stays reachable when the native USB is taken for the DUT.
 ## Known local patches
 
 Getting this board to build currently requires changes in the `src/micropython`
-submodule that are not yet on its branch (see `docs/rp2350/dev-notes.md` and the
+submodule that are not yet on its branch (see `docs/pod/dev-notes.md` and the
 project notes): a `shared/tinyusb/mp_usbh.h` forward-declaration fix, a
 `-Werror` workaround in `lib/tinyusb` CDC host, and a pico-sdk pin aligned to
 current master. These are tracked for upstreaming into the `machine-usbhost`

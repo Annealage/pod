@@ -5,7 +5,7 @@
 # harness metadata declared per pod in the registry DUT block (dut.wiring), not
 # here: software cannot know it.
 #
-# Values per docs/rp2350/hardware-setup.md. PIO map (pio_arbiter.PIO_MAP):
+# Values per docs/pod/hardware-setup.md. PIO map (pio_arbiter.PIO_MAP):
 # PIO2 is CYW43 Wi-Fi (off-limits), PIO1 is SWD, PIO0 is free (logic analyser).
 # This is RP2350-only; the ESP32-S3 carrier map lives in _pinmap.py.
 

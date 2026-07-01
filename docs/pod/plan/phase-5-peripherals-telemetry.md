@@ -116,7 +116,7 @@ so the advertise can be gated on the bind succeeding (see "mDNS gating").
 The bridge defaults to `machine.UART(1)` on GP4 (TX) / GP5 (RX), reconciled
 against the code and the hardware doc as follows:
 
-- `docs/rp2350/hardware-setup.md` marks GP4 DUT-UART-TX / GP5 DUT-UART-RX as
+- `docs/pod/hardware-setup.md` marks GP4 DUT-UART-TX / GP5 DUT-UART-RX as
   UART1, SUGGESTED (untested) - the pinout diagram rows and the UART-bridge
   wiring row.
 - These are the RP2 port's default UART1 pins, so `machine.UART(1)` binds them

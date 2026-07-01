@@ -8,7 +8,7 @@ retired (PIO SWD at speed, multi-engine PIO/core coexistence).
 
 ## Dependencies
 
-- Phase 0 spike results (`docs/rp2350/spike-findings.md`).
+- Phase 0 spike results (`docs/pod/spike-findings.md`).
 - `src/micropython` submodule, branch `machine-usbhost` (currently uninitialised;
   init and confirm it carries rp2 native USB host).
 
@@ -77,5 +77,5 @@ auto-reconnect.
 
 - `github.com/essele/pico_debug` (`swd.pio`, `swd.c`)
 - `docs/esp32-s3/design/swd-swo-engine.md` (SWD frame protocol, reusable at the protocol
-  level), `docs/rp2350/dev-notes.md` §3
+  level), `docs/pod/dev-notes.md` §3
 - `prototypes/rp2350-swd-spike/swd_bitbang.py`
