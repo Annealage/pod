@@ -111,11 +111,11 @@ and gets reset-halt, register and memory read/write, a hardware breakpoint hit,
 backtrace, single-step, continue and re-hit, and a clean detach. The pod holds no GDB
 protocol state; the RSP semantics live host-side.
 
-### Direct register / memory access `[landing]`
+### Direct register / memory access `[validated]`
 Single-shot SWD peek-poke without a full GDB session: read/write core registers (core
 must be halted) and read/write target memory (live MEM-AP). Flash and the Cortex-M code
-region are write-protected by policy. Built on the validated MEM-AP/register primitives;
-unit-tested, no separate hardware-validation stamp yet.
+region are write-protected by policy. Validated on an nRF52840 (halt, read pc/sp/xpsr,
+RAM read plus write/read-back/restore).
 
 ### Logic analyser `[validated]`
 A PIO state machine samples up to 32 contiguous DUT GPIOs into a DMA RAM ring with
