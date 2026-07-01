@@ -75,7 +75,7 @@ debug-and-test workflow is validated on hardware today; two areas are still land
 | Networking + discovery (mDNS, IPv6-first) | `[validated]` | Browsable `_annealage-pod._tcp`, dual-stack |
 | Management REPL over Wi-Fi | `[validated]` | Socket REPL, persistent auto-reconnect session |
 | USB/IP DUT export - enumerate + attach | `[validated]` | Host sees + binds the DUT |
-| USB/IP DUT export - forwarded DUT REPL | `[validated]` | CDC REPL over the forward; heavy attach/detach churn can wedge Wi-Fi |
+| USB/IP DUT export - forwarded DUT REPL | `[validated]` | CDC REPL over the forward; reliable under sustained attach/detach churn |
 | DUT UART-over-TCP bridge | `[planned]` | Advertised in mDNS, not yet bound on RP2350 |
 | INA228 power telemetry, opto-relays, power switching | `[carrier]` | Needs the upcoming carrier board |
 
@@ -134,9 +134,8 @@ The pod's native USB port hosts the DUT, and an in-tree C USB/IP server (port 32
 exports it over Wi-Fi so a host can `usbip attach` and bind the DUT with a normal class
 driver. Device enumeration, attach, and a full forwarded CDC REPL session (`usbip
 attach` then `mpremote connect` over the attached tty) are validated on an nRF52840,
-across repeated attach / round-trip / detach cycles. One caveat: sustained rapid
-USB-host attach/detach churn can wedge the pod's CYW43 Wi-Fi (a separate, known
-coexistence issue) and needs a reset; normal attach, use, and detach is reliable.
+across repeated attach / round-trip / detach cycles, including sustained attach/detach
+churn (100 cycles of attach -> forwarded round-trip -> detach at 0% Wi-Fi packet loss).
 
 ### Networking and discovery `[validated]`
 The pod advertises a browsable mDNS service `_annealage-pod._tcp` (`annealage-pod.local`)
