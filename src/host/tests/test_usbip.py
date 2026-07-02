@@ -50,6 +50,64 @@ class TestPickNewTty:
         assert pick_new_tty(s, s) is None
 
 
+from pod.usbip import wait_for_new_tty
+
+
+class TestWaitForNewTty:
+    """The by-id-preferring grace logic (the udev-race fix)."""
+
+    def _clock(self):
+        t = [0.0]
+
+        def now():
+            return t[0]
+
+        def sleep(dt):
+            t[0] += dt
+        return t, now, sleep
+
+    def test_returns_by_id_immediately(self):
+        before = {"/dev/ttyACM0"}
+        byid = "/dev/serial/by-id/usb-MicroPython_board-if00"
+        _, now, sleep = self._clock()
+        got = wait_for_new_tty(before, _sleep=sleep, _list=lambda: before | {byid},
+                               _now=now)
+        # by-id path does not exist on the test host, so it comes back verbatim
+        assert got == byid
+
+    def test_waits_for_by_id_when_raw_appears_first(self):
+        """Raw ttyACM shows up first, the by-id link lands within `settle` -> the
+        by-id path wins, not the raw node (the permission-denied race fix)."""
+        before = {"/dev/ttyACM0"}
+        raw = "/dev/ttyACM1"
+        byid = "/dev/serial/by-id/usb-MicroPython_board-if00"
+        t, now, sleep = self._clock()
+
+        def _list():
+            # raw for the first ~0.5s, then udev adds the by-id link
+            return before | ({raw} if t[0] < 0.5 else {raw, byid})
+
+        got = wait_for_new_tty(before, settle=2.0, _sleep=sleep, _list=_list, _now=now)
+        assert got == byid
+
+    def test_falls_back_to_raw_after_settle(self):
+        """A device that never gets a by-id link is accepted after `settle`."""
+        before = {"/dev/ttyACM0"}
+        raw = "/dev/ttyACM1"
+        t, now, sleep = self._clock()
+        got = wait_for_new_tty(before, settle=1.0, _sleep=sleep,
+                               _list=lambda: before | {raw}, _now=now)
+        assert got == raw
+        assert t[0] >= 1.0  # it waited the grace period first
+
+    def test_none_on_timeout(self):
+        before = {"/dev/ttyACM0"}
+        _, now, sleep = self._clock()
+        got = wait_for_new_tty(before, timeout=1.0, _sleep=sleep,
+                               _list=lambda: before, _now=now)
+        assert got is None
+
+
 from pod.usbip import parse_usbip_port
 
 USBIP_PORT = """\

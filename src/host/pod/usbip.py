@@ -154,14 +154,34 @@ def pick_new_tty(before, after):
     return by_id[0] if by_id else new[0]
 
 
-def wait_for_new_tty(before, timeout=8.0, _sleep=time.sleep, _list=serial_devices):
-    """Poll until a new serial device appears (vs `before`); return its path or None."""
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
+def wait_for_new_tty(before, timeout=8.0, settle=2.0, _sleep=time.sleep,
+                     _list=serial_devices, _now=time.monotonic):
+    """Poll until a new CDC device appears (vs `before`); return its resolved
+    path or None.
+
+    Prefer the /dev/serial/by-id symlink over the raw /dev/ttyACM node. On attach
+    the raw node appears a moment before udev creates the by-id symlink and
+    applies its group/mode, so handing back the raw node in that window yields a
+    permission-denied (or not-yet-ready) open that looks like the DUT never
+    presented a tty. So once anything new is seen, keep polling up to `settle`
+    seconds for the by-id link before falling back to the raw node (some devices
+    never get one, e.g. no iSerial string).
+    """
+    end = _now() + timeout
+    raw_since = None
+    while _now() < end:
         hit = pick_new_tty(before, _list())
-        if hit:
+        if hit and "/by-id/" in hit:
             return os.path.realpath(hit) if os.path.exists(hit) else hit
-        _sleep(0.25)
+        if hit:
+            # Only a raw /dev/ttyACM node so far - give udev a moment to make the
+            # by-id link (and set perms) before accepting it.
+            now = _now()
+            if raw_since is None:
+                raw_since = now
+            elif now - raw_since >= settle:
+                return os.path.realpath(hit) if os.path.exists(hit) else hit
+        _sleep(0.1)
     return None
 
 

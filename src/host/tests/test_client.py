@@ -545,6 +545,18 @@ class TestAttachedPorts:
         assert p.usbip_detach() == {"detached": [0]}
         assert detached == [0]
 
+    def test_matches_resolver_cached_address(self, monkeypatch):
+        """A port attached via the resolver's cached connect address (e.g. the
+        mDNS-fallback tier resolved something not among the static handles) is
+        still ours - otherwise detach would silently no-op and leave it orphaned."""
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [
+            {"port": 3, "remote": "fd00:dead:beef::9", "busid": "1-1"}])
+        p = Pod(hostname="annealage-pod.local", addr4="192.168.0.146")
+        # attach() resolved to a ULA that is not in the static handles
+        p._resolver._resolved = "fd00:dead:beef::9"
+        assert p.attached_ports() == [3]
+
 
 class TestMcpPodExec:
     def test_pod_exec_runs_on_pod(self, monkeypatch):

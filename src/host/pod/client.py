@@ -879,11 +879,17 @@ class Pod:
         """Host vhci ports currently attached to THIS pod (matched by address).
 
         Matches `usbip port`'s remote against this pod's static handles
-        (hostname/addr4/addr6). Normalises an IP literal to its canonical
-        compressed form (stripping surrounding brackets, any %zone, and casing)
-        via ipaddress, so a v4, ULA, global, or link-local attachment matches
+        (hostname/addr4/addr6), the seed address, and the resolver's cached
+        connect address. Normalises an IP literal to its canonical compressed
+        form (stripping surrounding brackets, any %zone, and casing) via
+        ipaddress, so a v4, ULA, global, or link-local attachment matches
         regardless of how each side spelled the address; a hostname falls back to
         a lowercased, trailing-dot-stripped compare. Uses no network.
+
+        The cached connect address is included because usbip_attach connects to
+        resolver.resolve(), which on the mDNS-fallback tier returns a live-resolved
+        address that need not be one of the static handles; without it the vhci
+        port that attach created would not match here and detach would no-op.
         """
         from pod import usbip as _u
 
@@ -896,7 +902,7 @@ class Pod:
             except ValueError:
                 return a.lower()
         r = self._resolver
-        mine = {_norm(a) for a in [r.hostname, r.addr4] + list(r.addr6)
+        mine = {_norm(a) for a in [r.hostname, r.addr4, r.cached] + list(r.addr6)
                 if a}
         if self._seed_address:
             mine.add(_norm(self._seed_address))
