@@ -81,7 +81,8 @@ debug-and-test workflow is validated on hardware today; two areas are still land
 
 How to frame this on the page: lead with the validated core (debug, flash, GDB, logic
 analyser, peripherals, networking). Present USB/IP as "enumerate and attach a DUT's USB
-to your host; a full forwarded DUT REPL session is demonstrated but not yet reliable." Do not list UART-over-TCP, opto-relays, or
+to your host, with a full forwarded DUT REPL session validated over the attach and
+reliable under sustained attach/detach churn." Do not list UART-over-TCP, opto-relays, or
 INA228 telemetry as present features on the bare-Pico product; UART is planned and the
 power/relay features belong to the carrier tease below.
 
