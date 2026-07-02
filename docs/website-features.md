@@ -63,7 +63,8 @@ exposes flash/debug/reset/capture operations over Wi-Fi.
 ## Readiness at a glance
 
 Annealage Pod is a shipping, first-class product (alongside Annealage Canvas). The core
-debug-and-test workflow is validated on hardware today; two areas are still landing.
+debug-and-test workflow is validated on hardware today; the DUT UART-over-TCP bridge is
+planned, and per-rail power telemetry plus opto-relays arrive with the carrier board.
 
 | Subsystem | Status | One-line |
 |---|---|---|
