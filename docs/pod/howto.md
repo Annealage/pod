@@ -77,10 +77,24 @@ mpremote connect <tty>       # the printed by-id path -> the DUT REPL
 pod detach lab1 --port N     # release (N from `usbip port`)
 ```
 
-Enumerate + attach are validated; the forwarded DUT REPL is landing and
-unreliable today (succeeds intermittently, often fails with attach errors, no CDC
-tty, or a forwarder/Wi-Fi wedge). Needs the `usbip` client and vhci prerequisites
-below. See [src/host/README.md](../../src/host/README.md).
+Enumerate, attach, and the forwarded DUT REPL are all validated, including under
+sustained attach/detach churn (100 cycles, 0% Wi-Fi loss). Needs the `usbip`
+client and vhci prerequisites below. See
+[src/host/README.md](../../src/host/README.md).
+
+Known limitation - CDC-validated only: the forwarder is class-agnostic by design
+(it raw-forwards URBs, runs no class drivers), so bulk / MSC / HID devices should
+forward, but only the CDC REPL path is hardware-validated. There is a latent
+bulk-IN data-toggle desync on an in-flight abort (detaching while a bulk read is
+mid-transfer): the rp2 HCD's `hcd_edpt_abort_xfer` does not roll back the
+endpoint data toggle and the detach/reattach path does not re-open the endpoint,
+so a re-attached bulk endpoint can be one toggle-step out of sync. USB toggle
+mismatch self-heals within one packet, so a CDC REPL is unaffected (0 failures in
+100 detach-mid-transfer cycles) - but a bulk/MSC transfer could drop a single
+packet on the first post-reattach read. The fix (reset the host-side non-control
+toggles when the forwarder relays a `SET_CONFIGURATION`) is deferred until a
+non-REPL DUT actually exhibits it, since it needs a firmware reflash and cannot
+be validated against a reproduction today.
 
 ## Prerequisites
 
