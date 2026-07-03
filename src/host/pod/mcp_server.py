@@ -13,6 +13,7 @@ Tools:
   reset_dut       reset the DUT (sysreset to run, halt to catch the vector)
   read_dut        read DUT memory to a host file (streamed, no pod FS)
   gdb_dut         start a local GDB RSP server to the DUT and return its endpoint
+  tail_uart       stream DUT UART output (tail, bounded duration) over TCP
 
 The mcp import is guarded so this module can be imported and tested
 even if the mcp package is absent. build_server() is only called
@@ -474,6 +475,20 @@ def handle_logic_analyse(label: str, base_pin: int, width: int = 1,
     return _pod_for(label).logic_analyse(
         base_pin=base_pin, width=width, rate=rate, depth=depth, trigger=trig,
         out_path=out_path, sm_id=sm_id, names=names)
+
+
+def handle_tail_uart(label: str, port: int = None, duration: float = 30.0) -> dict:
+    """Stream DUT UART output (tail) over the pod's TCP UART bridge.
+
+    Bounded by duration (default 30s) so an agent cannot hold an open infinite
+    stream. Read-only: the TX direction is CLI-only. Connects to the pod's
+    always-bound UART listener on the advertised uart_port, or port if given.
+    """
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    effective_port = port or (entry.get("uart_port") or 2000)
+    return Pod.from_entry(entry).uart_stream(port=effective_port, duration=duration)
 
 
 # ── MCP server construction ───────────────────────────────────────────────
@@ -1153,6 +1168,27 @@ def build_server():
                     "required": ["label", "base_pin"],
                 },
             ),
+            Tool(
+                name="tail_uart",
+                description=(
+                    "Stream DUT UART output (tail) over the pod's TCP UART bridge. "
+                    "Connects to the pod's always-bound UART listener and returns "
+                    "bytes received within the duration window. Read-only: the TX "
+                    "direction is available from the CLI only."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "port": {"type": "integer",
+                                 "description": "Pod UART TCP port (default: registry uart_port or 2000)."},
+                        "duration": {"type": "number",
+                                     "description": "Seconds to capture (default: 30).",
+                                     "default": 30.0},
+                    },
+                    "required": ["label"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -1293,6 +1329,10 @@ def build_server():
                     arguments.get("depth", 8000), arguments.get("trigger"),
                     arguments.get("out_path", "capture.vcd"),
                     arguments.get("sm_id", 0), arguments.get("names"))
+            elif name == "tail_uart":
+                result = await asyncio.to_thread(
+                    handle_tail_uart, arguments["label"],
+                    arguments.get("port"), arguments.get("duration", 30.0))
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
             return [TextContent(type="text", text=str(result))]

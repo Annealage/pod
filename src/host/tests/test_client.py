@@ -363,13 +363,8 @@ class TestUsbipAttach:
 
 
 class TestNotImplementedStubs:
-    # usbip_attach is implemented (see TestUsbipAttach); uart_stream/telemetry
-    # remain stubs pending their phases.
-    def test_uart_stream_raises(self, pod):
-        with pytest.raises(NotImplementedError) as exc_info:
-            pod.uart_stream()
-        assert "Phase 5" in str(exc_info.value)
-
+    # usbip_attach and uart_stream are implemented (see TestUsbipAttach and the
+    # UART bridge tests in test_uart.py); telemetry remains a stub pending its phase.
     def test_telemetry_raises(self, pod):
         with pytest.raises(NotImplementedError) as exc_info:
             pod.telemetry()

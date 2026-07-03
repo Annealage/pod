@@ -8,7 +8,6 @@ pass a fake without invoking the real ampremote.
 
 Stubbed methods raise NotImplementedError with the phase they're pending:
   usbip_attach          - pending Phase 4 (DUT USB host + USB/IP)
-  uart_stream           - pending Phase 5 (UART-over-TCP)
   telemetry             - pending Phase 5 (INA228; custom carrier hardware)
 """
 
@@ -17,6 +16,7 @@ import ipaddress
 import os
 import socket
 import struct
+import sys
 import threading
 import time
 import subprocess as _subprocess
@@ -327,11 +327,10 @@ class Pod:
         """
         ports = self.attached_ports()
         if ports and not keep_attached:
-            import sys as _sys
             print("pod: detaching live USB/IP attach (ports %s) before the SWD "
                   "op - a DUT reset/flash while attached can wedge the "
                   "forwarder. Pass keep_attached=True to override."
-                  % ports, file=_sys.stderr)
+                  % ports, file=sys.stderr)
             self.usbip_detach()
         return ports
 
@@ -926,14 +925,72 @@ class Pod:
                 pass
         return {"detached": detached}
 
-    def uart_stream(self) -> None:
-        """Stream DUT UART output over TCP.
+    def uart_stream(self, port: int = 2000, duration: float = None,
+                    on_output=None, interactive: bool = False,
+                    out_path: str = None) -> dict:
+        """Stream DUT UART output over TCP to stdout / on_output / file.
 
-        Pending Phase 5: requires UART-over-TCP on the pod.
+        Connects a TCP socket to the pod's UART listener (always-bound at boot,
+        port advertised as uart_port in mDNS TXT). Two modes:
+          - tail (default): stream pod->host bytes until duration or Ctrl-C;
+          - interactive (interactive=True): also forward host stdin to the socket.
+        Uses self._resolver.endpoint(port) for IPv6-first connect (same strategy
+        as logic_analyse / flash_dut). Raw bytes, no framing. Returns
+        {ok, bytes_received}.
         """
-        raise NotImplementedError(
-            "uart_stream is not yet implemented - pending Phase 5 (UART-over-TCP)"
-        )
+        import select as _select
+
+        sock = None
+        for _ in range(150):
+            try:
+                sock = socket.create_connection(
+                    self._resolver.endpoint(port), timeout=5)
+                break
+            except OSError:
+                time.sleep(0.1)
+        if sock is None:
+            raise RuntimeError(
+                "pod UART port %d refused connection - bridge may not be running"
+                % port)
+        sock.settimeout(0.1)
+
+        out_file = None
+        if out_path is not None:
+            out_file = open(out_path, "wb")  # noqa: SIM115 - lifetime spans loop
+
+        bytes_received = 0
+        t0 = time.monotonic()
+        try:
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                    if chunk == b"":
+                        break  # peer closed
+                except socket.timeout:
+                    chunk = b""
+                if chunk:
+                    bytes_received += len(chunk)
+                    if on_output is not None:
+                        on_output(chunk)
+                    elif out_file is not None:
+                        out_file.write(chunk)
+                    else:
+                        sys.stdout.buffer.write(chunk)
+                        sys.stdout.buffer.flush()
+                if interactive:
+                    r, _, _ = _select.select([sys.stdin.buffer], [], [], 0)
+                    if r:
+                        data = sys.stdin.buffer.read1(4096)
+                        if data:
+                            sock.sendall(data)
+                if duration is not None and (time.monotonic() - t0) >= duration:
+                    break
+        finally:
+            sock.close()
+            if out_file is not None:
+                out_file.close()
+
+        return {"ok": True, "bytes_received": bytes_received}
 
     def telemetry(self) -> None:
         """Read INA228 power telemetry from the pod carrier.

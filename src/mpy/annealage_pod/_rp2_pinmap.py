@@ -23,6 +23,14 @@ I2C_TARGET_BUS = 1
 I2C_TARGET_SCL = 11
 I2C_TARGET_SDA = 10
 
+# DUT UART bridge (machine.UART1 on hardware UART, GP4/GP5). SUGGESTED-untested
+# per hardware-setup.md; confirm wiring before treating as VERIFIED. GP4/GP5 are
+# the RP2 port's default UART1 pins; UART0 (GP0/GP1) is the backup REPL console
+# and is a separate controller not touched here.
+DUT_UART_NUM = 1
+DUT_UART_TX = 4
+DUT_UART_RX = 5
+
 
 def pinmap():
     """The pod's own DUT-facing pin assignments, for host introspection.
@@ -35,4 +43,5 @@ def pinmap():
         "nrst": NRST,
         "i2c_target": {"bus": I2C_TARGET_BUS, "scl": I2C_TARGET_SCL,
                        "sda": I2C_TARGET_SDA},
+        "dut_uart": {"num": DUT_UART_NUM, "tx": DUT_UART_TX, "rx": DUT_UART_RX},
     }

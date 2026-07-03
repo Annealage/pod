@@ -15,6 +15,7 @@ Subcommands:
   flash <label> <image> [--target T]  flash a DUT image via the pod
   reset <label> [--mode MODE]         reset the DUT via the pod
   gdb <label> [--listen-port N]       start a local GDB RSP server to the DUT
+  uart <label> [--port P] [--tx]      stream DUT UART over TCP (--tx for full-duplex)
 
 Registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)
 """
@@ -844,6 +845,19 @@ def cmd_la(args):
     return 0 if result.get("ok") else 1
 
 
+def cmd_uart(args):
+    entry = _require_pod(args.label)
+    pod = Pod.from_entry(entry)
+    port = args.port or entry.get("uart_port") or 2000
+    try:
+        pod.uart_stream(port=port, duration=args.duration,
+                        interactive=args.interactive,
+                        out_path=args.out)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 # ── main ─────────────────────────────────────────────────────────────────
 
 
@@ -1148,6 +1162,17 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--sm-id", type=int, default=0, dest="sm_id",
                    help="PIO0 state machine id (default: 0; PIO2 is CYW43 Wi-Fi)")
 
+    # uart (DUT UART bridge)
+    p = sub.add_parser("uart", help="Stream DUT UART output over TCP")
+    p.add_argument("label")
+    p.add_argument("--port", type=int, default=None,
+                   help="Pod UART TCP port (default: registry uart_port or 2000)")
+    p.add_argument("--duration", type=float, default=None,
+                   help="Seconds to run (default: until Ctrl-C)")
+    p.add_argument("--tx", "--interactive", action="store_true", dest="interactive",
+                   help="Forward stdin to the DUT UART (full-duplex)")
+    p.add_argument("--out", default=None, help="Write output to a file instead of stdout")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1185,6 +1210,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "adc": cmd_adc,
         "release": cmd_release,
         "la": cmd_la,
+        "uart": cmd_uart,
     }[args.command]
 
     return handler(args)

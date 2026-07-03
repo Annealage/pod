@@ -58,9 +58,11 @@ def _pm_none(wlan):
         pass
 
 
-def _advertise_mdns(repl_port):
+def _advertise_mdns(repl_port, uart_port=None):
     # Advertise a browsable service via the native lwIP mDNS responder. Guarded
     # so any failure (missing API, responder not ready) does not stop the REPL.
+    # uart_port: include the "uart-port" TXT key only when a bound port is
+    # passed; omit it entirely when None so no client follows a dangling port.
     try:
         import config
     except ImportError:
@@ -76,9 +78,8 @@ def _advertise_mdns(repl_port):
         "carrier-id": str(carrier_id),
         "mp-version": mp_version,
     }
-    # The DUT UART-over-TCP bridge (build F5.2) is not yet bound, so do not
-    # advertise a uart-port: a client following the TXT would hit a refused
-    # connection. F5.2 adds the key back when it actually binds the listener.
+    if uart_port is not None:
+        txt["uart-port"] = str(uart_port)
     try:
         slot = network.mdns_add_service(
             "annealage-pod", "_annealage-pod", "tcp", repl_port, txt=txt
@@ -91,11 +92,13 @@ def _advertise_mdns(repl_port):
         return None
 
 
-async def _wifi_supervisor(wlan, ssid, pw, port):
+async def _wifi_supervisor(wlan, ssid, pw, port, uart_port=None):
     # Connect, keep the link up, and (re)advertise mDNS on each (re)connect. Runs
     # forever and is exception-guarded so a transient radio error can never kill
     # the pod's only management channel. The first iteration attempts the connect
     # (last_attempt starts a full interval in the past).
+    # uart_port: the bound UART listener port, or None if not bound; passed
+    # through to _advertise_mdns so each re-advertise reflects the real state.
     was_up = False
     last_attempt = time.ticks_add(time.ticks_ms(), -_WIFI_RETRY_MS - 1)
     while True:
@@ -105,7 +108,7 @@ async def _wifi_supervisor(wlan, ssid, pw, port):
                 _pm_none(wlan)  # a reconnect may have reset power-save
                 try:
                     print("netboot: Wi-Fi (re)connected", wlan.ifconfig()[0])
-                    _advertise_mdns(port)
+                    _advertise_mdns(port, uart_port)
                 except Exception:
                     pass
             elif not up and time.ticks_diff(time.ticks_ms(), last_attempt) > _WIFI_RETRY_MS:
@@ -246,13 +249,42 @@ async def main():
         wlan = network.WLAN(network.STA_IF)
         wlan.active(True)
         _pm_none(wlan)
+
+        # Bind the UART bridge listener synchronously before any task fires an
+        # mDNS advertise, so the first advertise reflects the real bind state.
+        # uart_port is None on failure; _advertise_mdns omits the TXT key then.
+        # The entire import+configure+bind block is guarded so a missing or
+        # broken uart_bridge module degrades to no-bridge rather than killing
+        # the Wi-Fi management plane (supervisor + socket REPL).
+        _ub = None
+        uart_cfg = {}
+        uart_port = None
+        try:
+            from annealage_pod import uart_bridge as _ub
+            if config:
+                for k in ("baudrate", "bits", "parity", "stop"):
+                    v = getattr(config, "DUT_UART_" + k.upper(), None)
+                    if v is not None:
+                        uart_cfg[k] = v
+            uart_port = _ub.bind(
+                getattr(config, "UART_PORT", 2000) if config else 2000
+            )
+        except Exception as _e:
+            sys.print_exception(_e)
+            print("netboot: uart_bridge unavailable, bridge not started")
+
         # Do NOT block boot on the connect: a slow or flaky AP would delay the
         # REPL, the pod's only management channel. The supervisor drives the
         # connect on its first iteration and retries forever; the accept loop
         # binds the REPL socket immediately so the pod is reachable as soon as the
         # link is up.
-        asyncio.create_task(_wifi_supervisor(wlan, ssid, pw, port))
+        asyncio.create_task(_wifi_supervisor(wlan, ssid, pw, port, uart_port))
         asyncio.create_task(_repl_accept(port))
+        if uart_port is not None:
+            asyncio.create_task(_ub.serve(uart_port, uart_cfg))
+            print("netboot: UART bridge on port", uart_port)
+        else:
+            print("netboot: UART bridge bind failed, not advertised")
         print("netboot: single-core runtime, Wi-Fi supervisor + REPL on port", port)
     else:
         print("netboot: no config.py/WIFI_SSID, REPL on UART only")
