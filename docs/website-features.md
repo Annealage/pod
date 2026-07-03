@@ -85,7 +85,30 @@ analyser, peripherals, networking). Present USB/IP as "enumerate and attach a DU
 to your host, with a full forwarded DUT REPL session validated over the attach and
 reliable under sustained attach/detach churn." Do not list UART-over-TCP, opto-relays, or
 INA228 telemetry as present features on the bare-Pico product; UART is planned and the
-power/relay features belong to the carrier tease below.
+power/relay features belong to the carrier tease below. USB/IP is also the one
+host-OS-bound capability (a Linux host in practice; see the subsystem section);
+every other capability is plain TCP/Python and host-OS-agnostic, and the
+quickstart does not require USB/IP.
+
+---
+
+## DUT compatibility
+
+Per-DUT-family status of the SWD debug / flash path. The on-pod debugger
+speaks SWD to ARM Cortex-M targets only. Any Cortex-M with a CMSIS pack is
+reachable in principle through the generic FLM runner (algo extracted
+host-side with `tools/flm_extract.py`), but a family is listed validated only
+after the operations were exercised on that silicon.
+
+| DUT family | Status | Flash path | Validated operations | Known limits |
+|---|---|---|---|---|
+| nRF52840 | validated | native NVMC + generic CMSIS-FLM (both validated) | SWD debug (halt / resume / reset, FPB breakpoints, DWT watchpoints), GDB through the pod, register/memory peek-poke, flash + verify over Wi-Fi, USB/IP CDC forward | USB/IP forward validated for the CDC class only; bulk / MSC unproven |
+| STM32 | pending | generic CMSIS-FLM | none yet (no STM32 DUT wired) | FLM generality on real STM32 silicon is unproven; needs per-target algo extraction plus validation on that silicon |
+| RP2350 as DUT | pending | RP-native bootrom (not built); CMSIS-FLM in principle | none yet (no RP DUT wired) | needs SWD multidrop (dormant + TARGETSEL) bring-up; an interrupted SWD flash can wedge the RP2350's QSPI/XIP state so only a power cycle recovers (observed on the pod's own RP2350; `docs/pod/dev-notes.md`) |
+
+Non-Cortex-M DUTs (ESP32-class and similar) are out of scope for the SWD
+debug/flash path; they remain reachable over USB/IP, GPIO/ADC, and the
+DUT-facing peripherals.
 
 ---
 
@@ -138,6 +161,12 @@ driver. Device enumeration, attach, and a full forwarded CDC REPL session (`usbi
 attach` then `mpremote connect` over the attached tty) are validated on an nRF52840,
 across repeated attach / round-trip / detach cycles, including sustained attach/detach
 churn (100 cycles of attach -> forwarded round-trip -> detach at 0% Wi-Fi packet loss).
+
+Host-OS scope: attaching needs a kernel-side USB/IP client, in practice Linux
+(`vhci_hcd`); Windows via usbip-win is best-effort and untested with the pod,
+and macOS has no client. All other pod capabilities (flash, GDB, peek-poke,
+REPL, logic analyser, peripherals, CLI/MCP) are plain TCP/Python and
+host-OS-agnostic.
 
 ### Networking and discovery `[validated]`
 The pod advertises a browsable mDNS service `_annealage-pod._tcp` (`annealage-pod.local`)

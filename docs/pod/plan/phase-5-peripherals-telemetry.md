@@ -21,6 +21,14 @@ and the `power` reset path are gated on a future custom carrier.
   be more reliable than the S3 i2c-target.
 - I2C address / SPI mode / freq cap configurable from MP; personalities mutually
   exclusive on shared pins.
+- Status and GA scope (2026-07): the I2C-target half landed on the hardware
+  I2C1 peripheral (`machine.I2CTarget`) rather than PIO - a PIO I2C slave does
+  not fit a 32-instruction block (`docs/pod/peripherals.md`) - and is
+  hardware-validated against an nRF52840 controller. The SPI target is not
+  implemented and is marked cuttable for GA: I2C target + GPIO + ADC is the
+  peripherals set GA ships with, and the SPI target moves to the post-GA
+  backlog unless a design partner needs it earlier. If cut, the SPI clause
+  drops from this phase's exit gate.
 
 ### F5.2 UART bridge over TCP
 - DUT UART forwarded over a TCP socket (default port per mDNS TXT). Hardware UART
@@ -282,6 +290,12 @@ user interrupts it or a duration elapses, not until a fixed byte count arrives.
 - Integrate the reset paths (Phase 3 D3.3) into the unified
   `annealage_pod.dut.reset(mode=...)` API: `swd` and `nrst` on the bare Pico 2 W;
   `power` when custom carrier hardware is available.
+- Scheduling note (2026-07): `nrst` validation is one wire (pod GP13
+  open-drain to DUT nRESET, `hardware-setup.md` section 5g; `_pinmap.NRST` is
+  already 13 on the RP2350) and one test (`pod reset --mode nrst`). It is the
+  reset path of last resort when SWD is unavailable and an exit-gate item for
+  this phase, so it is scheduled, not cut: it rides the next DUT wiring
+  session (the second-DUT-family bring-up) rather than a dedicated session.
 
 ### F5.5 RP_INFRA API mimicry
 - Provide the RP_INFRA-equivalent surface (S3 spec §7.1, appendix B) so

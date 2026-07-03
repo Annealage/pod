@@ -20,7 +20,8 @@ that:
   DP/AP/MEM-AP + CMSIS FLM flash loader + an on-pod GDB RSP server), instead of
   exporting a synthetic CMSIS-DAP probe;
 - forwards DUT UART over TCP;
-- presents I2C-target and SPI-target personalities on PIO;
+- presents an I2C-target personality (hardware I2C; a SPI target is planned
+  and cuttable for GA);
 - on a custom carrier (deferred; current development is on a bare Pico 2 W):
   per-rail current/voltage telemetry (INA228);
 - is discovered and driven by host-side `pod` tooling (a CLI and an MCP server)
@@ -76,7 +77,7 @@ Wi-Fi dupterm transport + `ampremote` socket/mount, both proven on hardware.
 | 2 | Debug-probe stack | D | Flash + verify a real DUT image over the network via the on-pod FLM loader |
 | 3 | GDB server and debug control | D | A host `gdb`/`pyocd`/`probe-rs` session halts, steps, sets breakpoints, reads memory on a DUT through the pod |
 | 4 | DUT USB host + USB/IP | F + D | Host PC enumerates the DUT through `usbip attach` over Wi-Fi |
-| 5 | Peripherals, reset, API | F | PIO I2C/SPI target, UART-over-TCP, `swd`/`nrst` reset, RP_INFRA API mimicry exercised on bare Pico 2 W; INA228 telemetry + `power` reset gated on custom carrier |
+| 5 | Peripherals, reset, API | F | I2C target (landed, hardware I2C), SPI target (cuttable for GA, see phase 5), UART-over-TCP, `swd`/`nrst` reset, RP_INFRA API mimicry exercised on bare Pico 2 W; INA228 telemetry + `power` reset gated on custom carrier |
 | 6 | Host tooling: `pod` CLI + MCP | H | Claude drives a pod+DUT (discover, flash, reset, telemetry, UART, USB/IP, gdb) through the MCP server |
 | 7 | Integration, CI, self-update, hardening | all | testbed_micropython runs against a pod; reliability run passes; pod self-update path works |
 

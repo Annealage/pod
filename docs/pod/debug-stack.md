@@ -20,7 +20,10 @@ hardware-validated results, see `spike-findings.md` section 6.
   PIO1 SM4, and the logic analyser plus the optional write-streamer use PIO0 (the
   free block). Do not build a state machine on PIO2 - it hard-wedges Wi-Fi.
 - Validated target: nRF52840 (PCA10059). Other Cortex-M targets work at the
-  DP/AP/MEM-AP level; flashing currently has only the nRF52 native-NVM path.
+  DP/AP/MEM-AP level; flashing has the nRF52 native-NVM path plus the generic
+  CMSIS-FLM runner (per-target algo required; both validated on the nRF52840
+  only). Per-DUT-family status: the "DUT compatibility" table in
+  [../website-features.md](../website-features.md).
 
 ## Layers
 

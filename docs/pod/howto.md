@@ -124,6 +124,12 @@ echo "$USER ALL=(root) NOPASSWD: /usr/bin/usbip" | sudo tee /etc/sudoers.d/pod-u
 See the full setup (including the no-sudo udev alternative) in
 [src/host/README.md](../../src/host/README.md).
 
+USB/IP attach is the only Linux-bound pod path (Windows has a best-effort
+third-party client, usbip-win, untested with the pod; macOS has no USB/IP
+client). Every other recipe on this page is plain TCP/Python and
+host-OS-agnostic; see the host OS table in
+[getting-started.md](getting-started.md).
+
 **Deploying the on-pod `annealage_pod` package:** Python changes deploy by
 copying the files to the pod filesystem and reloading - no firmware reflash. See
 [dev-notes.md](dev-notes.md).

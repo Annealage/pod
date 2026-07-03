@@ -113,6 +113,30 @@ The Pod exposes these TCP ports:
 | 3334 | mem-out (DUT read stream) |
 | 3336 | logic-analyser out |
 
+## Host OS support
+
+Everything in this guide is plain TCP and Python: flash, reset, GDB,
+register/memory peek-poke, the socket REPL, the logic analyser, the
+peripherals, and the `pod` CLI / Python client / MCP server all work from
+Linux, macOS, or Windows. Development and hardware validation happen on Linux;
+the other platforms have no OS-specific component in these paths but are not
+routinely exercised.
+
+The one Linux-bound path is USB/IP DUT attach (`pod attach`): it needs a
+kernel-side USB/IP client, in practice Linux with the `vhci_hcd` module (see
+the prerequisites in [howto.md](howto.md)). Windows has a best-effort
+third-party client (usbip-win, untested with the pod); macOS has no USB/IP
+client. Nothing in this guide requires USB/IP.
+
+| Capability | Linux | macOS | Windows |
+|---|---|---|---|
+| Flash / reset / GDB / peek-poke over Wi-Fi | yes | yes | yes |
+| Socket REPL + persistent session | yes | yes | yes |
+| Logic analyser | yes | yes | yes |
+| Peripherals (I2C target / GPIO / ADC) | yes | yes | yes |
+| `pod` CLI / Python client / `pod-mcp` | yes | yes | yes |
+| USB/IP DUT attach | yes | no client | best-effort (usbip-win) |
+
 ## Next
 
 - Task recipes and workflows: [howto.md](howto.md).
@@ -124,4 +148,3 @@ The Pod exposes these TCP ports:
 - Capability and readiness status: [../website-features.md](../website-features.md).
 - Development gotchas and the phased plan: [dev-notes.md](dev-notes.md),
   [plan/overview.md](plan/overview.md).
-```
