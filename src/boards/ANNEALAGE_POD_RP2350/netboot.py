@@ -73,10 +73,12 @@ def _advertise_mdns(repl_port):
     txt = {
         "repl-port": str(repl_port),
         "usbip-port": "3240",
-        "uart-port": "2000",
         "carrier-id": str(carrier_id),
         "mp-version": mp_version,
     }
+    # The DUT UART-over-TCP bridge (build F5.2) is not yet bound, so do not
+    # advertise a uart-port: a client following the TXT would hit a refused
+    # connection. F5.2 adds the key back when it actually binds the listener.
     try:
         slot = network.mdns_add_service(
             "annealage-pod", "_annealage-pod", "tcp", repl_port, txt=txt
