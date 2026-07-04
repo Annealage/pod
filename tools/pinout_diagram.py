@@ -125,8 +125,11 @@ def pod_overlay():
     ov[26] = ("ADC0", "V")
     ov[27] = ("ADC1", "V")
     ov[28] = ("ADC2", "V")
-    for gp in (16, 17, 18, 19, 20, 21):
-        ov.setdefault(gp, ("LA", "S"))
+    # Logic-analyser default capture block: contiguous GP16..GP21 sampled as
+    # channels 0..5 (base_pin=16, width=6). The base/width are configurable, so
+    # these are the default channel indices, not a fixed assignment.
+    for ch, gp in enumerate((16, 17, 18, 19, 20, 21)):
+        ov.setdefault(gp, ("LA%d" % ch, "S"))
     return ov
 
 
@@ -272,6 +275,19 @@ def build_svg():
                  % (lx, yy, C[cat]))
         p.append('<text x="%d" y="%d" font-family="DejaVu Sans, Arial" '
                  'font-size="11" fill="#dfe3e6">%s</text>' % (lx + 34, yy + 12, name))
+
+    # status key for the [V]/[S] tags on the pod boxes
+    sy = ly + len(legend) * 22 + 14
+    p.append('<text x="%d" y="%d" font-family="DejaVu Sans, Arial" font-size="12" '
+             'font-weight="700" fill="#fff">Pod assignment status</text>' % (lx, sy))
+    for k, (tag, meaning) in enumerate([("[V]", "verified on hardware"),
+                                        ("[S]", "suggested, untested")]):
+        yy = sy + 18 + k * 18
+        p.append('<text x="%d" y="%d" font-family="DejaVu Sans, Arial" '
+                 'font-size="11" font-weight="700" fill="#e8b23a">%s</text>'
+                 % (lx, yy, tag))
+        p.append('<text x="%d" y="%d" font-family="DejaVu Sans, Arial" '
+                 'font-size="11" fill="#dfe3e6">%s</text>' % (lx + 30, yy, meaning))
 
     p.append('</svg>')
     return "\n".join(p)
