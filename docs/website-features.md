@@ -77,15 +77,16 @@ planned, and per-rail power telemetry plus opto-relays arrive with the carrier b
 | Management REPL over Wi-Fi | `[validated]` | Socket REPL, persistent auto-reconnect session |
 | USB/IP DUT export - enumerate + attach | `[validated]` | Host sees + binds the DUT |
 | USB/IP DUT export - forwarded DUT REPL | `[validated]` | CDC REPL over the forward; reliable under sustained attach/detach churn |
-| DUT UART-over-TCP bridge | `[planned]` | Advertised in mDNS, not yet bound on RP2350 |
+| DUT UART-over-TCP bridge | `[landing]` | On-device + mDNS-advertised (uart-port); listener/session validated on hardware, DUT byte-path pending a loopback |
 | INA228 power telemetry, opto-relays, power switching | `[carrier]` | Needs the upcoming carrier board |
 
 How to frame this on the page: lead with the validated core (debug, flash, GDB, logic
 analyser, peripherals, networking). Present USB/IP as "enumerate and attach a DUT's USB
 to your host, with a full forwarded DUT REPL session validated over the attach and
-reliable under sustained attach/detach churn." Do not list UART-over-TCP, opto-relays, or
-INA228 telemetry as present features on the bare-Pico product; UART is planned and the
-power/relay features belong to the carrier tease below. USB/IP is also the one
+reliable under sustained attach/detach churn." Present UART-over-TCP as landing (on the
+bare Pico now, mDNS-advertised, the listener and one-client session validated on hardware,
+the DUT byte-path pending a loopback), not as a finished feature. Opto-relays and INA228
+telemetry are not bare-Pico features; they belong to the carrier tease below. USB/IP is also the one
 host-OS-bound capability (a Linux host in practice; see the subsystem section);
 every other capability is plain TCP/Python and host-OS-agnostic, and the
 quickstart does not require USB/IP.
