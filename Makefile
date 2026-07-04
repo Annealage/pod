@@ -90,6 +90,10 @@ flash-probe-rs: firmware ## Fallback flash via probe-rs (flattens the multi-sect
 reset: ## Reset the target over SWD
 	probe-rs reset --probe $(PROBE) --chip $(CHIP)
 
+.PHONY: pinout
+pinout: ## Regenerate docs/pod/pinout.{svg,png} from the pinmap (needs python3; PNG needs cairosvg)
+	python3 tools/pinout_diagram.py
+
 .PHONY: clean
 clean: ## Remove the board build directory (forces a fresh cmake configure)
 	rm -rf $(BUILD)

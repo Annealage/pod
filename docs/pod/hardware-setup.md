@@ -56,10 +56,15 @@ tagged:
 
 ![Annealage Pod pinout](pinout.svg)
 
-A rendered pinout (`pinout.svg` / `pinout.png`, generated from
-`_rp2_pinmap.pinmap()` by `tools/pinout_diagram.py`) shows the pod's assignments
-in gold over the stock Pico 2 W pin functions; regenerate it after any pin
-change. The table and ASCII diagram below carry the same information as text.
+A rendered pinout (`pinout.svg` / `pinout.png`) shows the pod's assignments in
+gold over the stock Pico 2 W pin functions. Regenerate it after any pin change
+with `make pinout` (or `python3 tools/pinout_diagram.py`; the PNG output needs
+`cairosvg`). What updates automatically vs by hand: the pod's `swd` / `nrst` /
+`i2c_target` / `dut_uart` pins come straight from `_rp2_pinmap.pinmap()`, so
+those track the code; the stock Pico 2 W pin functions and the fixed pod extras
+(backup-REPL GP0/GP1, ADC GP26-28, the LA capture block GP16-21) are tables
+inside `tools/pinout_diagram.py` and must be edited there. The table and ASCII
+diagram below carry the same information as text.
 
 Header GPIOs exposed by the board are GP0-GP22 and GP26-GP28 (`pins.csv`).
 GP23/24/25/29 are **not on the header** - they are internal CYW43 Wi-Fi pins
