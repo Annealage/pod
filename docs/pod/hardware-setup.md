@@ -54,6 +54,13 @@ tagged:
 
 ## 3. Pico 2 W pin budget
 
+![Annealage Pod pinout](pinout.svg)
+
+A rendered pinout (`pinout.svg` / `pinout.png`, generated from
+`_rp2_pinmap.pinmap()` by `tools/pinout_diagram.py`) shows the pod's assignments
+in gold over the stock Pico 2 W pin functions; regenerate it after any pin
+change. The table and ASCII diagram below carry the same information as text.
+
 Header GPIOs exposed by the board are GP0-GP22 and GP26-GP28 (`pins.csv`).
 GP23/24/25/29 are **not on the header** - they are internal CYW43 Wi-Fi pins
 (driven on PIO2) and must never be touched.
