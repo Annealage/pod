@@ -196,7 +196,7 @@ should be replaced. An agent adds it with, for example:
 claude mcp add pod -- pod-mcp
 ```
 
-The server wraps the `pod` client and exposes **33 tools**. Grouped:
+The server wraps the `pod` client and exposes **34 tools**. Grouped:
 
 - **Discovery / registry:** `discover_pods`, `pod_info`, `register_pod`, `dut` (probe and
   reconcile the wired DUT's SWD identity).
@@ -210,9 +210,11 @@ The server wraps the `pod` client and exposes **33 tools**. Grouped:
   `repl_close`, `repl_list`.
 - **Peripherals:** `i2c_target`, `i2c_target_regs`, `gpio`, `adc`, `peripheral_release`,
   `logic_analyse` (mutually exclusive with a live SWD session).
+- **DUT UART (landing):** `tail_uart` (read-only tail of the DUT UART over TCP; the
+  bridge is on-device, the DUT byte-path pending a loopback).
 
 Read vs write: `discover_pods`, `pod_info`, `dut`, `dut_usb`, `read_dut`, `dut_read_reg`,
-`dut_read_mem`, `adc`, `repl_read`, `repl_list`, `peripheral_release` are read/query;
+`dut_read_mem`, `adc`, `repl_read`, `repl_list`, `peripheral_release`, `tail_uart` are read/query;
 `flash_dut`, `reset_dut`, `attach_dut`, `dut_write_reg`, `dut_write_mem`, `gpio` (drive),
 `i2c_target*`, `mount_dir` mutate state. The SWD group is meaningful only when a DUT is
 attached for debug; the register tools need the core halted first.
@@ -236,7 +238,7 @@ The real command names and ports (the current page invents `annealage-pod flash`
 5. **Drive the DUT:** `pod flash <label> firmware.bin`, `pod reset <label>`,
    `pod gdb <label>` (prints a `target extended-remote host:port` for your gdb),
    `pod la <label> --pins 16-19 --out cap.vcd`, `pod repl <label>` (live streaming REPL).
-6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 33 tools above are
+6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 34 tools above are
    available over Wi-Fi.
 
 Ports in use: socket REPL `8266`, USB/IP `3240`, GDB/DAP RPC `3335`, flash-in `3333`,
