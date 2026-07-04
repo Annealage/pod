@@ -263,6 +263,34 @@ user interrupts it or a duration elapses, not until a fixed byte count arrives.
    at the chosen poll cadence; tighten `_UART_POLL_MS` if RX-FIFO overrun
    appears.
 
+### Validation status (2026-07-04)
+
+Bench-validated on the flashed pod (firmware built from this branch with the
+netboot lifecycle + mDNS gating frozen in; `annealage_pod.uart_bridge` deployed
+to the pod filesystem):
+
+- The module imports on MicroPython, `bind()` binds the dual-stack listener, and
+  `machine.UART(1)` opens on GP4/GP5.
+- `netboot.main()` auto-starts the bridge at boot and gates the mDNS `uart-port`
+  key on the bind: `_annealage-pod._tcp` advertises `uart-port=2000` because the
+  bind succeeded (validation step 3).
+- Disconnect handling (step 6): a host client that closes gracefully is cleared
+  and a fresh connection is accepted (3/3 sequential reconnects); a concurrent
+  second client is refused with the BUSY notice and the first is not evicted.
+  This exercised a fix for a graceful-close leak found on hardware: a peer FIN
+  polls readable with `recv() == b""` (not HUP/ERR), so an empty read must clear
+  the session, otherwise every client after the first is refused BUSY forever.
+- `pod uart <label>` connects and exits cleanly back to back; the bridge coexists
+  with Wi-Fi and the socket REPL (the pod stayed reachable throughout).
+
+DEFERRED - the UART byte round-trip itself (steps 1, 2, 4, 7) is NOT validated:
+it needs a physical GP4<->GP5 loopback jumper, or a DUT UART wired to GP4/GP5
+(both marked SUGGESTED-untested in `hardware-setup.md`), neither present on the
+bench. To close it when the wiring exists: run the loopback echo (step 2), then
+a real DUT at 115200 for the live-tail + throughput checks (steps 4, 7), and the
+full all-at-once coexistence stress (step 5: UART stream + SWD op + USB/IP
+forward + REPL held together, confirming Wi-Fi RX does not wedge).
+
 ### Open decisions
 
 - DUT UART pin assignment GP4/GP5 (UART1) is SUGGESTED-untested in

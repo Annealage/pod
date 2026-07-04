@@ -226,13 +226,30 @@ async def serve(uart_port: int, uart_cfg: dict = None):
                                 except OSError:
                                     pass
 
-                # Drain TCP -> UART (non-blocking: only if readable).
+                # Drain TCP -> UART (non-blocking: only if readable). A graceful
+                # peer close (FIN) polls readable with recv() == b'' rather than
+                # HUP/ERR, so an empty read MUST be treated as a disconnect and
+                # the session cleared - otherwise cur stays set after the first
+                # client closes and every later client is refused BUSY forever.
                 try:
                     for _sock, ev in live.poll(0):
                         if ev & select.POLLIN:
                             rx = cur.recv(_TCP_RECV_MAX)
                             if rx:
                                 uart.write(rx)
+                            elif cur is not None:
+                                try:
+                                    live.unregister(cur)
+                                except Exception:
+                                    pass
+                                try:
+                                    cur.close()
+                                except Exception:
+                                    pass
+                                cur = None
+                                pending = b""
+                                print("uart_bridge: client closed")
+                                break
                 except OSError:
                     pass
 
