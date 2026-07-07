@@ -29,6 +29,13 @@ and the `power` reset path are gated on a future custom carrier.
   peripherals set GA ships with, and the SPI target moves to the post-GA
   backlog unless a design partner needs it earlier. If cut, the SPI clause
   drops from this phase's exit gate.
+- Consumer signal (2026-07): the `aio` asyncio-hardware roadmap (a pod HIL
+  consumer) has asked for the PIO SPI target to validate coherent SPI peripheral
+  framing and, specifically, the >65535-byte multi-chunk continuation path (a
+  PIO SPI responder that captures received bytes and returns a known counter
+  pattern). That is exactly the "design partner needs it earlier" trigger the cut
+  clause named, so the SPI target is flagged PROMOTABLE from the post-GA backlog.
+  Promotion is owner-gated on the GA family-scope decision, not yet scheduled.
 
 ### F5.2 UART bridge over TCP
 - DUT UART forwarded over a TCP socket (default port per mDNS TXT). Hardware UART
@@ -302,9 +309,14 @@ forward + REPL held together, confirming Wi-Fi RX does not wedge).
   without a hardware-UART function, or if a second DUT UART is wanted; PIO0 is
   free for it but PIO2 (CYW43 Wi-Fi) must never be touched (`pio_arbiter`). Keep
   PIO UART as a fallback, not the default.
-- Interactive write authority: whether the MCP `tail_uart` tool should ever be
-  allowed to write to the DUT UART (it is read-only tail here) or stay CLI-only
-  for the TX direction.
+- Interactive write authority (resolved 2026-07, consumer-requested): add a
+  `uart_send` MCP tool that drives the DUT UART RX, alongside the read-only
+  `tail_uart` tail. The `aio` asyncio-hardware roadmap needs to drive DUT RX with
+  controlled framing for its UART-parity tests (esp8266 TX, zephyr). The CLI
+  already forwards stdin via `pod uart --tx`; this promotes the TX direction to
+  MCP. `machine.UART` sendbreak and baud-mismatch framing errors come cheaply;
+  controlled overrun / parity-error injection is a secondary sub-feature, staged
+  after the basic TX tool.
 - Baud/line-setting control surface: whether to add a `pod uart-config` verb /
   on-pod control to change baud/parity without a reboot, versus keeping it a
   `config.py` + restart operation.
@@ -329,6 +341,27 @@ forward + REPL held together, confirming Wi-Fi RX does not wedge).
 - Provide the RP_INFRA-equivalent surface (S3 spec §7.1, appendix B) so
   testbed_micropython needs only a transport adapter. Share the package with the
   S3 variant against the platform-capability interface (overview §5).
+
+### F5.6 Measurement primitives (consumer-requested candidates)
+- Two PIO-based measurement tools requested by the `aio` asyncio-hardware roadmap
+  (a pod HIL consumer, 2026-07). Neither is covered by the existing logic
+  analyser, which is fixed-depth timed sampling on PIO0 with no counting /
+  frequency mode and a sub-second window (buffer caps at ~80 KB: 20000 samples at
+  32-bit width, up to ~640000 at 1-bit):
+  - **Wake-latency / GPIO round-trip histogram.** Drive a stimulus edge and
+    timestamp the DUT's GPIO response on one PIO0 timebase, repeated N times,
+    returning an array of deltas (the histogram directly, no manual VCD
+    correlation). Serves the aio notify-primitive / pin-event and STOP-wake
+    tickets.
+  - **Edge-counter / frequency over a window.** Count edges (or measure
+    frequency) on a pin for T seconds. Serves the aio tickless idle-wake-count
+    test (wakes/second dropping from ~1000 to the deadline count), which the LA's
+    short window cannot measure.
+- Both are new PIO programs on the free PIO0 SM budget (PIO2 is CYW43 Wi-Fi,
+  never touch; `pio_arbiter`). Both can coexist with SWD (PIO1) and Wi-Fi (PIO2)
+  the same way the LA does. Prototype in-test via `pod_exec` + a small PIO program
+  first, then promote the useful ones to stable MCP tools. Candidates, not
+  scheduled; priority tracks the aio roadmap.
 
 ## Deliverables
 

@@ -273,6 +273,18 @@ and the eventual telemetry tool's output shape (windowed statistics, not point
 samples). It directly informs the INA228 choice above and the
 current-sense-resolution open decision below.
 
+**Sample-at-rate analog capture + analog stimulus (candidate, distant).** The
+bare board's `adc` is single-shot voltage only. The same `aio` consumer wants,
+for a later phase (Phase 6, lowest priority), sample-at-rate analog CAPTURE for
+DAC-streaming verification and a known analog waveform SOURCE for ADC-continuous
+verification (a PWM + filter on the pod would serve as the source). This is a
+further front-end beyond the INA228 power path. The pod's own ADC pins
+(GP26-GP28) plus a PWM-derived analog output could prototype both halves before
+any dedicated carrier front-end exists. Priority: low (the consumer places it
+distant). Interface: a timed-ADC capture path and a PWM+filter analog output;
+carrier front-end TBD. No in-tree prior art; external ask, not cited to a
+repo source.
+
 ### Level translation
 
 **Configurable DUT logic levels.** Bidirectional level translation on the
@@ -364,6 +376,10 @@ the local I2C bus, published as `annealage_pod.carrier.id()` (S3 spec §3.6).
   under Telemetry), or whether a higher-gain or dual-range front-end is needed;
   and the shunt-value tradeoff between resolution, full-scale range, and burden
   voltage on the DUT rail. Undecided.
+- **Analog capture / stimulus front-end.** Whether the carrier carries a
+  sample-at-rate analog capture path and a waveform source (PWM + filter) for the
+  aio Phase-6 analog verification, or whether the pod's own ADC (GP26-GP28) plus a
+  PWM output suffice. Distant; undecided.
 - **Opto-relays.** Whether any relay-driven boot-mode control returns; the current
   answer is no (`overview.md:33`).
 - **Connector choice.** Single combined DUT connector vs per-function connectors,

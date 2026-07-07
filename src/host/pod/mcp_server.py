@@ -1148,9 +1148,13 @@ def build_server():
             Tool(
                 name="logic_analyse",
                 description=(
-                    "Capture DUT pins with the pod's PIO logic analyser and write "
-                    "a VCD file. Swaps SWD out for the capture (mutually exclusive), "
-                    "then restores it lazily."
+                    "Capture DUT pins with the pod's PIO logic analyser (PIO0) and "
+                    "write a VCD file. Runs concurrently with SWD (PIO1) and Wi-Fi "
+                    "(PIO2) on separate PIO blocks; it does not swap SWD out. "
+                    "Fixed-depth timed snapshot, not an edge-counter or free-run "
+                    "capture: the sample buffer caps at ~80 KB (20000 samples at "
+                    "32-bit width, up to ~640000 at 1-bit), so the window is short "
+                    "(sub-second at useful rates)."
                 ),
                 inputSchema={
                     "type": "object",
