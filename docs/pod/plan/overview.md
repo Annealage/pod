@@ -98,6 +98,10 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   sharing one pod do not collide on the SWD singleton / usbip / peripherals
   (a host-tooling CLI/MCP gate over a small pod-side firmware authority;
   buildable now, lands in the Phase 6/7 band).
+- `carrier-hardware.md` - the desirable-features spec for a future custom carrier
+  PCB (power switching + remote power-cycle recovery, INA228 telemetry, DUT-USB
+  power control/measurement, level translation, connectors). Draft, gated on the
+  software reaching GA; the counterpart to the deferred-capabilities list above.
 
 ## 5. Code-sharing strategy with the ESP32-S3 variant
 
