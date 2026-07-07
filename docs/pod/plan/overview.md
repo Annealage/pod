@@ -93,6 +93,12 @@ Dynamic-workflow rule: at each gate, record the measured result, then re-cut the
 remaining phases. Spikes that fail their gate trigger a documented fallback (see
 the risk register) rather than silent scope creep.
 
+Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
+- `bench-lease.md` - a time-boxed, named lease over the DUT so multiple agents
+  sharing one pod do not collide on the SWD singleton / usbip / peripherals
+  (a host-tooling CLI/MCP gate over a small pod-side firmware authority;
+  buildable now, lands in the Phase 6/7 band).
+
 ## 5. Code-sharing strategy with the ESP32-S3 variant
 
 Shared (single source, both variants):
