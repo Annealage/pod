@@ -41,3 +41,34 @@ def accept(srv, timeout_s=30, slice_ms=100):
             poller.unregister(srv)
         except Exception:
             pass
+
+
+def recv_into(cl, mv, timeout_s=30, slice_ms=1):
+    """Fill the memoryview `mv` from socket `cl`; return bytes read (0 = EOF).
+
+    The accepted socket inherits the listener's non-blocking mode, so
+    `readinto` returns None when no data has arrived yet. Treating None as EOF
+    (the naive `if not r: break`) truncates a stream whenever the receiver
+    outruns the sender - fatal for a receiver that reads immediately with no
+    prior delay (write_mem_stream), and a latent race for flash_stream. Retry
+    on None with a short sleep_ms yield: that keeps the single event loop
+    servicing lwIP/cyw43 (unlike a blocking recv, which starves it and drops the
+    connection on a long transfer), and does NOT misread a quiet gap as EOF. A
+    genuinely closed peer returns 0, which ends the fill. `timeout_s` bounds a
+    stalled-but-open peer so a dead sender cannot spin forever.
+    """
+    n = len(mv)
+    got = 0
+    deadline = time.ticks_add(time.ticks_ms(), int(timeout_s * 1000))
+    while got < n:
+        r = cl.readinto(mv[got:n])
+        if r is None:                       # non-blocking: no data yet
+            if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+                break                       # stalled peer; caller sees a short read
+            time.sleep_ms(slice_ms)         # yield to lwIP/cyw43, avoid a tight spin
+            continue
+        if r == 0:                          # peer closed: EOF
+            break
+        got += r
+        deadline = time.ticks_add(time.ticks_ms(), int(timeout_s * 1000))
+    return got

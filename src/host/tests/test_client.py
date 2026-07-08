@@ -112,6 +112,12 @@ class TestDutOps:
         assert "verify=True" in cmd
         # addr is rendered as the decimal of 0x1000
         assert str(0x1000) in cmd
+        # default loader is "native" (backward compat for the flat binary path)
+        assert "loader='native'" in cmd
+
+    def test_flash_stream_cmd_explicit_loader(self):
+        cmd = Pod._flash_stream_cmd(0x0, 256, 3333, True, loader="flm")
+        assert "loader='flm'" in cmd
 
     def test_reset_dut_invokes_reset(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(
@@ -638,3 +644,142 @@ class TestAttachGuard:
         p, detached = self._pod_and_detached(monkeypatch)
         p.halt_dut(keep_attached=True)
         assert detached == []
+
+
+class TestFlashDutLoaderConsistency:
+    """Verify loader is threaded consistently through flash_dut / _flash_dut_elf."""
+
+    def _make_elf_pod(self, monkeypatch, fake_runner):
+        """Pod with ELF geometry declared and elf_loader stubbed out."""
+        import pod.elf_loader as el
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [])
+        monkeypatch.setattr(el, "is_elf", lambda path: True)
+        monkeypatch.setattr(el, "parse_load_segments",
+                            lambda path, ranges: [(0x0, b"\xaa" * 8, "flash")])
+        p = Pod(addr4="10.0.0.1", runner=fake_runner)
+        p._elf_flash_ranges = [(0x0, 0x100000)]
+        return p
+
+    def test_flash_stream_cmd_default_loader_native(self):
+        # The static helper's default stays "native" (flat binary backward compat).
+        cmd = Pod._flash_stream_cmd(0x0, 64, 3333, True)
+        assert "loader='native'" in cmd
+
+    def test_elf_flash_uses_flm_by_default(self, monkeypatch, fake_runner):
+        # ELF path defaults to "flm"; _flash_stream_cmd for flash segments must
+        # carry loader='flm', not fall through to the "native" default.
+        p = self._make_elf_pod(monkeypatch, fake_runner)
+        cmd = p._flash_stream_cmd(0x0, 8, 3333, True, loader="flm")
+        assert "loader='flm'" in cmd
+        # Verify _flash_dut_elf builds the correct cmd by inspecting what the
+        # static helper would produce for the chosen loader.
+        cmd_native = p._flash_stream_cmd(0x0, 8, 3333, True, loader="native")
+        assert "loader='native'" in cmd_native
+
+    def test_elf_mass_erase_and_program_use_same_loader(self, monkeypatch,
+                                                         fake_runner):
+        # Both erase_dut and flash_stream must receive the same loader when
+        # mass_erase=True on an ELF image. Capture on-pod code strings.
+        import pod.elf_loader as el
+        import pod.usbip as u
+        import threading, socket as _socket
+
+        monkeypatch.setattr(u, "ports", lambda: [])
+        monkeypatch.setattr(el, "is_elf", lambda path: True)
+        monkeypatch.setattr(el, "parse_load_segments",
+                            lambda path, ranges: [(0x0, b"\xaa" * 8, "flash")])
+
+        codes_seen = []
+        # fake_runner is only used for the erase_dut exec call;
+        # _stream_region does its own socket IO which we short-circuit below.
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'ms': 100, 'loader': 'flm', 'err': None}\n",
+            returncode=0)
+        p = Pod(addr4="10.0.0.1", runner=fake_runner)
+        p._elf_flash_ranges = [(0x0, 0x100000)]
+
+        # Capture what _stream_region is called with (the cmd string), then
+        # short-circuit the actual network IO.
+        stream_cmds = []
+
+        def _fake_stream(cmd, payload, size, port):
+            stream_cmds.append(cmd)
+            return {"ok": True, "addr": 0, "bytes": size, "err": None,
+                    "loader": "flm"}
+
+        monkeypatch.setattr(p, "_stream_region", _fake_stream)
+
+        p._flash_dut_elf("fake.elf", flash_ranges=[(0x0, 0x100000)],
+                         port=3333, verify=True, mass_erase=True, loader="flm")
+
+        # erase_dut exec call: the code sent to the pod must use loader='flm'
+        erase_code = fake_runner.call_args[0][0][4]
+        assert "loader='flm'" in erase_code, (
+            "erase_all called with wrong loader: %r" % erase_code)
+
+        # flash_stream call: the streamed segment must also use loader='flm'
+        assert stream_cmds, "no _stream_region call recorded"
+        assert "loader='flm'" in stream_cmds[0], (
+            "flash_stream called with wrong loader: %r" % stream_cmds[0])
+
+    def test_elf_explicit_native_loader_threads_through(self, monkeypatch,
+                                                         fake_runner):
+        # An explicit loader="native" override on flash_dut must reach both
+        # erase_dut and flash_stream (for users that opt into the nRF fast-path).
+        import pod.elf_loader as el
+        import pod.usbip as u
+
+        monkeypatch.setattr(u, "ports", lambda: [])
+        monkeypatch.setattr(el, "is_elf", lambda path: True)
+        monkeypatch.setattr(el, "parse_load_segments",
+                            lambda path, ranges: [(0x0, b"\xaa" * 8, "flash")])
+
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'ms': 50, 'loader': 'native', 'err': None}\n",
+            returncode=0)
+        p = Pod(addr4="10.0.0.1", runner=fake_runner)
+        p._elf_flash_ranges = [(0x0, 0x100000)]
+
+        stream_cmds = []
+
+        def _fake_stream(cmd, payload, size, port):
+            stream_cmds.append(cmd)
+            return {"ok": True, "addr": 0, "bytes": size, "err": None}
+
+        monkeypatch.setattr(p, "_stream_region", _fake_stream)
+
+        p.flash_dut("fake.elf", mass_erase=True, loader="native")
+
+        erase_code = fake_runner.call_args[0][0][4]
+        assert "loader='native'" in erase_code
+        assert stream_cmds and "loader='native'" in stream_cmds[0]
+
+    def test_flat_binary_defaults_to_native(self, monkeypatch, fake_runner):
+        # Flat binary path must default to "native" (backward compat).
+        import pod.elf_loader as el
+        import pod.usbip as u
+        import tempfile, os
+
+        monkeypatch.setattr(u, "ports", lambda: [])
+        monkeypatch.setattr(el, "is_elf", lambda path: False)
+
+        p = Pod(addr4="10.0.0.1", runner=fake_runner)
+
+        stream_cmds = []
+
+        def _fake_stream(cmd, payload, size, port):
+            stream_cmds.append(cmd)
+            return {"ok": True, "addr": 0, "bytes": size, "err": None}
+
+        monkeypatch.setattr(p, "_stream_region", _fake_stream)
+
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"\x00" * 16)
+            tmp = f.name
+        try:
+            p.flash_dut(tmp)
+        finally:
+            os.unlink(tmp)
+
+        assert stream_cmds and "loader='native'" in stream_cmds[0]

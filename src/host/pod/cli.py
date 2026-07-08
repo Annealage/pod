@@ -616,7 +616,17 @@ def cmd_flash(args):
     pod = Pod.from_entry(entry)
     addr = int(args.addr, 0) if isinstance(args.addr, str) else args.addr
     result = pod.flash_dut(args.image, target=args.target, addr=addr,
-                           keep_attached=args.keep_attached)
+                           keep_attached=args.keep_attached,
+                           mass_erase=args.mass_erase)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_erase(args):
+    """Erase the entire DUT flash via the on-pod debug stack."""
+    entry = _require_pod(args.label)
+    pod = Pod.from_entry(entry)
+    result = pod.erase_dut()
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -1040,11 +1050,18 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     # flash
     p = sub.add_parser("flash", help="Flash a DUT firmware image via the pod")
     p.add_argument("label")
-    p.add_argument("image", help="Firmware image path (raw binary)")
-    p.add_argument("--addr", default="0", help="Flash base address (default: 0)")
+    p.add_argument("image", help="Firmware image path (raw binary or ELF)")
+    p.add_argument("--addr", default="0",
+                   help="Flash base address (default: 0; ignored for ELF)")
     p.add_argument("--target", default=None, help="Target MCU identifier")
     p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
                    help="Do not detach a live USB/IP session first (risks a wedge)")
+    p.add_argument("--mass-erase", action="store_true", dest="mass_erase",
+                   help="Erase the entire DUT flash before programming")
+
+    # erase
+    p = sub.add_parser("erase", help="Erase the entire DUT flash via the pod")
+    p.add_argument("label")
 
     # reset
     p = sub.add_parser("reset", help="Reset the DUT via the pod")
@@ -1196,6 +1213,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "dut-exec": cmd_dut_exec,
         "cp": cmd_cp,
         "flash": cmd_flash,
+        "erase": cmd_erase,
         "reset": cmd_reset,
         "gdb": cmd_gdb,
         "halt": cmd_halt,

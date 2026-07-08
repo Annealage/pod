@@ -176,8 +176,13 @@ def handle_mount_dir(label: str, directory: str) -> str:
 
 
 def handle_flash_dut(label: str, image: str, target: str = None,
-                     addr: int = 0, keep_attached: bool = False) -> dict:
+                     addr: int = 0, keep_attached: bool = False,
+                     mass_erase: bool = False) -> dict:
     """Flash a firmware image to the DUT via the pod (streamed, no pod FS).
+
+    Accepts a flat binary or an ELF file (detected by magic, not extension).
+    For ELF images the DUT flash geometry must be declared in the registry dut
+    block (flash_base + flash_size); addr is ignored.
 
     Detaches a live USB/IP session first (reflashing the DUT mid-forward wedges
     the pod); keep_attached=True overrides.
@@ -187,7 +192,21 @@ def handle_flash_dut(label: str, image: str, target: str = None,
         raise KeyError(f"Pod '{label}' not found in registry.")
     pod = Pod.from_entry(entry)
     return pod.flash_dut(image, target=target, addr=addr,
-                         keep_attached=keep_attached)
+                         keep_attached=keep_attached, mass_erase=mass_erase)
+
+
+def handle_erase_dut(label: str, clkdiv: int = 8,
+                     loader: str = "flm") -> dict:
+    """Erase the entire DUT flash via the on-pod debug stack.
+
+    loader: "flm" = generic CMSIS-FLM path (works for any pack target);
+    "native" = nRF NVMC mass-erase fast-path.
+    Returns {ok, ms, loader, err}.
+    """
+    entry = get_pod(label)
+    if entry is None:
+        raise KeyError(f"Pod '{label}' not found in registry.")
+    return Pod.from_entry(entry).erase_dut(clkdiv=clkdiv, loader=loader)
 
 
 def handle_reset_dut(label: str, mode: str = "sysreset",
@@ -680,16 +699,22 @@ def build_server():
                 name="flash_dut",
                 description=(
                     "Flash a firmware image to the DUT over SWD via the pod, "
-                    "streamed into pod RAM (no pod filesystem)."
+                    "streamed into pod RAM (no pod filesystem). Accepts a flat "
+                    "binary or an ELF file (detected by magic, not extension); "
+                    "for ELF the DUT flash geometry must be declared in the "
+                    "registry dut block (flash_base + flash_size)."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
-                        "image": {"type": "string", "description": "Firmware image path (raw binary)."},
+                        "image": {
+                            "type": "string",
+                            "description": "Firmware image path (raw binary or ELF).",
+                        },
                         "addr": {
                             "type": "integer",
-                            "description": "Flash base address.",
+                            "description": "Flash base address (flat binary only; ignored for ELF).",
                             "default": 0,
                         },
                         "target": {
@@ -701,8 +726,35 @@ def build_server():
                             "description": "Do not detach a live USB/IP session first (risks a forwarder wedge).",
                             "default": False,
                         },
+                        "mass_erase": {
+                            "type": "boolean",
+                            "description": "Erase the entire DUT flash before programming.",
+                            "default": False,
+                        },
                     },
                     "required": ["label", "image"],
+                },
+            ),
+            Tool(
+                name="erase_dut",
+                description=(
+                    "Erase the entire DUT flash via the on-pod debug stack. "
+                    "loader 'flm' uses the generic CMSIS-FLM path (works for "
+                    "any pack target); 'native' uses the nRF NVMC mass-erase "
+                    "fast-path. Returns {ok, ms, loader, err}."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "loader": {
+                            "type": "string",
+                            "enum": ["flm", "native"],
+                            "description": "Flash algorithm: 'flm' (generic) or 'native' (nRF NVMC fast-path).",
+                            "default": "flm",
+                        },
+                    },
+                    "required": ["label"],
                 },
             ),
             Tool(
@@ -1241,7 +1293,13 @@ def build_server():
                 result = await asyncio.to_thread(
                     handle_flash_dut, arguments["label"], arguments["image"],
                     arguments.get("target"), arguments.get("addr", 0),
-                    arguments.get("keep_attached", False))
+                    arguments.get("keep_attached", False),
+                    arguments.get("mass_erase", False))
+            elif name == "erase_dut":
+                result = await asyncio.to_thread(
+                    handle_erase_dut, arguments["label"],
+                    arguments.get("clkdiv", 8),
+                    arguments.get("loader", "flm"))
             elif name == "reset_dut":
                 result = await asyncio.to_thread(
                     handle_reset_dut, arguments["label"],

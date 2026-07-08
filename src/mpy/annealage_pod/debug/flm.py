@@ -88,9 +88,27 @@ class FLMFlasher:
             raise FLMError("EraseSector(0x%08x) returned %d" % (addr, r))
 
     def erase_all(self):
-        r = self._call(self.algo["pc_eraseAll"])
-        if r:
-            raise FLMError("EraseAll returned %d" % r)
+        # Erase the entire flash: load the blob, bracket with Init/UnInit(1),
+        # call EraseChip if the algo supplies it, otherwise fall back to a full
+        # sector-by-sector sweep. Mirrors program()'s load/init/uninit structure.
+        a = self.algo
+        self.load()
+        self.init(1)                                  # operation 1 = erase
+        try:
+            if "pc_eraseAll" in a:
+                r = self._call(a["pc_eraseAll"])
+                if r:
+                    raise FLMError("EraseChip returned %d" % r)
+            else:
+                # Generic fallback: sector sweep over the full flash region.
+                page = a["page_size"]
+                p = a["flash_base"] & ~(page - 1)   # page-align (cf _flm_erase_range)
+                end = a["flash_base"] + a["flash_size"]
+                while p < end:
+                    self.erase_sector(p)
+                    p += page
+        finally:
+            self.uninit(1)
 
     def program_page(self, addr, data):
         a = self.algo

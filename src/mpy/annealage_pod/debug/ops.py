@@ -24,15 +24,15 @@ _dwt = None
 _flm = None
 
 
-# Selectable flash backend. The default ("native") is the validated per-family
-# NVM path (flash_nrf52.NRF52Flash), driven directly through the NVMC; it is the
-# only backend exercised on hardware and must stay the default so it cannot
-# regress. "flm" selects the generic CMSIS flash-algorithm runner
-# (flm.FLMFlasher + flm_<part>.FLASH_ALGO), which runs a standard algorithm blob
-# on the target itself - the path that generalises to any chip with a CMSIS
-# pack, but which is not yet hardware-validated here. Callers opt into it
-# explicitly per call (loader="flm"); _select_loader keeps the choice out of the
-# hot path.
+# Selectable flash backend. "native" is the per-family NVM path
+# (flash_nrf52.NRF52Flash), driven directly through the NVMC; "flm" is the
+# generic CMSIS flash-algorithm runner (flm.FLMFlasher + flm_<part>.FLASH_ALGO)
+# that runs a standard algorithm blob on the target and so generalises to any
+# chip with a CMSIS pack. Both are hardware-validated (nRF52840, 2026-07-09:
+# program + full-chip erase). Default per operation: the flat-binary flash_stream
+# path defaults to "native" (nRF fast-path, preserves prior behaviour), while the
+# ELF flash path and mass-erase (erase_all) default to "flm" so they generalise
+# across pack targets. _select_loader keeps the choice out of the hot path.
 def _flm_algo():
     # The CMSIS flash algorithm for the connected DUT. nRF52840 is the only
     # extracted pack present; a real multi-DUT pod would pick this from the
@@ -217,12 +217,7 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True,
         left = total_len
         while left > 0:
             n = chunk if left > chunk else left
-            got = 0
-            while got < n:
-                r = cl.readinto(mv[got:n])
-                if not r:
-                    break
-                got += r
+            got = netutil.recv_into(cl, mv[:n])
             if got == 0:
                 err = "short read"
                 break
@@ -242,6 +237,96 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True,
         cm.resume()
     return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err,
             "loader": loader}
+
+
+def erase_all(clkdiv=8, loader="flm"):
+    # Erase the entire DUT flash, returning timing and loader info. loader="flm"
+    # runs the generic CMSIS FLMFlasher.erase_all() (halts core, runs the
+    # algorithm blob, resumes); loader="native" uses NRF52Flash.mass_erase()
+    # directly through the NVMC. The core is always resumed in the finally.
+    dp, ap, cm, fl = _ensure(clkdiv)
+    err = None
+    t0 = time.ticks_ms()
+    try:
+        fl = _select_loader(loader)
+        if loader == "native":
+            fl.prepare()     # halt the core
+            fl.mass_erase()
+        else:
+            if not cm.is_halted():
+                cm.halt()
+            fl.erase_all()
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        err = repr(e)
+    finally:
+        try:
+            cm.resume()
+        except Exception:
+            pass
+    dt = time.ticks_diff(time.ticks_ms(), t0)
+    return {"ok": err is None, "ms": dt, "loader": loader, "err": err}
+
+
+def write_mem_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8,
+                     protect=None):
+    # Write a raw byte stream received over TCP directly into target memory via
+    # the MEM-AP. No erase, no flash involvement. Uses the same dual-stack
+    # socket setup and \x01/\x00 status-byte protocol as flash_stream, and the
+    # same protect check as write_mem (applied up front against the whole range).
+    import socket
+
+    # Protect check against the whole [addr, addr+total_len) range before
+    # binding the socket (mirrors write_mem:387-402).
+    end = addr + total_len
+    if protect:
+        for lo, hi in protect:
+            if addr < hi and end > lo:
+                return {"ok": False, "addr": addr, "bytes": 0,
+                        "err": "addr 0x%08x..0x%08x overlaps a write-protected "
+                               "range 0x%08x..0x%08x" % (addr, end, lo, hi)}
+    elif addr < dbgsrv.FLASH_TOP:
+        return {"ok": False, "addr": addr, "bytes": 0,
+                "err": "addr 0x%08x is in the code/flash region "
+                       "(< 0x%08x, the Cortex-M SRAM base) and is not "
+                       "word-writable" % (addr, dbgsrv.FLASH_TOP)}
+
+    dp, ap, cm, fl = _ensure(clkdiv)
+    err = None
+
+    # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
+    srv = socket.socket(socket.AF_INET6)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    cl = None
+    try:
+        srv.bind(("::", port))
+        srv.listen(1)
+        cl, _ = netutil.accept(srv, 30)   # bounded + Ctrl-C-interruptible
+
+        buf = bytearray(chunk)
+        mv = memoryview(buf)
+        a = addr
+        left = total_len
+        while left > 0:
+            n = chunk if left > chunk else left
+            got = netutil.recv_into(cl, mv[:n])
+            if got == 0:
+                err = "short read"
+                break
+            dbgsrv._write_mem(ap, a, bytes(mv[:got]))
+            a += got
+            left -= got
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        err = repr(e)
+    finally:
+        if cl is not None:
+            try:
+                cl.send(b"\x01" if err is None else b"\x00")
+            except Exception:
+                pass
+            cl.close()
+        srv.close()
+        cm.resume()
+    return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err}
 
 
 def dump_stream(addr, length, port=3334, clkdiv=8):

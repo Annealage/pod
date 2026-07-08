@@ -159,8 +159,13 @@ class Pod:
 
     @classmethod
     def from_entry(cls, entry: dict, runner: Optional[Callable] = None) -> "Pod":
-        """Build a Pod from a registry entry, wiring the full handle set."""
-        return cls(
+        """Build a Pod from a registry entry, wiring the full handle set.
+
+        Also captures DUT flash geometry (flash_base + flash_size from the
+        declared dut block) so the ELF flash path can derive flash_ranges
+        without hardcoding target addresses.
+        """
+        pod = cls(
             address=entry.get("address"),
             repl_port=entry.get("repl_port", 8266),
             runner=runner,
@@ -169,6 +174,17 @@ class Pod:
             addr4=entry.get("addr4"),
             fingerprint=entry.get("fingerprint"),
         )
+        dut = entry.get("dut") or {}
+        flash_base = dut.get("flash_base")
+        flash_size = dut.get("flash_size")
+        if flash_base is not None and flash_size is not None:
+            # Accept int or hex/dec string (mirrors cli.py's int(addr, 0)).
+            fb = int(flash_base, 0) if isinstance(flash_base, str) else int(flash_base)
+            fs = int(flash_size, 0) if isinstance(flash_size, str) else int(flash_size)
+            pod._elf_flash_ranges = [(fb, fb + fs)]
+        else:
+            pod._elf_flash_ranges = None
+        return pod
 
     @property
     def resolver(self) -> TargetResolver:
@@ -242,36 +258,48 @@ class Pod:
     # ── DUT flash / reset / read (on-pod debug stack, workstream D) ───────
 
     @staticmethod
-    def _flash_stream_cmd(addr: int, total: int, port: int, verify: bool) -> str:
+    def _flash_stream_cmd(addr: int, total: int, port: int, verify: bool,
+                          loader: str = "native") -> str:
         """Build the on-pod flash_stream invocation (pure, for testability)."""
         return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.flash_stream(%d, %d, port=%d, verify=%s))"
-            % (addr, total, port, bool(verify))
+            "print(o.flash_stream(%d, %d, port=%d, verify=%s, loader=%r))"
+            % (addr, total, port, bool(verify), loader)
         )
 
-    def flash_dut(self, image: str, target: Optional[str] = None,
-                  addr: int = 0, verify: bool = True, port: int = 3333,
-                  keep_attached: bool = False) -> dict:
-        """Flash a firmware image to the DUT, streamed into pod RAM (no pod FS).
+    @staticmethod
+    def _write_mem_stream_cmd(addr: int, total: int, port: int,
+                              protect) -> str:
+        """Build the on-pod write_mem_stream invocation (pure, for testability)."""
+        prot_arg = ("None" if not protect
+                    else repr([[int(lo), int(hi)] for lo, hi in protect]))
+        return (
+            "import annealage_pod.debug.ops as o;"
+            "print(o.write_mem_stream(%d, %d, port=%d, protect=%s))"
+            % (addr, total, port, prot_arg)
+        )
 
-        The pod runs a TCP receiver that double-buffers the image into two RAM
-        buffers (Wi-Fi fills one while SWD programs the other) and never writes
-        the image to its filesystem or reads the prior DUT contents. The host
-        starts that receiver over the REPL and streams the file straight to it.
-        Returns the on-pod result dict {ok, addr, bytes, err}.
+    @staticmethod
+    def _erase_all_cmd(clkdiv: int = 8, loader: str = "flm") -> str:
+        """Build the on-pod erase_all invocation (pure, for testability)."""
+        return (
+            "import annealage_pod.debug.ops as o;"
+            "print(o.erase_all(clkdiv=%d, loader=%r))"
+            % (clkdiv, loader)
+        )
 
-        Detaches a live USB/IP session first (re-enumerating the DUT mid-forward
-        wedges the pod); pass keep_attached=True to override.
+    def _stream_region(self, cmd: str, payload, size: int, port: int) -> dict:
+        """Start the on-pod streaming receiver, then stream payload over TCP.
+
+        cmd is executed on the pod (starts a TCP listener on port). payload is
+        either an open binary file object or a bytes-like object. size is the
+        total byte count the pod expects. Returns the on-pod result dict.
         """
-        self._guard_live_attach(keep_attached)
-        total = os.path.getsize(image)
         result: dict = {}
 
         def _run():
             try:
-                result["out"] = self.exec(
-                    self._flash_stream_cmd(addr, total, port, verify))
+                result["out"] = self.exec(cmd)
             except Exception as exc:  # noqa: BLE001 - surfaced to caller
                 result["exc"] = exc
 
@@ -292,7 +320,7 @@ class Pod:
             exc = result.get("exc")
             detail = getattr(exc, "stderr", "") or ""
             raise RuntimeError(
-                "could not connect to pod flash port %d: %r\n%s"
+                "could not connect to pod stream port %d: %r\n%s"
                 % (port, exc, detail))
         # Connect used a short timeout; the transfer itself is paced by the pod
         # (it erases the whole region before reading the socket, ~85 ms/page, so
@@ -300,12 +328,20 @@ class Pod:
         # the data phase rather than timing out mid-erase.
         sock.settimeout(None)
         try:
-            with open(image, "rb") as f:
+            if hasattr(payload, "read"):
+                # file-like object
                 while True:
-                    block = f.read(65536)
+                    block = payload.read(65536)
                     if not block:
                         break
                     sock.sendall(block)
+            else:
+                # bytes / bytearray
+                mv = memoryview(payload)
+                offset = 0
+                while offset < len(mv):
+                    sock.sendall(mv[offset:offset + 65536])
+                    offset += 65536
             try:
                 sock.recv(1)   # status byte from the pod
             except OSError:
@@ -316,6 +352,138 @@ class Pod:
         if "exc" in result:
             raise result["exc"]
         return _last_dict(result.get("out", ""))
+
+    def erase_dut(self, clkdiv: int = 8, loader: str = "flm") -> dict:
+        """Erase the entire DUT flash via the on-pod debug stack.
+
+        Runs ops.erase_all() on the pod over the REPL. loader selects the
+        flash algorithm: "flm" for the generic CMSIS-FLM path (works for any
+        pack target), "native" for the nRF NVMC mass-erase fast-path.
+        Returns the on-pod result dict {ok, ms, loader, err}.
+        """
+        out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader))
+        return _last_dict(out)
+
+    def flash_dut(self, image: str, target: Optional[str] = None,
+                  addr: int = 0, verify: bool = True, port: int = 3333,
+                  keep_attached: bool = False,
+                  mass_erase: bool = False,
+                  loader: Optional[str] = None) -> dict:
+        """Flash a firmware image to the DUT, streamed into pod RAM (no pod FS).
+
+        The pod runs a TCP receiver that double-buffers the image into two RAM
+        buffers (Wi-Fi fills one while SWD programs the other) and never writes
+        the image to its filesystem or reads the prior DUT contents. The host
+        starts that receiver over the REPL and streams the file straight to it.
+
+        For ELF images (detected by the 4-byte magic, not extension):
+            - flash_ranges are derived from the DUT registry entry geometry
+              (flash_base and flash_size); geometry must be declared for an ELF.
+            - If mass_erase=True, ops.erase_all() is issued first (one REPL
+              round-trip), before any segment is streamed.
+            - Each flash segment is programmed via flash_stream (erase+program),
+              which erases ONLY that segment's covered pages: inter-segment gaps
+              and any region outside the segments (e.g. a settings/NVS partition)
+              are NOT erased. Use mass_erase=True for a clean-chip flash.
+            - Each RAM segment is written via write_mem_stream (MEM-AP, no erase).
+            - Returns {ok, segments:[...], bytes, err}; stops at the first failed
+              segment (err names it), leaving the earlier segments applied.
+            addr is ignored for ELF images.
+            loader selects the flash algorithm for both erase (if mass_erase=True)
+            and per-segment programming. Defaults to "flm" for the ELF path (the
+            generic CMSIS algorithm, which works for any pack target).
+
+        For flat binaries (non-ELF): single-segment flash at addr. mass_erase
+        issues ops.erase_all() before streaming. Defaults to "native" for
+        backward compatibility. Returns {ok, addr, bytes, err}.
+
+        Detaches a live USB/IP session first (re-enumerating the DUT mid-forward
+        wedges the pod); pass keep_attached=True to override.
+        """
+        from pod.elf_loader import is_elf
+
+        self._guard_live_attach(keep_attached)
+
+        if is_elf(image):
+            flash_ranges = getattr(self, "_elf_flash_ranges", None)
+            if flash_ranges is None:
+                raise ValueError(
+                    "DUT flash geometry (flash_base + flash_size) must be "
+                    "declared in the registry dut block to flash an ELF image")
+            # Default to "flm" for ELF: the generic CMSIS algorithm works for
+            # any pack target, whereas "native" is nRF-only. Both erase and
+            # program use the same backend so they agree on the flash layout.
+            elf_loader = loader if loader is not None else "flm"
+            return self._flash_dut_elf(
+                image, flash_ranges=flash_ranges, port=port, verify=verify,
+                mass_erase=mass_erase, loader=elf_loader)
+
+        # Flat binary path - default "native" preserves prior behaviour.
+        bin_loader = loader if loader is not None else "native"
+        if mass_erase:
+            erase_result = self.erase_dut(loader=bin_loader)
+            if not erase_result.get("ok"):
+                return erase_result
+
+        total = os.path.getsize(image)
+        cmd = self._flash_stream_cmd(addr, total, port, verify, loader=bin_loader)
+        with open(image, "rb") as f:
+            return self._stream_region(cmd, f, total, port)
+
+    def _flash_dut_elf(self, image: str, flash_ranges: list,
+                       port: int = 3333, verify: bool = True,
+                       mass_erase: bool = False,
+                       loader: str = "flm") -> dict:
+        """Flash an ELF image segment-by-segment via flash_stream / write_mem_stream.
+
+        loader is used for both the mass_erase (if requested) and every flash
+        segment, so erase and program always use the same algorithm backend.
+        RAM segments use write_mem_stream regardless of loader (no flash algo
+        involved). Returns an aggregated dict {ok, segments, bytes}.
+        """
+        from pod.elf_loader import parse_load_segments
+
+        segments = parse_load_segments(image, flash_ranges)
+        if not segments:
+            raise ValueError("ELF has no PT_LOAD segments with data to program")
+
+        if mass_erase:
+            erase_result = self.erase_dut(loader=loader)
+            if not erase_result.get("ok"):
+                return {"ok": False, "segments": [], "bytes": 0,
+                        "err": erase_result.get("err", "erase_all failed")}
+
+        seg_results = []
+        all_ok = True
+        total_bytes = 0
+
+        err = None
+        for lma, data, region in segments:
+            size = len(data)
+            if region == "flash":
+                cmd = self._flash_stream_cmd(lma, size, port, verify,
+                                             loader=loader)
+            else:
+                # Guard the RAM write with the DUT's DECLARED flash geometry, not
+                # the pod's nRF-hardcoded FLASH_TOP, so "no MEM-AP write into a
+                # flash region" is correct for the actual target.
+                cmd = self._write_mem_stream_cmd(lma, size, port,
+                                                 protect=flash_ranges)
+            seg_dict = self._stream_region(cmd, data, size, port)
+            seg_dict["lma"] = lma
+            seg_dict["region"] = region
+            seg_results.append(seg_dict)
+            if not seg_dict.get("ok"):
+                # Fail fast: a partial flash is bad, so stop before writing more.
+                # seg_results carries what was applied; err names the failure.
+                all_ok = False
+                err = "segment at 0x%08x (%s) failed: %s" % (
+                    lma, region, seg_dict.get("err"))
+                break
+            total_bytes += size
+
+        return {"ok": all_ok, "segments": seg_results, "bytes": total_bytes,
+                "err": err}
 
     def _guard_live_attach(self, keep_attached: bool) -> list:
         """Before an SWD op, detach any live usbip session to this pod.

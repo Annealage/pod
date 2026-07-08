@@ -16,6 +16,7 @@ requires-python = ">=3.10"
 # reproducible; bump the SHA deliberately when picking up fork fixes.
 dependencies = [
   "ampremote @ git+https://github.com/andrewleech/ampremote@999188c8816f15900a8fce1d552a6de8f39645de#subdirectory=micropython/tools/mpremote",
+  "pyelftools",
 ]
 
 [project.optional-dependencies]
