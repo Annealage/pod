@@ -53,6 +53,10 @@ and naming conventions.
 - `docs/pod/plan/`: the phased development plan. Start at `overview.md` (goals,
   architecture deltas, workstreams, phase map + gates, host `pod` CLI/MCP design,
   risk register), then `phase-1-foundation.md` .. `phase-7-integration-hardening.md`.
+  Cross-cutting standalone plans (not numbered phases) sit alongside and are
+  indexed from `overview.md`: `bench-lease.md` (multi-agent DUT checkout),
+  `carrier-hardware.md` (custom-carrier feature spec), and
+  `resume-after-power-cycle.md` (brick-recovery runbook).
   Dynamic plan: each phase ends at a hardware-validated gate, then the remainder is
   re-cut. Development happens on the `main` branch (the `rp2350-pivot` branch was
   promoted to `main`).

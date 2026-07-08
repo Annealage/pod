@@ -102,6 +102,8 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   PCB (power switching + remote power-cycle recovery, INA228 telemetry, DUT-USB
   power control/measurement, level translation, connectors). Draft, gated on the
   software reaching GA; the counterpart to the deferred-capabilities list above.
+- `resume-after-power-cycle.md` - the brick-recovery runbook: XIP-wedge / flash
+  power-on-reset recovery and the forward plan it unblocks.
 
 ## 5. Code-sharing strategy with the ESP32-S3 variant
 
