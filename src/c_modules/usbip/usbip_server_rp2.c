@@ -1675,6 +1675,16 @@ static err_t cb_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 int usbip_server_start(uint16_t port)
 {
     if (s_running) {
+        /* Already serving: re-seed the USB host slot table. usbhost_start() is an
+         * idempotent thread-level rescan (rescan_mounted) that drops vanished /
+         * re-enumerated slots and re-adds them fresh under the current enum gen,
+         * without disturbing a healthy live attachment. A DUT that re-enumerated
+         * since the server came up (reset, replug, or a machine.USBHost re-init)
+         * otherwise leaves a stale slot whose live transfers fail -ENODEV while the
+         * descriptor cache still answers IMPORT + GET_DESCRIPTOR(DEVICE/CONFIG), so
+         * an attach half-enumerates (kernel "string descriptor 0 read error: -19")
+         * with no stop/start. Re-seeding here makes attach_dut / ensure self-heal. */
+        (void)usbhost_start();
         return 0;
     }
     if (port == 0) {
