@@ -109,6 +109,18 @@ class SWDPio:
         self.swclk = Pin(swclk)
         self.sm_id = sm_id
         self.clkdiv = clkdiv
+        # Defensively clear this block's 32-word instruction memory before
+        # adding swd_prog. A prior SWDPio dropped WITHOUT release() (a GC'd
+        # session, a crash, a soft reset) frees the StateMachine object but not
+        # its loaded PIO program - rp2 has no GC finalizer for that - so a stale
+        # swd_prog copy lingers and this build would otherwise raise ENOMEM
+        # ("no room in PIO instruction memory"). SWD is the sole PIO1 user and a
+        # fresh SWDPio is only built when no session is live, so clearing here is
+        # safe; it mirrors what release() does on the way out.
+        try:
+            rp2.PIO(sm_id // 4).remove_program()
+        except Exception:
+            pass
         self.sm = rp2.StateMachine(
             sm_id, swd_prog,
             freq=int(self.SYS_HZ / clkdiv),
