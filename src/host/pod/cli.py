@@ -433,6 +433,9 @@ def _format_pinmap(pins):
     if i2c:
         out.append("  i2c_target: " + " ".join(
             (f"{k}=GP{v}" if k != "bus" else f"bus={v}") for k, v in i2c.items()))
+    spi = pins.get("spi_target")
+    if spi:
+        out.append("  spi_target: " + " ".join(f"{k}=GP{v}" for k, v in spi.items()))
     return out
 
 
@@ -805,6 +808,24 @@ def cmd_i2c_regs(args):
     return 0 if result.get("ok") else 1
 
 
+def cmd_spi_target(args):
+    entry = _require_pod(args.label)
+    pod = Pod.from_entry(entry)
+    result = pod.spi_target(mode=args.mode, bits=args.bits, miso=args.miso,
+                            mosi=args.mosi, sck=args.sck, cs=args.cs,
+                            size=args.size, name=args.name)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_spi_target_status(args):
+    entry = _require_pod(args.label)
+    pod = Pod.from_entry(entry)
+    result = pod.spi_target_status(name=args.name)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
 def cmd_gpio(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
@@ -1145,6 +1166,27 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    help="Bytes to write at off first")
     p.add_argument("--name", default="i2c_target", help="Instance name")
 
+    # spi-target
+    p = sub.add_parser("spi-target",
+                       help="Bring up a PIO SPI target (stream/counter mode) on the pod")
+    p.add_argument("label")
+    p.add_argument("--mode", type=int, default=0, help="SPI mode 0-3 (default: 0; only 0 in Stage 1)")
+    p.add_argument("--bits", type=int, default=8, help="Frame width in bits (default: 8; only 8 in Stage 1)")
+    p.add_argument("--miso", type=int, default=16, help="MISO GPIO (default: 16)")
+    p.add_argument("--mosi", type=int, default=19, help="MOSI GPIO (default: 19)")
+    p.add_argument("--sck", type=int, default=18, help="SCK GPIO (default: 18)")
+    p.add_argument("--cs", type=int, default=17, help="CS GPIO, active low (default: 17)")
+    p.add_argument("--size", type=int, default=1024,
+                   help="MOSI capture retained-byte capacity, rounded up to a "
+                        "power of two, max 8192 (RAM used is 4x) (default: 1024)")
+    p.add_argument("--name", default="spi_target", help="Instance name")
+
+    # spi-target-status
+    p = sub.add_parser("spi-target-status",
+                       help="Read the pod SPI target's status (byte count, captured ring)")
+    p.add_argument("label")
+    p.add_argument("--name", default="spi_target", help="Instance name")
+
     # gpio
     p = sub.add_parser("gpio", help="Read or drive a pod GPIO")
     p.add_argument("label")
@@ -1224,6 +1266,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "write-mem": cmd_write_mem,
         "i2c-target": cmd_i2c_target,
         "i2c-regs": cmd_i2c_regs,
+        "spi-target": cmd_spi_target,
+        "spi-target-status": cmd_spi_target_status,
         "gpio": cmd_gpio,
         "adc": cmd_adc,
         "release": cmd_release,

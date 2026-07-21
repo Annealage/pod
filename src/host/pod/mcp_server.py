@@ -469,6 +469,19 @@ def handle_i2c_target_regs(label: str, off: int = 0, length=None, write=None,
                                            name=name)
 
 
+def handle_spi_target(label: str, mode: int = 0, bits: int = 8, miso: int = 16,
+                      mosi: int = 19, sck: int = 18, cs: int = 17,
+                      size: int = 1024, name: str = "spi_target") -> dict:
+    """Bring up a persistent PIO SPI target on the pod (stream/counter mode)."""
+    return _pod_for(label).spi_target(mode=mode, bits=bits, miso=miso, mosi=mosi,
+                                      sck=sck, cs=cs, size=size, name=name)
+
+
+def handle_spi_target_status(label: str, name: str = "spi_target") -> dict:
+    """Read the pod SPI target's status: byte count, transfer count, captured ring."""
+    return _pod_for(label).spi_target_status(name=name)
+
+
 def handle_peripheral_release(label: str, name: str = "*") -> dict:
     """Release one named pod peripheral instance, or all with '*'."""
     return _pod_for(label).peripheral_release(name=name)
@@ -1159,6 +1172,43 @@ def build_server():
                 },
             ),
             Tool(
+                name="spi_target",
+                description=(
+                    "Bring up a persistent PIO SPI target on the pod (stream/"
+                    "counter mode, Stage 1): MISO replays a 0..255 counter for "
+                    "any transfer length, MOSI is captured into a bounded "
+                    "overwrite ring. SPI mode 0, 8-bit only. Persists until "
+                    "released."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "mode": {"type": "integer", "enum": [0], "description": "SPI mode (only 0 in Stage 1).", "default": 0},
+                        "bits": {"type": "integer", "enum": [8], "description": "Frame width in bits (only 8 in Stage 1).", "default": 8},
+                        "miso": {"type": "integer", "description": "MISO GPIO.", "default": 16},
+                        "mosi": {"type": "integer", "description": "MOSI GPIO.", "default": 19},
+                        "sck": {"type": "integer", "description": "SCK GPIO.", "default": 18},
+                        "cs": {"type": "integer", "description": "CS GPIO, active low.", "default": 17},
+                        "size": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "MOSI capture retained-byte capacity, rounded up to a power of two (RAM used is 4x).", "default": 1024},
+                        "name": {"type": "string", "description": "Instance name.", "default": "spi_target"},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="spi_target_status",
+                description="Read the pod SPI target's status (byte count, transfer count, captured ring).",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "name": {"type": "string", "description": "Instance name.", "default": "spi_target"},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
                 name="peripheral_release",
                 description="Release one named pod peripheral instance, or all with '*'.",
                 inputSchema={
@@ -1372,6 +1422,18 @@ def build_server():
                     handle_i2c_target_regs, arguments["label"],
                     arguments.get("off", 0), arguments.get("length"),
                     arguments.get("write"), arguments.get("name", "i2c_target"))
+            elif name == "spi_target":
+                result = await asyncio.to_thread(
+                    handle_spi_target, arguments["label"],
+                    arguments.get("mode", 0), arguments.get("bits", 8),
+                    arguments.get("miso", 16), arguments.get("mosi", 19),
+                    arguments.get("sck", 18), arguments.get("cs", 17),
+                    arguments.get("size", 1024),
+                    arguments.get("name", "spi_target"))
+            elif name == "spi_target_status":
+                result = await asyncio.to_thread(
+                    handle_spi_target_status, arguments["label"],
+                    arguments.get("name", "spi_target"))
             elif name == "peripheral_release":
                 result = await asyncio.to_thread(
                     handle_peripheral_release, arguments["label"],

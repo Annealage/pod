@@ -878,6 +878,32 @@ class Pod:
         )
         return _last_dict(self.exec(code))
 
+    def spi_target(self, mode: int = 0, bits: int = 8, miso: int = 16,
+                   mosi: int = 19, sck: int = 18, cs: int = 17, size: int = 1024,
+                   name: str = "spi_target") -> dict:
+        """Bring up a persistent PIO SPI target on the pod (stream/counter mode).
+
+        The pod becomes the SPI peripheral: MISO replays a 0..255 counter for
+        any transfer length, MOSI is captured into a `size`-byte overwrite ring.
+        Bench default pins: MISO=GP16, MOSI=GP19, SCK=GP18, CS=GP17. SPI mode 0,
+        8-bit only in Stage 1.
+        """
+        code = (
+            "import annealage_pod.peripherals as p;"
+            "print(p.spi_target(mode=%d, bits=%d, miso=%d, mosi=%d, sck=%d,"
+            " cs=%d, size=%d, name=%r))"
+            % (mode, bits, miso, mosi, sck, cs, size, name)
+        )
+        return _last_dict(self.exec(code))
+
+    def spi_target_status(self, name: str = "spi_target") -> dict:
+        """Read the pod SPI target's status: byte count, transfer count, captured ring."""
+        code = (
+            "import annealage_pod.peripherals as p;"
+            "print(p.spi_target_status(name=%r))" % name
+        )
+        return _last_dict(self.exec(code))
+
     def peripheral_release(self, name: str = "*") -> dict:
         """Release one named pod peripheral instance, or all of them with '*'."""
         code = ("import annealage_pod.peripherals as p; print(p.release(%r))"

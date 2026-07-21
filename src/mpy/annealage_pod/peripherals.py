@@ -101,6 +101,51 @@ def i2c_target_regs(off=0, length=None, write=None, name="i2c_target"):
     return {"ok": True, "regs": list(buf[off:off + length])}
 
 
+# -- SPI target (PIO, stream/counter mode - Stage 1) -------------------------
+
+
+def spi_target(mode=0, bits=8, miso=_pins.DUT_SPI_MISO, mosi=_pins.DUT_SPI_MOSI,
+               sck=_pins.DUT_SPI_SCK, cs=_pins.DUT_SPI_CS, size=1024,
+               name="spi_target"):
+    """Bring up a persistent PIO SPI target on the pod (stream/counter mode).
+
+    The pod becomes the SPI peripheral: MISO replays a 0..255 counter for any
+    transfer length (unbounded, no growing buffer), MOSI is captured into a
+    `size`-byte overwrite ring (rounded up to a power of two). `spi_target_status`
+    reads the byte count and the captured ring. Re-calling with the same `name`
+    replaces the existing target. Bench default: MISO=GP16, MOSI=GP19, SCK=GP18,
+    CS=GP17 (SUGGESTED-untested; see _rp2_pinmap.py).
+
+    Register-file mode (spi_target_regs) and SPI modes 1-3 are Stage 2, not
+    implemented yet.
+    """
+    _drop(name)
+    from .spi_target import SpiTarget   # lazy import: keeps rp2/DMA off the
+                                         # peripherals import path for callers
+                                         # that never touch the SPI target
+    try:
+        tgt = SpiTarget(miso=miso, mosi=mosi, sck=sck, cs=cs, mode=mode,
+                        bits=bits, size=size, name=name)
+    except Exception as e:
+        # Validation (mode/bits/size out of Stage-1 range) and a PIO0
+        # PioConflict surface as a result, not a raised exception, so the host
+        # CLI/MCP report a clean error instead of a REPL traceback.
+        return {"ok": False, "name": name, "err": repr(e)}
+    _INST[name] = (tgt, None)
+    return {"ok": True, "name": name, "mode": mode, "bits": bits,
+            "miso": miso, "mosi": mosi, "sck": sck, "cs": cs, "size": tgt.size}
+
+
+def spi_target_status(name="spi_target"):
+    """Read the pod SPI target's status: byte count, transfer count, captured ring."""
+    rec = _INST.get(name)
+    if rec is None:
+        return {"ok": False, "err": "no such spi target: %s" % name}
+    d = rec[0].status()
+    d["name"] = name
+    return d
+
+
 # -- stateless convenience one-liners (GPIO, ADC) ----------------------------
 
 
