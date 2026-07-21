@@ -72,7 +72,7 @@ planned, and per-rail power telemetry plus opto-relays arrive with the carrier b
 | Flash a DUT over Wi-Fi | `[validated]` | nRF52 native-NVM + generic CMSIS-FLM loader |
 | GDB through the pod | `[validated]` | Real `arm-none-eabi-gdb` over Wi-Fi |
 | Logic analyser | `[validated]` | PIO capture, streamed to host, decoded to VCD |
-| DUT peripherals (I2C target, GPIO, ADC) | `[validated]` | Pod acts as I2C target / drives GPIO / reads ADC |
+| DUT peripherals (I2C + SPI target, GPIO, ADC) | `[validated]` | Pod acts as I2C target or SPI target (stream + register-file), drives GPIO / reads ADC |
 | Networking + discovery (mDNS, IPv6-first) | `[validated]` | Browsable `_annealage-pod._tcp`, dual-stack |
 | Management REPL over Wi-Fi | `[validated]` | Socket REPL, persistent auto-reconnect session |
 | USB/IP DUT export - enumerate + attach | `[validated]` | Host sees + binds the DUT |
@@ -151,7 +151,10 @@ decode. Runs on PIO0; coexists with SWD (PIO1) and Wi-Fi (PIO2) simultaneously.
 
 ### DUT-facing peripherals `[validated]`
 The pod can present hardware peripherals to a DUT-as-controller: a hardware I2C target
-(a register-file responder on I2C1, address-match/ACK/clock-stretch in silicon), plus
+(a register-file responder on I2C1, address-match/ACK/clock-stretch in silicon), a PIO
+SPI target (the pod is the SPI peripheral; stream/counter and register-file
+personalities, SPI modes 0-3, DMA-driven so no MicroPython in the per-byte path,
+byte-exact 125 kHz - 8 MHz against the test controller), plus
 GPIO drive/read and ADC sampling. Validated against an nRF52840 controller. This is a
 thin pass-through over MicroPython's `machine` module, not a gated API.
 
@@ -196,27 +199,29 @@ should be replaced. An agent adds it with, for example:
 claude mcp add pod -- pod-mcp
 ```
 
-The server wraps the `pod` client and exposes **34 tools**. Grouped:
+The server wraps the `pod` client and exposes **38 tools**. Grouped:
 
 - **Discovery / registry:** `discover_pods`, `pod_info`, `register_pod`, `dut` (probe and
   reconcile the wired DUT's SWD identity).
-- **SWD debug (requires the DUT wired + powered for SWD):** `flash_dut`, `reset_dut`,
-  `read_dut`, `gdb_dut`, `dut_halt`, `dut_resume`, `dut_read_reg`, `dut_write_reg`,
-  `dut_read_mem`, `dut_write_mem`. The register tools additionally require a halted core.
+- **SWD debug (requires the DUT wired + powered for SWD):** `flash_dut`, `erase_dut`,
+  `reset_dut`, `read_dut`, `gdb_dut`, `dut_halt`, `dut_resume`, `dut_read_reg`,
+  `dut_write_reg`, `dut_read_mem`, `dut_write_mem`. The register tools additionally require a halted core.
 - **USB/IP:** `dut_usb`, `attach_dut`, `detach_dut`, `ensure_dut_link`, `dut_exec`
   (run code on the DUT's own REPL over USB/IP).
 - **Pod-side exec / files:** `pod_exec`, `mount_dir`.
 - **Persistent REPL session:** `repl_open`, `repl_read`, `repl_send`, `repl_interrupt`,
   `repl_close`, `repl_list`.
-- **Peripherals:** `i2c_target`, `i2c_target_regs`, `gpio`, `adc`, `peripheral_release`,
-  `logic_analyse` (mutually exclusive with a live SWD session).
+- **Peripherals:** `i2c_target`, `i2c_target_regs`, `spi_target`, `spi_target_status`,
+  `spi_target_regs`, `gpio`, `adc`, `peripheral_release`, `logic_analyse` (the SPI target
+  and the logic analyser are mutually exclusive - both are PIO0 consumers).
 - **DUT UART (landing):** `tail_uart` (read-only tail of the DUT UART over TCP; the
   bridge is on-device, the DUT byte-path pending a loopback).
 
 Read vs write: `discover_pods`, `pod_info`, `dut`, `dut_usb`, `read_dut`, `dut_read_reg`,
-`dut_read_mem`, `adc`, `repl_read`, `repl_list`, `peripheral_release`, `tail_uart` are read/query;
-`flash_dut`, `reset_dut`, `attach_dut`, `dut_write_reg`, `dut_write_mem`, `gpio` (drive),
-`i2c_target*`, `mount_dir` mutate state. The SWD group is meaningful only when a DUT is
+`dut_read_mem`, `adc`, `spi_target_status`, `repl_read`, `repl_list`, `peripheral_release`,
+`tail_uart` are read/query; `flash_dut`, `erase_dut`, `reset_dut`, `attach_dut`,
+`dut_write_reg`, `dut_write_mem`, `gpio` (drive), `i2c_target*`, `spi_target`,
+`spi_target_regs`, `mount_dir` mutate state. The SWD group is meaningful only when a DUT is
 attached for debug; the register tools need the core halted first.
 
 ---
@@ -238,7 +243,7 @@ The real command names and ports (the current page invents `annealage-pod flash`
 5. **Drive the DUT:** `pod flash <label> firmware.bin`, `pod reset <label>`,
    `pod gdb <label>` (prints a `target extended-remote host:port` for your gdb),
    `pod la <label> --pins 16-19 --out cap.vcd`, `pod repl <label>` (live streaming REPL).
-6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 34 tools above are
+6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 38 tools above are
    available over Wi-Fi.
 
 Ports in use: socket REPL `8266`, USB/IP `3240`, GDB/DAP RPC `3335`, flash-in `3333`,
@@ -279,6 +284,7 @@ on the header. GP0/GP1 are reserved for the backup UART REPL.
 |---|---|---|
 | SWD debug / flash | GP14 SWDIO, GP15 SWCLK, GND | SWDIO, SWCLK, GND |
 | I2C (pod = target) | GP10 SDA, GP11 SCL, GND | SDA, SCL, GND |
+| SPI (pod = target) | GP16 MISO, GP17 CS, GP18 SCK, GP19 MOSI, GND | MISO, CS, SCK, MOSI, GND |
 | GPIO functional | any free GP, GND | pin under test |
 | ADC measure | GP26 / GP27 / GP28, GND | 0-3.3V analog node |
 | Logic-analyser taps | GP16-GP21 (default block), GND | signals to observe |
@@ -291,13 +297,13 @@ do not present these as finished):
 |---|---|---|
 | DUT reset (nRST) | GP13 | assigned in code, not yet hardware-tested |
 | DUT UART bridge | GP4 TX, GP5 RX (UART1) | suggested; bridge not implemented |
-| DUT SPI | GP18 SCK, GP19 MOSI, GP16 MISO, GP17 CS (SPI0) | suggested; overlaps the LA default block |
 | USB host (USB/IP) | native USB connector | cabling / VBUS / current limit unspecified |
 
-PIO block map (do not violate): PIO0 = logic analyser (free), PIO1 = SWD, PIO2 = CYW43
-Wi-Fi (reserved; building a state machine there hard-wedges the chip). GP16-GP19 are
-shared between the suggested SPI0 and the LA default block; use one at a time, or move the
-LA to GP2-GP9.
+PIO block map (do not violate): PIO0 = free block (logic analyser OR SPI target), PIO1 =
+SWD, PIO2 = CYW43 Wi-Fi (reserved; building a state machine there hard-wedges the chip).
+GP16-GP19 are shared between the SPI target and the LA default block, and both are PIO0
+consumers, so use one at a time (the runtime PIO arbiter enforces this), or move the LA to
+GP2-GP9.
 
 The deep, hobbyist-followable wiring reference (with electrical rules, the full pin-budget
 table, and collision warnings) lives at `docs/pod/hardware-setup.md`.
@@ -334,9 +340,9 @@ the older ESP32-S3 design. Specific fixes:
 - **CLI names** - `annealage-pod flash` and `pod uart tail dut` are invented. The real CLI
   is `pod <verb>` (`pod flash`, `pod reset`, `pod gdb`, `pod repl`, `pod la`, ...). There is
   no UART tail command.
-- **No MCP action list** - the page has none; use the 33-tool list above.
+- **No MCP action list** - the page has none; use the 38-tool list above.
 - **Missing the actual differentiators** - the on-pod debugger, GDB-through-pod, the PIO
-  logic analyser, IPv6-first discovery, and the 33-tool MCP surface are the strongest,
+  logic analyser, IPv6-first discovery, and the 38-tool MCP surface are the strongest,
   validated capabilities and are absent from the page.
 
 Note on positioning: "shipping now" for Pod (alongside Canvas) is retained per the product

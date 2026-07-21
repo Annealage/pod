@@ -54,6 +54,51 @@ has to match an instance's pins - which is why I2C1's GP10/GP11 pair is used
 rather than arbitrary pins. (A bus-event trace recipe using the IRQ-model
 target as a logger lives in the dev notes / the nRF bench writeup.)
 
+## SPI target
+
+`spi_target(mode=0, bits=8, miso=16, mosi=19, sck=18, cs=17, size=1024,
+personality="stream", table_size=256, name=...)` makes the pod an SPI
+*peripheral* (the DUT is the controller) on one PIO0 state machine, with DMA
+moving the byte streams so no MicroPython runs in the per-byte data path (the
+single-core cooperative runtime cannot afford a per-byte pump). 8-bit frames,
+MSB-first, SPI modes 0-3 (CPOL/CPHA selected at assembly time).
+
+Two personalities:
+
+- **stream** (default): MISO replays a 0..255 counter via a ring-read DMA over a
+  256-entry table, so the controller reads a predictable counter for any
+  transfer length with no growing buffer; MOSI is captured into a bounded
+  `size`-byte overwrite ring. `bytes_rx` (the DMA transfer-count register) is the
+  exact verification metric; `captured` exposes the ring tail.
+- **regfile**: a `[reg_ptr][data...]` register-file responder over `table_size`
+  bytes each way, the SPI analogue of the I2C target. A write CS stores its
+  payload into `write_table[offset+]` and repoints the pointer; a following read
+  CS serves `read_table[offset+]`. Bit7 of the command byte is the read/write
+  flag, the low 7 bits the offset. The pointer is moved only by the CS-deassert
+  soft IRQ, which parses the transaction and repoints the MISO DMA, never
+  mid-transfer - so a same-CS write-then-read turnaround is out of scope.
+
+`spi_target_status(name)` returns the live counters (bytes_rx, transfers_total,
+last_cs_len, and in regfile mode the parsed reg_ptr / offset / direction).
+`spi_target_regs(off, length, write, table, name)` reads or writes either
+backing table from the pod side - the regfile parallel to `i2c_target_regs`, so
+a test can seed the read table or inspect what the controller wrote.
+
+### Bench wiring
+
+Pod **GP16 = MISO**, **GP17 = CS**, **GP18 = SCK**, **GP19 = MOSI**. The pod is
+the peripheral, so MISO is a pod output and MOSI/SCK/CS are pod inputs. For the
+validated nRF52840 bench: pod GP19/MOSI <- nRF P0.20, GP18/SCK <- P0.17,
+GP17/CS <- P0.15, GP16/MISO -> P0.13. CS is active-low and its input is pulled
+up, so an undriven CS reads deasserted (a floating CS would otherwise clock the
+SM on line noise).
+
+Validated byte-exact against an nRF52840 driven as the SPI controller: stream
+and regfile personalities, regfile read and write through the real two-CS
+protocol, all four SPI modes, at SPI clocks from 125 kHz to 8 MHz. 8 MHz is the
+test controller's own ceiling (nRF SPIM0), not the pod's - the pod SM held every
+rate in range with no bit-slip, so its limit is higher and not yet characterised.
+
 ## GPIO / ADC
 
 `gpio(pin, value=None, mode, pull)` reads a pin (value omitted) or drives it
@@ -65,8 +110,11 @@ ergonomics, not because they need lifecycle management.
 
 The I2C target uses a hardware I2C instance and its two pins; it doesn't touch
 PIO, so it coexists with the SWD debug stack (PIO1) and Wi-Fi (PIO2 on the Pico
-2 W) without arbitration. The logic analyser is a PIO consumer on PIO0 (the free
-block) and is tracked, with SWD and Wi-Fi, through the runtime PIO arbiter.
+2 W) without arbitration. The SPI target and the logic analyser are both PIO0
+consumers (the free block) and are mutually exclusive: each claims PIO0 through
+the runtime PIO arbiter, so a live one blocks the other (PioConflict) rather
+than silently sharing the block. SWD (PIO1) and Wi-Fi (PIO2) are tracked
+alongside them in the arbiter.
 
 ## Deployment
 
