@@ -471,15 +471,25 @@ def handle_i2c_target_regs(label: str, off: int = 0, length=None, write=None,
 
 def handle_spi_target(label: str, mode: int = 0, bits: int = 8, miso: int = 16,
                       mosi: int = 19, sck: int = 18, cs: int = 17,
-                      size: int = 1024, name: str = "spi_target") -> dict:
-    """Bring up a persistent PIO SPI target on the pod (stream/counter mode)."""
+                      size: int = 1024, personality: str = "stream",
+                      table_size: int = 256, name: str = "spi_target") -> dict:
+    """Bring up a persistent PIO SPI target on the pod."""
     return _pod_for(label).spi_target(mode=mode, bits=bits, miso=miso, mosi=mosi,
-                                      sck=sck, cs=cs, size=size, name=name)
+                                      sck=sck, cs=cs, size=size,
+                                      personality=personality,
+                                      table_size=table_size, name=name)
 
 
 def handle_spi_target_status(label: str, name: str = "spi_target") -> dict:
     """Read the pod SPI target's status: byte count, transfer count, captured ring."""
     return _pod_for(label).spi_target_status(name=name)
+
+
+def handle_spi_target_regs(label: str, off: int = 0, length=None, write=None,
+                           table: str = "read", name: str = "spi_target") -> dict:
+    """Read or write the pod SPI target's regfile backing table from the host."""
+    return _pod_for(label).spi_target_regs(off=off, length=length, write=write,
+                                           table=table, name=name)
 
 
 def handle_peripheral_release(label: str, name: str = "*") -> dict:
@@ -1174,23 +1184,27 @@ def build_server():
             Tool(
                 name="spi_target",
                 description=(
-                    "Bring up a persistent PIO SPI target on the pod (stream/"
-                    "counter mode, Stage 1): MISO replays a 0..255 counter for "
-                    "any transfer length, MOSI is captured into a bounded "
-                    "overwrite ring. SPI mode 0, 8-bit only. Persists until "
-                    "released."
+                    "Bring up a persistent PIO SPI target on the pod: SPI mode "
+                    "0-3, 8-bit only. personality='stream' (default): MISO "
+                    "replays a 0..255 counter for any transfer length, MOSI is "
+                    "captured into a bounded overwrite ring. "
+                    "personality='regfile': a [reg_ptr][data...] register-file "
+                    "responder over table_size bytes each way (see "
+                    "spi_target_regs). Persists until released."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
-                        "mode": {"type": "integer", "enum": [0], "description": "SPI mode (only 0 in Stage 1).", "default": 0},
-                        "bits": {"type": "integer", "enum": [8], "description": "Frame width in bits (only 8 in Stage 1).", "default": 8},
+                        "mode": {"type": "integer", "enum": [0, 1, 2, 3], "description": "SPI mode.", "default": 0},
+                        "bits": {"type": "integer", "enum": [8], "description": "Frame width in bits (8-bit only).", "default": 8},
                         "miso": {"type": "integer", "description": "MISO GPIO.", "default": 16},
                         "mosi": {"type": "integer", "description": "MOSI GPIO.", "default": 19},
                         "sck": {"type": "integer", "description": "SCK GPIO.", "default": 18},
                         "cs": {"type": "integer", "description": "CS GPIO, active low.", "default": 17},
                         "size": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "MOSI capture retained-byte capacity, rounded up to a power of two (RAM used is 4x).", "default": 1024},
+                        "personality": {"type": "string", "enum": ["stream", "regfile"], "description": "Responder personality.", "default": "stream"},
+                        "table_size": {"type": "integer", "minimum": 1, "maximum": 4096, "description": "regfile personality: register table size per direction.", "default": 256},
                         "name": {"type": "string", "description": "Instance name.", "default": "spi_target"},
                     },
                     "required": ["label"],
@@ -1203,6 +1217,22 @@ def build_server():
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
+                        "name": {"type": "string", "description": "Instance name.", "default": "spi_target"},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
+                name="spi_target_regs",
+                description="Read or write the pod SPI target's regfile backing table from the host (personality=regfile only).",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "off": {"type": "integer", "description": "Register offset.", "default": 0},
+                        "length": {"type": "integer", "description": "Bytes to read (default: to end)."},
+                        "write": {"type": "array", "items": {"type": "integer"}, "description": "Bytes to write at off first."},
+                        "table": {"type": "string", "enum": ["read", "write"], "description": "Which backing table to access.", "default": "read"},
                         "name": {"type": "string", "description": "Instance name.", "default": "spi_target"},
                     },
                     "required": ["label"],
@@ -1429,10 +1459,18 @@ def build_server():
                     arguments.get("miso", 16), arguments.get("mosi", 19),
                     arguments.get("sck", 18), arguments.get("cs", 17),
                     arguments.get("size", 1024),
+                    arguments.get("personality", "stream"),
+                    arguments.get("table_size", 256),
                     arguments.get("name", "spi_target"))
             elif name == "spi_target_status":
                 result = await asyncio.to_thread(
                     handle_spi_target_status, arguments["label"],
+                    arguments.get("name", "spi_target"))
+            elif name == "spi_target_regs":
+                result = await asyncio.to_thread(
+                    handle_spi_target_regs, arguments["label"],
+                    arguments.get("off", 0), arguments.get("length"),
+                    arguments.get("write"), arguments.get("table", "read"),
                     arguments.get("name", "spi_target"))
             elif name == "peripheral_release":
                 result = await asyncio.to_thread(

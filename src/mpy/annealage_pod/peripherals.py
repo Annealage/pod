@@ -101,23 +101,26 @@ def i2c_target_regs(off=0, length=None, write=None, name="i2c_target"):
     return {"ok": True, "regs": list(buf[off:off + length])}
 
 
-# -- SPI target (PIO, stream/counter mode - Stage 1) -------------------------
+# -- SPI target (PIO, stream/counter or regfile personality) -----------------
 
 
 def spi_target(mode=0, bits=8, miso=_pins.DUT_SPI_MISO, mosi=_pins.DUT_SPI_MOSI,
                sck=_pins.DUT_SPI_SCK, cs=_pins.DUT_SPI_CS, size=1024,
-               name="spi_target"):
-    """Bring up a persistent PIO SPI target on the pod (stream/counter mode).
+               personality="stream", table_size=256, name="spi_target"):
+    """Bring up a persistent PIO SPI target on the pod.
 
-    The pod becomes the SPI peripheral: MISO replays a 0..255 counter for any
+    The pod becomes the SPI peripheral, SPI mode 0-3, 8-bit, MSB-first.
+    `personality='stream'` (default): MISO replays a 0..255 counter for any
     transfer length (unbounded, no growing buffer), MOSI is captured into a
-    `size`-byte overwrite ring (rounded up to a power of two). `spi_target_status`
-    reads the byte count and the captured ring. Re-calling with the same `name`
-    replaces the existing target. Bench default: MISO=GP16, MOSI=GP19, SCK=GP18,
-    CS=GP17 (SUGGESTED-untested; see _rp2_pinmap.py).
-
-    Register-file mode (spi_target_regs) and SPI modes 1-3 are Stage 2, not
-    implemented yet.
+    `size`-byte overwrite ring (rounded up to a power of two).
+    `personality='regfile'`: a [reg_ptr][data...] register-file responder
+    over `table_size` bytes each way (see spi_target_regs and
+    docs/esp32-s3/design/slaveio.md section 4); `size` still bounds the MOSI
+    capture ring, grown automatically to retain a full transaction.
+    `spi_target_status` reads the byte count, captured ring, and (regfile)
+    the register-pointer state. Re-calling with the same `name` replaces the
+    existing target. Bench default: MISO=GP16, MOSI=GP19, SCK=GP18, CS=GP17
+    (SUGGESTED-untested; see _rp2_pinmap.py).
     """
     _drop(name)
     from .spi_target import SpiTarget   # lazy import: keeps rp2/DMA off the
@@ -125,15 +128,17 @@ def spi_target(mode=0, bits=8, miso=_pins.DUT_SPI_MISO, mosi=_pins.DUT_SPI_MOSI,
                                          # that never touch the SPI target
     try:
         tgt = SpiTarget(miso=miso, mosi=mosi, sck=sck, cs=cs, mode=mode,
-                        bits=bits, size=size, name=name)
+                        bits=bits, size=size, personality=personality,
+                        table_size=table_size, name=name)
     except Exception as e:
-        # Validation (mode/bits/size out of Stage-1 range) and a PIO0
-        # PioConflict surface as a result, not a raised exception, so the host
-        # CLI/MCP report a clean error instead of a REPL traceback.
+        # Validation (mode/bits/size/personality/table_size out of range) and
+        # a PIO0 PioConflict surface as a result, not a raised exception, so
+        # the host CLI/MCP report a clean error instead of a REPL traceback.
         return {"ok": False, "name": name, "err": repr(e)}
     _INST[name] = (tgt, None)
     return {"ok": True, "name": name, "mode": mode, "bits": bits,
-            "miso": miso, "mosi": mosi, "sck": sck, "cs": cs, "size": tgt.size}
+            "personality": personality, "miso": miso, "mosi": mosi, "sck": sck,
+            "cs": cs, "size": tgt.size, "table_size": tgt.table_size}
 
 
 def spi_target_status(name="spi_target"):
@@ -144,6 +149,25 @@ def spi_target_status(name="spi_target"):
     d = rec[0].status()
     d["name"] = name
     return d
+
+
+def spi_target_regs(off=0, length=None, write=None, table="read",
+                    name="spi_target"):
+    """Read or write the pod SPI target's regfile backing table from the pod side.
+
+    `table` is 'read' (served on MISO) or 'write' (filled from MOSI). With
+    `write` set (an iterable of bytes), write it at `off` first; then return
+    the window [off:off+length] (length defaults to the rest of the table).
+    Only valid for a `personality='regfile'` instance; mirrors i2c_target_regs.
+    """
+    rec = _INST.get(name)
+    if rec is None:
+        return {"ok": False, "err": "no such spi target: %s" % name}
+    try:
+        regs = rec[0].regs(table, off=off, length=length, write=write)
+    except Exception as e:
+        return {"ok": False, "err": repr(e)}
+    return {"ok": True, "table": table, "regs": regs}
 
 
 # -- stateless convenience one-liners (GPIO, ADC) ----------------------------

@@ -813,7 +813,8 @@ def cmd_spi_target(args):
     pod = Pod.from_entry(entry)
     result = pod.spi_target(mode=args.mode, bits=args.bits, miso=args.miso,
                             mosi=args.mosi, sck=args.sck, cs=args.cs,
-                            size=args.size, name=args.name)
+                            size=args.size, personality=args.personality,
+                            table_size=args.table_size, name=args.name)
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -822,6 +823,16 @@ def cmd_spi_target_status(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
     result = pod.spi_target_status(name=args.name)
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_spi_regs(args):
+    entry = _require_pod(args.label)
+    pod = Pod.from_entry(entry)
+    write = [int(x, 0) for x in args.write] if args.write else None
+    result = pod.spi_target_regs(off=args.off, length=args.length, write=write,
+                                 table=args.table, name=args.name)
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -1168,10 +1179,10 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
 
     # spi-target
     p = sub.add_parser("spi-target",
-                       help="Bring up a PIO SPI target (stream/counter mode) on the pod")
+                       help="Bring up a PIO SPI target on the pod")
     p.add_argument("label")
-    p.add_argument("--mode", type=int, default=0, help="SPI mode 0-3 (default: 0; only 0 in Stage 1)")
-    p.add_argument("--bits", type=int, default=8, help="Frame width in bits (default: 8; only 8 in Stage 1)")
+    p.add_argument("--mode", type=int, default=0, help="SPI mode 0-3 (default: 0)")
+    p.add_argument("--bits", type=int, default=8, help="Frame width in bits (default: 8; 8-bit only)")
     p.add_argument("--miso", type=int, default=16, help="MISO GPIO (default: 16)")
     p.add_argument("--mosi", type=int, default=19, help="MOSI GPIO (default: 19)")
     p.add_argument("--sck", type=int, default=18, help="SCK GPIO (default: 18)")
@@ -1179,12 +1190,32 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--size", type=int, default=1024,
                    help="MOSI capture retained-byte capacity, rounded up to a "
                         "power of two, max 8192 (RAM used is 4x) (default: 1024)")
+    p.add_argument("--personality", choices=["stream", "regfile"], default="stream",
+                   help="stream: MISO counter + MOSI capture (default). "
+                        "regfile: [reg_ptr][data...] register-file responder")
+    p.add_argument("--table-size", type=int, default=256, dest="table_size",
+                   help="regfile personality: register table size per direction "
+                        "(default: 256, max 4096)")
     p.add_argument("--name", default="spi_target", help="Instance name")
 
     # spi-target-status
     p = sub.add_parser("spi-target-status",
                        help="Read the pod SPI target's status (byte count, captured ring)")
     p.add_argument("label")
+    p.add_argument("--name", default="spi_target", help="Instance name")
+
+    # spi-target-regs
+    p = sub.add_parser("spi-target-regs",
+                       help="Read/write the pod SPI target's regfile backing table "
+                            "(personality=regfile only)")
+    p.add_argument("label")
+    p.add_argument("--off", type=int, default=0, help="Register offset (default: 0)")
+    p.add_argument("--length", type=int, default=None,
+                   help="Bytes to read (default: to end)")
+    p.add_argument("--write", nargs="*", metavar="BYTE",
+                   help="Bytes to write at off first")
+    p.add_argument("--table", choices=["read", "write"], default="read",
+                   help="Which backing table to access (default: read)")
     p.add_argument("--name", default="spi_target", help="Instance name")
 
     # gpio
@@ -1268,6 +1299,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "i2c-regs": cmd_i2c_regs,
         "spi-target": cmd_spi_target,
         "spi-target-status": cmd_spi_target_status,
+        "spi-target-regs": cmd_spi_regs,
         "gpio": cmd_gpio,
         "adc": cmd_adc,
         "release": cmd_release,

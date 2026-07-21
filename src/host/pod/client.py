@@ -880,19 +880,23 @@ class Pod:
 
     def spi_target(self, mode: int = 0, bits: int = 8, miso: int = 16,
                    mosi: int = 19, sck: int = 18, cs: int = 17, size: int = 1024,
+                   personality: str = "stream", table_size: int = 256,
                    name: str = "spi_target") -> dict:
-        """Bring up a persistent PIO SPI target on the pod (stream/counter mode).
+        """Bring up a persistent PIO SPI target on the pod.
 
-        The pod becomes the SPI peripheral: MISO replays a 0..255 counter for
-        any transfer length, MOSI is captured into a `size`-byte overwrite ring.
-        Bench default pins: MISO=GP16, MOSI=GP19, SCK=GP18, CS=GP17. SPI mode 0,
-        8-bit only in Stage 1.
+        The pod becomes the SPI peripheral, SPI mode 0-3, 8-bit only. With
+        `personality='stream'` (default), MISO replays a 0..255 counter for
+        any transfer length, MOSI is captured into a `size`-byte overwrite
+        ring. With `personality='regfile'`, the pod is a [reg_ptr][data...]
+        register-file responder over `table_size` bytes each way (see
+        spi_target_regs). Bench default pins: MISO=GP16, MOSI=GP19, SCK=GP18,
+        CS=GP17.
         """
         code = (
             "import annealage_pod.peripherals as p;"
             "print(p.spi_target(mode=%d, bits=%d, miso=%d, mosi=%d, sck=%d,"
-            " cs=%d, size=%d, name=%r))"
-            % (mode, bits, miso, mosi, sck, cs, size, name)
+            " cs=%d, size=%d, personality=%r, table_size=%d, name=%r))"
+            % (mode, bits, miso, mosi, sck, cs, size, personality, table_size, name)
         )
         return _last_dict(self.exec(code))
 
@@ -901,6 +905,26 @@ class Pod:
         code = (
             "import annealage_pod.peripherals as p;"
             "print(p.spi_target_status(name=%r))" % name
+        )
+        return _last_dict(self.exec(code))
+
+    def spi_target_regs(self, off: int = 0, length: Optional[int] = None,
+                        write=None, table: str = "read",
+                        name: str = "spi_target") -> dict:
+        """Read or write the pod SPI target's regfile backing table from the host.
+
+        `table` is 'read' (served on MISO) or 'write' (filled from MOSI). With
+        `write` set (iterable of bytes), write it at `off` first; returns the
+        window [off:off+length] (length defaults to the rest of the table).
+        Only valid for a `personality='regfile'` instance.
+        """
+        write_arg = "None" if write is None else repr([int(b) & 0xFF for b in write])
+        len_arg = "None" if length is None else str(int(length))
+        code = (
+            "import annealage_pod.peripherals as p;"
+            "print(p.spi_target_regs(off=%d, length=%s, write=%s, table=%r,"
+            " name=%r))"
+            % (off, len_arg, write_arg, table, name)
         )
         return _last_dict(self.exec(code))
 
