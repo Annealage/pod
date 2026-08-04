@@ -783,3 +783,72 @@ class TestFlashDutLoaderConsistency:
             os.unlink(tmp)
 
         assert stream_cmds and "loader='native'" in stream_cmds[0]
+
+
+class TestRecoverDutRepl:
+    """recover_dut_repl drives the DUT tty (Ctrl-C then Ctrl-B) via a ReplSession;
+    patch the session with a recording fake so the sequence + detection are tested
+    without real hardware."""
+
+    def _install_fake(self, monkeypatch, text, *, open_raises=None):
+        events = []
+
+        class FakeSession:
+            def __init__(self, target, **kw):
+                events.append(("init", target, kw.get("reconnect")))
+
+            def open(self):
+                if open_raises is not None:
+                    raise open_raises
+                return self
+
+            def tell(self):
+                return 0
+
+            def interrupt(self):
+                events.append(("interrupt",))
+
+            def send(self, data, newline=True):
+                events.append(("send", data, newline))
+                return len(data)
+
+            def read_since(self, cursor):
+                return {"text": text, "cursor": len(text), "dropped": 0}
+
+            def close(self):
+                events.append(("close",))
+                return {"ok": True}
+
+        import pod.session
+        monkeypatch.setattr(pod.session, "ReplSession", FakeSession)
+        return events
+
+    def test_sends_ctrlc_then_ctrlb_and_detects_prompt(self, monkeypatch):
+        events = self._install_fake(monkeypatch, "\r\nMicroPython v1.29\r\n>>> ")
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        res = p.recover_dut_repl("/dev/ttyACM9", settle=0, read_wait=0)
+        assert res["ok"] is True
+        assert res["recovered"] is True
+        assert res["prompt_seen"] is True
+        # Ctrl-C (interrupt), then Ctrl-B (0x02), then a bare CR, in that order.
+        ops = [e for e in events if e[0] in ("interrupt", "send")]
+        assert ops[0] == ("interrupt",)
+        assert ops[1] == ("send", b"\x02", False)
+        assert ops[2] == ("send", b"\r", False)
+        assert ("close",) in events            # tty released (DTR restored to opener)
+        # Opened non-reconnecting on the given device.
+        assert events[0] == ("init", "/dev/ttyACM9", False)
+
+    def test_reports_raw_banner_without_prompt_as_not_recovered(self, monkeypatch):
+        self._install_fake(monkeypatch, "raw REPL; CTRL-B to exit\r\n")
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        res = p.recover_dut_repl("/dev/ttyACM9", settle=0, read_wait=0)
+        assert res["was_raw"] is True
+        assert res["recovered"] is False       # no friendly '>>>' came back
+
+    def test_busy_or_absent_tty_returns_error(self, monkeypatch):
+        self._install_fake(monkeypatch, "", open_raises=OSError("device busy"))
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        res = p.recover_dut_repl("/dev/ttyACM9")
+        assert res["ok"] is False
+        assert "could not open" in res["err"]

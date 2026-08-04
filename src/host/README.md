@@ -46,6 +46,8 @@ pod exec <label> "<code>"             run MicroPython on the pod, print stdout
 pod cp <label> <src> <dst>            copy a file (':path' = pod side)
 pod flash <label> <image> [--addr 0xADDR] [--target T]
 pod reset <label> [--mode sysreset|halt]
+pod recover-dut <label> <tty>         un-stick a forwarded DUT REPL (Ctrl-C + Ctrl-B); try before reset
+pod install-udev [--vid f055] [--print]  host setup: make ModemManager ignore forwarded DUTs (needs sudo)
 pod gdb <label> [--listen-port N] [--gdb-port 3335] [--no-reset-halt] [--resume-window-ms 200]
                                       (GDB path supports DWT data watchpoints: Z2/Z3/Z4 = write/read/access, plus FPB breakpoints)
 pod halt <label>                      halt the DUT core over SWD (hold; no auto-resume)
@@ -234,12 +236,21 @@ them, and `repl_send` mid-reconnect waits briefly then reports if still down.
 it running); add `--raw` for a full raw terminal (arrow keys, history, paste) -
 which is a one-shot passthrough and cannot chain setup.
 
-**DUT unresponsive / suspected wedged?** First try `reset_dut` (`pod reset
-<label>`): a SWD system reset re-inits the target's core *and* peripherals
-(including USB), so a DUT whose USB/serial hung (e.g. after a `soft_reset`)
-re-enumerates cleanly with no physical replug or power-cycle. Use `--mode halt`
-to catch the reset vector. Only resort to a physical power-cycle if the reset
-itself errors (SWD not connected). See `../../docs/pod/debug-stack.md`.
+**DUT REPL silent or won't enter raw repl?** First try `recover_dut_repl`
+(`pod recover-dut <label> <tty>`): it sends Ctrl-C then Ctrl-B over the DUT tty to
+break a running program and leave a stuck RAW repl for the friendly one -
+non-destructive, no reset. If the REPL is silent rather than mode-stuck, it is
+usually ModemManager on the host probing the DUT tty and toggling its DTR off
+(MicroPython gates stdout on DTR); install the ignore rule once with `sudo pod
+install-udev` and re-attach so it applies at enumeration.
+
+**DUT unresponsive / suspected wedged?** Then `reset_dut` (`pod reset <label>`):
+a SWD system reset re-inits the target's core *and* peripherals (including USB),
+so a DUT whose USB/serial hung (e.g. after a `soft_reset`) re-enumerates cleanly
+with no physical replug or power-cycle. Use `--mode halt` to catch the reset
+vector. Only resort to a physical power-cycle if the reset itself errors (SWD not
+connected). Full recovery ladder + the ModemManager fix:
+`../../docs/pod/troubleshooting.md`; SWD debug stack: `../../docs/pod/debug-stack.md`.
 
 ## Tests
 

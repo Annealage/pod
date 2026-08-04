@@ -283,3 +283,36 @@ class TestCarryOver:
         entry = {"addr4": "1.2.3.4"}
         carry_over(None, entry)
         assert entry == {"addr4": "1.2.3.4"}
+
+
+class TestInstallUdev:
+    def test_rule_scopes_to_vhci_and_ignores_mm(self):
+        text = cli._udev_rule_text([])
+        assert 'DRIVERS=="vhci_hcd"' in text
+        assert 'ENV{ID_MM_DEVICE_IGNORE}="1"' in text
+        assert "idVendor" not in text          # no per-VID line without --vid
+
+    def test_rule_adds_lowercased_vid_fallback(self):
+        text = cli._udev_rule_text(["F055"])
+        assert 'ATTR{idVendor}=="f055"' in text
+
+    def test_print_only_emits_and_writes_nothing(self, monkeypatch, capsys, tmp_path):
+        target = tmp_path / "rule.rules"
+        monkeypatch.setattr(sys, "argv",
+                            ["pod", "install-udev", "--print", "--path", str(target)])
+        rc = main()
+        assert rc == 0
+        assert "vhci_hcd" in capsys.readouterr().out
+        assert not target.exists()             # --print does not write
+
+    def test_writes_rule_and_reloads(self, monkeypatch, capsys, tmp_path):
+        import subprocess
+        target = tmp_path / "rule.rules"
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)  # stub udevadm
+        monkeypatch.setattr(sys, "argv",
+                            ["pod", "install-udev", "--path", str(target), "--vid", "f055"])
+        rc = main()
+        assert rc == 0
+        body = target.read_text()
+        assert 'ENV{ID_MM_DEVICE_IGNORE}="1"' in body
+        assert 'ATTR{idVendor}=="f055"' in body

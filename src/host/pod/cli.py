@@ -642,6 +642,73 @@ def cmd_reset(args):
     return 0 if result.get("ok") else 1
 
 
+def cmd_recover(args):
+    entry = _require_pod(args.label)
+    pod = Pod.from_entry(entry)
+    result = pod.recover_dut_repl(args.device, settle=args.settle,
+                                  read_wait=args.read_wait)
+    print(result)
+    return 0 if result.get("recovered") else 1
+
+
+_UDEV_RULE_PATH = "/etc/udev/rules.d/99-annealage-pod.rules"
+
+
+def _udev_rule_text(vids):
+    """The ModemManager-ignore udev rule for pod-forwarded DUTs.
+
+    Scope: devices imported over USB/IP are bound under the vhci_hcd virtual host
+    controller, so matching that ancestor restricts the rule to pod-forwarded
+    DUTs and leaves the host's own USB devices untouched. Extra idVendor matches
+    (--vid) cover setups where the vhci match needs a belt-and-braces fallback.
+    """
+    lines = [
+        "# Annealage Pod: stop ModemManager probing USB/IP-forwarded DUTs.",
+        "# MM opens a DUT's CDC-ACM tty and toggles DTR, which gates a MicroPython",
+        "# REPL's stdout (tud_cdc_connected()) so the DUT goes silent. Scoped to",
+        "# devices imported over USB/IP (bound under vhci_hcd) so only pod-forwarded",
+        "# DUTs are affected, not the host's own USB devices.",
+        'ACTION=="add|change", SUBSYSTEM=="usb", DRIVERS=="vhci_hcd", '
+        'ENV{ID_MM_DEVICE_IGNORE}="1"',
+    ]
+    for vid in vids:
+        lines.append('# Belt-and-braces: ignore MM for idVendor %s on any transport.'
+                     % vid)
+        lines.append('ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="%s", '
+                     'ENV{ID_MM_DEVICE_IGNORE}="1"' % vid.lower())
+    return "\n".join(lines) + "\n"
+
+
+def cmd_install_udev(args):
+    import subprocess as _sp
+    text = _udev_rule_text(args.vid or [])
+    if args.print_only:
+        print(text, end="")
+        return 0
+    path = args.path
+    try:
+        with open(path, "w") as f:
+            f.write(text)
+    except PermissionError:
+        sys.stderr.write(
+            "pod: need root to write %s. Re-run with sudo, or install manually:\n\n"
+            "  sudo tee %s <<'EOF'\n%sEOF\n"
+            "  sudo udevadm control --reload-rules && sudo udevadm trigger\n"
+            % (path, path, text))
+        return 1
+    ok = True
+    for cmd in (["udevadm", "control", "--reload-rules"], ["udevadm", "trigger"]):
+        try:
+            _sp.run(cmd, check=True)
+        except Exception as exc:  # noqa: BLE001 - reload needs root / udevadm
+            sys.stderr.write("pod: wrote %s but '%s' failed (%r); run it manually "
+                             "(needs root).\n" % (path, " ".join(cmd), exc))
+            ok = False
+    print("pod: installed ModemManager-ignore udev rule at %s" % path)
+    print("     re-attach the DUT so the rule applies at enumeration.")
+    return 0 if ok else 1
+
+
 def cmd_gdb(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
@@ -1103,6 +1170,30 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
                    help="Do not detach a live USB/IP session first (risks a wedge)")
 
+    # recover-dut
+    p = sub.add_parser(
+        "recover-dut",
+        help="Un-stick a forwarded DUT REPL (Ctrl-C + Ctrl-B over the tty)")
+    p.add_argument("label")
+    p.add_argument("device",
+                   help="DUT CDC tty from `pod attach` (e.g. /dev/ttyACM0)")
+    p.add_argument("--settle", type=float, default=0.4,
+                   help="Seconds to wait after each control char (default 0.4)")
+    p.add_argument("--read-wait", type=float, default=0.6, dest="read_wait",
+                   help="Seconds before reading the prompt back (default 0.6)")
+
+    # install-udev
+    p = sub.add_parser(
+        "install-udev",
+        help="Install a udev rule so ModemManager ignores pod-forwarded DUTs")
+    p.add_argument("--vid", action="append", metavar="VID",
+                   help="Also ignore MM for this idVendor (hex, e.g. f055); "
+                        "repeatable")
+    p.add_argument("--path", default=_UDEV_RULE_PATH,
+                   help="Rule file path (default %s)" % _UDEV_RULE_PATH)
+    p.add_argument("--print", action="store_true", dest="print_only",
+                   help="Print the rule instead of installing it")
+
     # gdb
     p = sub.add_parser("gdb", help="Start a local GDB RSP server to the DUT")
     p.add_argument("label")
@@ -1288,6 +1379,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "flash": cmd_flash,
         "erase": cmd_erase,
         "reset": cmd_reset,
+        "recover-dut": cmd_recover,
+        "install-udev": cmd_install_udev,
         "gdb": cmd_gdb,
         "halt": cmd_halt,
         "resume": cmd_resume,

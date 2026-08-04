@@ -50,6 +50,11 @@ and naming conventions.
 - `src/host/README.md`: usage of the host `pod` tooling - the CLI, the `Pod`
   Python client, the MCP server, and the discover/register/flash/reset/read
   workflow over Wi-Fi.
+- `docs/pod/troubleshooting.md`: consumer-facing recovery for a silent / stuck
+  forwarded DUT REPL - the `recover_dut_repl` (Ctrl-C/Ctrl-B) un-stick, the
+  ModemManager `pod install-udev` fix, and the reset/power-cycle escalation
+  ladder. The two ecosystem gotchas (host ModemManager toggling DTR; DUT latched
+  in RAW repl) that make a healthy DUT look dead.
 - `docs/pod/plan/`: the phased development plan. Start at `overview.md` (goals,
   architecture deltas, workstreams, phase map + gates, host `pod` CLI/MCP design,
   risk register), then `phase-1-foundation.md` .. `phase-7-integration-hardening.md`.

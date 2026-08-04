@@ -224,6 +224,13 @@ def handle_reset_dut(label: str, mode: str = "sysreset",
     return pod.reset_dut(mode=mode, keep_attached=keep_attached)
 
 
+def handle_recover_dut_repl(label: str, device: str, settle: float = 0.4,
+                            read_wait: float = 0.6) -> dict:
+    """Un-stick a forwarded MicroPython DUT REPL (Ctrl-C + Ctrl-B over its tty)."""
+    return _pod_for(label).recover_dut_repl(
+        device, settle=settle, read_wait=read_wait)
+
+
 def handle_read_dut(label: str, addr: int, length: int, out_path: str) -> str:
     """Read DUT memory to a host file via the pod (streamed, no pod FS)."""
     entry = get_pod(label)
@@ -813,6 +820,46 @@ def build_server():
                 },
             ),
             Tool(
+                name="recover_dut_repl",
+                description=(
+                    "Un-stick a forwarded MicroPython DUT REPL over its CDC tty - "
+                    "the FIRST, non-destructive thing to try when the DUT REPL is "
+                    "silent/unresponsive or mpremote reports 'could not enter raw "
+                    "repl', BEFORE reset_dut. Drives the tty directly (no SWD, no "
+                    "firmware assumptions): sends Ctrl-C (break a running program) "
+                    "then Ctrl-B (leave a stuck RAW repl for the friendly one - a "
+                    "failed raw-entry can latch the DUT in raw mode, where input "
+                    "never executes and nothing echoes, so it looks dead), and "
+                    "reports whether the friendly '>>>' came back (recovered). "
+                    "Pass the tty from attach_dut. If recovered=false, escalate: "
+                    "reset_dut (SWD reset -> fresh REPL), then a physical "
+                    "power-cycle. NB a forwarded CDC REPL that stays silent even "
+                    "after recovery is usually ModemManager on the host toggling "
+                    "DTR off (gating the DUT's stdout) - apply the udev "
+                    "ID_MM_DEVICE_IGNORE fix; see docs/pod/troubleshooting.md."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "device": {
+                            "type": "string",
+                            "description": "DUT CDC tty from attach_dut (e.g. /dev/ttyACM0).",
+                        },
+                        "settle": {
+                            "type": "number",
+                            "description": "Seconds to wait after each control char.",
+                            "default": 0.4,
+                        },
+                        "read_wait": {
+                            "type": "number",
+                            "description": "Seconds to wait before reading the prompt back.",
+                            "default": 0.6,
+                        },
+                    },
+                    "required": ["label", "device"],
+                },
+            ),
+            Tool(
                 name="read_dut",
                 description=(
                     "Read DUT memory to a host file via the pod, streamed from "
@@ -1385,6 +1432,11 @@ def build_server():
                     handle_reset_dut, arguments["label"],
                     arguments.get("mode", "sysreset"),
                     arguments.get("keep_attached", False))
+            elif name == "recover_dut_repl":
+                result = await asyncio.to_thread(
+                    handle_recover_dut_repl, arguments["label"],
+                    arguments["device"], arguments.get("settle", 0.4),
+                    arguments.get("read_wait", 0.6))
             elif name == "read_dut":
                 result = await asyncio.to_thread(
                     handle_read_dut, arguments["label"], arguments["addr"],

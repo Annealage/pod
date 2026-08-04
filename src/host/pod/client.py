@@ -517,6 +517,48 @@ class Pod:
         )
         return _last_dict(out)
 
+    def recover_dut_repl(self, device: str, *, settle: float = 0.4,
+                         read_wait: float = 0.6) -> dict:
+        """Un-stick a forwarded MicroPython DUT REPL over its CDC tty.
+
+        Build-agnostic (drives the tty; no SWD, no symbols, no firmware
+        assumptions): sends Ctrl-C to break any running program, then Ctrl-B to
+        leave a stuck raw REPL for the friendly one - a failed mpremote raw-entry
+        (its "raw REPL" banner gets gated when DTR is low) can latch the DUT in
+        raw mode, where CR-terminated lines never execute and nothing echoes, so
+        it looks dead. Then it nudges a fresh prompt and reports whether the
+        friendly '>>>' came back. Holding the tty open keeps DTR asserted so the
+        recovery output is not itself gated.
+
+        device: the DUT CDC tty returned by attach_dut (e.g. '/dev/ttyACM0').
+        Returns {ok, device, recovered, prompt_seen, was_raw, output}; on a busy
+        or absent tty returns {ok: False, err}. If it does not recover, escalate:
+        reset_dut (SWD reset -> fresh FRIENDLY REPL), then a power-cycle for a
+        truly wedged DUT.
+        """
+        from pod import session as _session
+        try:
+            sess = _session.ReplSession(
+                device, reconnect=False, read_timeout=0.2).open()
+        except Exception as exc:  # noqa: BLE001 - busy / absent tty
+            return {"ok": False, "device": device,
+                    "err": "could not open DUT tty %s: %r" % (device, exc)}
+        try:
+            cursor = sess.tell()
+            sess.interrupt()                    # Ctrl-C: break a running program
+            time.sleep(settle)
+            sess.send(b"\x02", newline=False)    # Ctrl-B: raw REPL -> friendly
+            time.sleep(settle)
+            sess.send(b"\r", newline=False)      # nudge a fresh prompt
+            time.sleep(read_wait)
+            text = sess.read_since(cursor).get("text", "")
+        finally:
+            sess.close()
+        prompt = ">>>" in text
+        return {"ok": True, "device": device, "recovered": prompt,
+                "prompt_seen": prompt, "was_raw": "raw REPL" in text,
+                "output": text}
+
     def dut_exec(self, code: str) -> dict:
         """Run MicroPython on the DUT (turnkey) and return its stdout.
 
