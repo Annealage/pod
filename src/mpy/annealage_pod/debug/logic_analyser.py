@@ -95,6 +95,7 @@ class LogicAnalyser:
         self.sm = None
         self.dma = None
         self.buf = None
+        self._prog = None      # the loaded capture program, for per-program teardown
 
     def _teardown(self):
         if self.dma is not None:
@@ -110,12 +111,16 @@ class LogicAnalyser:
             except Exception:
                 pass
             self.sm = None
-        # free this PIO block's instruction memory so repeated captures (and a
-        # later SWD rebuild, if the LA ever used PIO1) do not leak it
-        try:
-            rp2.PIO(self.sm_id // 4).remove_program()
-        except Exception:
-            pass
+        # Remove ONLY this LA's program, so a co-tenant on another SM of the same
+        # block (the SPI target on PIO0) keeps its program. The no-arg
+        # remove_program() wipes the WHOLE block and must never be used here; a
+        # dropped program self-heals on the next capture's start teardown.
+        if self._prog is not None:
+            try:
+                rp2.PIO(self.sm_id // 4).remove_program(self._prog)
+            except Exception:
+                pass
+            self._prog = None
 
     def release(self):
         self._teardown()
@@ -146,6 +151,7 @@ class LogicAnalyser:
         prog = _build_prog(self.width, trigger)
         self.sm = rp2.StateMachine(
             self.sm_id, prog, freq=int(actual), in_base=Pin(self.base_pin))
+        self._prog = prog      # track it so _teardown removes only this program
         self.buf = array.array("I", bytes(4 * words))
 
         use_dma = hasattr(rp2, "DMA")

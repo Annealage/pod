@@ -45,7 +45,7 @@ def _ensure(clkdiv=8):
     global _dp, _ap, _cm, _flash, _fpb, _dwt
     if _dp is None:
         from . import pio_arbiter
-        pio_arbiter.claim("swd", 1)   # PIO1 (PIO2 = CYW43 Wi-Fi, PIO0 = analyser)
+        pio_arbiter.claim("swd", 1, 0)   # PIO1 sm0 (PIO2 = CYW43; PIO0 = SPI/LA)
         _dp = swd_dap.DebugPort(swdio=_rp2_pinmap.SWD_SWDIO,
                                 swclk=_rp2_pinmap.SWD_SWCLK, sm_id=4, clkdiv=clkdiv)
         _ap = swd_dap.MEMAP(_dp)
@@ -586,12 +586,16 @@ _la_last = None   # last capture buffer, kept for in-pod inspection
 
 
 def la_capture(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
-               sm_id=0):
+               sm_id=1):
     # Capture into pod RAM and return a summary (the buffer is kept in _la_last
     # rather than shipped over the REPL). Use la_stream for the host path.
+    #
+    # Default PIO0 sm1 (not sm0): sm0 is the SPI target's default, so the LA and a
+    # live SPI target coexist on PIO0 out of the box (per-SM arbiter + per-program
+    # teardown). Any PIO0 SM works - the FIFO/DREQ addresses derive from sm_id.
     global _la_last
     from . import logic_analyser, pio_arbiter
-    pio_arbiter.claim("la", sm_id // 4)
+    pio_arbiter.claim("la", sm_id // 4, sm_id % 4)
     a = logic_analyser.LogicAnalyser(base_pin, width=width, sm_id=sm_id)
     try:
         r = a.capture(rate, depth, trigger)
@@ -603,7 +607,9 @@ def la_capture(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
 
 
 def la_stream(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
-              port=3336, sm_id=0, accept_timeout=20):
+              port=3336, sm_id=1, accept_timeout=20):
+    # sm_id defaults to PIO0 sm1 so the LA coexists with the SPI target (sm0) on
+    # PIO0 by default (see la_capture).
     # Capture and stream the raw packed words to the host over TCP, no pod FS.
     # Wire: a 16-byte little-endian header (words, width, clkdiv, complete) then
     # words*4 bytes of samples. The host computes rate = 150e6 / clkdiv.
@@ -615,7 +621,7 @@ def la_stream(base_pin, width=1, rate=1000000, depth=8000, trigger=None,
     import socket
     import struct as _struct
     from . import logic_analyser, pio_arbiter
-    pio_arbiter.claim("la", sm_id // 4)
+    pio_arbiter.claim("la", sm_id // 4, sm_id % 4)
     a = logic_analyser.LogicAnalyser(base_pin, width=width, sm_id=sm_id)
     err = None
     r = None

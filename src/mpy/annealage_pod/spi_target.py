@@ -227,13 +227,14 @@ class SpiTarget:
         self._read_addr = None
         self._read_buf = None
         self._write_table = None
+        self._prog = None      # the loaded PIO program, for per-program teardown
 
         # Claim the PIO block under THIS instance's name before touching any
         # hardware: a second SPI target (or a logic-analyser capture) on the
         # same block then raises PioConflict instead of silently building a
         # second state machine over this one. claim() is idempotent per owner,
         # so each live instance must claim under a distinct name.
-        pio_arbiter.claim(self._name, sm_id // 4)
+        pio_arbiter.claim(self._name, sm_id // 4, sm_id % 4)
         try:
             self._build(miso, mosi, sck, cs)
         except Exception:
@@ -266,6 +267,7 @@ class SpiTarget:
         self._sm = rp2.StateMachine(
             sm_id, prog, freq=SYS_HZ,
             out_base=miso_pin, in_base=Pin(mosi), jmp_pin=self._cs_pin)
+        self._prog = prog      # track it so deinit removes only this program
 
         if self._personality == "regfile":
             # Register-file MISO table: a `table_size`-word MSB-justified
@@ -541,10 +543,15 @@ class SpiTarget:
             except Exception:
                 pass
             self._rx = None
-        try:
-            rp2.PIO(self.sm_id // 4).remove_program()
-        except Exception:
-            pass
+        # Remove ONLY this SPI target's program, so a co-tenant on another SM of
+        # the same block (a logic-analyser capture on PIO0) keeps its program. The
+        # no-arg remove_program() wipes the whole block and must never be used here.
+        if self._prog is not None:
+            try:
+                rp2.PIO(self.sm_id // 4).remove_program(self._prog)
+            except Exception:
+                pass
+            self._prog = None
         self._sm = None
         self._read_addr = None
         self._read_buf = None
