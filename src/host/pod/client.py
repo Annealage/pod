@@ -373,6 +373,44 @@ class Pod:
         )
         return _last_dict(out)
 
+    # #35: a single flash_stream erase+program of a large region blocks the pod's
+    # single-core loop for seconds, starving cyw43 Wi-Fi RX until the TCP transfer
+    # resets (a ~420KB flash reproduces it; 64KB survives). Split a large region
+    # into <=64KB flashes - each a short op the loop recovers between - ending on
+    # absolute 64KB boundaries so no two sub-flashes share a flash page (their
+    # erases cannot wipe a neighbour's just-programmed data; 64KB is a multiple of
+    # every common flash page size).
+    _FLASH_STREAM_CHUNK = 64 * 1024
+
+    def _flash_region_chunked(self, addr: int, data: bytes, port: int,
+                              verify: bool, loader: str) -> dict:
+        """Flash a flash region in <=64KB page-aligned sub-flashes (#35), then
+        end-to-end verify the whole region once. Returns {ok, addr, bytes[,
+        verify, err]}. A sub-flash failure stops and names its address."""
+        total = len(data)
+        off = 0
+        while off < total:
+            sub_start = addr + off
+            boundary = ((sub_start // self._FLASH_STREAM_CHUNK) + 1) \
+                * self._FLASH_STREAM_CHUNK
+            sub_end = min(addr + total, boundary)
+            n = sub_end - sub_start
+            cmd = self._flash_stream_cmd(sub_start, n, port, verify, loader=loader)
+            sub = self._stream_region(cmd, data[off:off + n], n, port)
+            if not sub.get("ok"):
+                return {"ok": False, "addr": addr, "bytes": off,
+                        "err": "flash sub-chunk at 0x%08x failed: %s"
+                               % (sub_start, sub.get("err"))}
+            off += n
+        result = {"ok": True, "addr": addr, "bytes": total}
+        if verify:
+            v = self._verify_flashed(addr, data)
+            result["verify"] = v
+            if not v.get("ok"):
+                result["ok"] = False
+                result["err"] = "end-to-end verify: %s" % v.get("err")
+        return result
+
     def _verify_flashed(self, lma: int, source: bytes, clkdiv: int = 8,
                         retries: int = 3) -> dict:
         """End-to-end verify a just-flashed region: CRC32 the source bytes and
@@ -470,21 +508,13 @@ class Pod:
             if not erase_result.get("ok"):
                 return erase_result
 
-        total = os.path.getsize(image)
-        cmd = self._flash_stream_cmd(addr, total, port, verify, loader=bin_loader)
+        # Flash in <=64KB page-aligned sub-flashes (#35 loop-starvation) and
+        # end-to-end verify the whole image (a mid-stream drop the per-chunk
+        # verify misses). Read the image whole - flash images are small, and the
+        # verify reads it anyway.
         with open(image, "rb") as f:
-            result = self._stream_region(cmd, f, total, port)
-        # End-to-end verify: re-read the flashed range and compare its CRC to the
-        # source, catching a mid-stream chunk drop the per-chunk verify misses.
-        if verify and result.get("ok"):
-            with open(image, "rb") as f:
-                source = f.read()
-            v = self._verify_flashed(addr, source)
-            result["verify"] = v
-            if not v.get("ok"):
-                result["ok"] = False
-                result["err"] = "end-to-end verify: %s" % v.get("err")
-        return result
+            data = f.read()
+        return self._flash_region_chunked(addr, data, port, verify, bin_loader)
 
     def _flash_dut_elf(self, image: str, flash_ranges: list,
                        port: int = 3333, verify: bool = True,
@@ -517,27 +547,21 @@ class Pod:
         for lma, data, region in segments:
             size = len(data)
             if region == "flash":
-                cmd = self._flash_stream_cmd(lma, size, port, verify,
-                                             loader=loader)
+                # <=64KB sub-flashes (#35) + end-to-end CRC verify of the segment:
+                # the per-chunk verify in the program path cannot catch a chunk
+                # lost mid-stream, so the whole segment is re-read and compared.
+                seg_dict = self._flash_region_chunked(lma, data, port, verify,
+                                                      loader)
             else:
                 # Guard the RAM write with the DUT's DECLARED flash geometry, not
                 # the pod's nRF-hardcoded FLASH_TOP, so "no MEM-AP write into a
-                # flash region" is correct for the actual target.
+                # flash region" is correct for the actual target. RAM segments are
+                # MEM-AP writes (no erase/stream-drop risk) and are not CRC-checked.
                 cmd = self._write_mem_stream_cmd(lma, size, port,
                                                  protect=flash_ranges)
-            seg_dict = self._stream_region(cmd, data, size, port)
+                seg_dict = self._stream_region(cmd, data, size, port)
             seg_dict["lma"] = lma
             seg_dict["region"] = region
-            # End-to-end verify a flash segment: the per-chunk verify in the
-            # program path cannot catch a chunk lost mid-stream, so re-read the
-            # whole segment and compare its CRC to the source. RAM segments are
-            # MEM-AP writes (no erase/stream drop risk) and are not CRC-checked.
-            if seg_dict.get("ok") and region == "flash" and verify:
-                v = self._verify_flashed(lma, data)
-                seg_dict["verify"] = v
-                if not v.get("ok"):
-                    seg_dict["ok"] = False
-                    seg_dict["err"] = "end-to-end verify: %s" % v.get("err")
             seg_results.append(seg_dict)
             if not seg_dict.get("ok"):
                 # Fail fast: a partial flash is bad, so stop before writing more.

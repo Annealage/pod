@@ -971,3 +971,80 @@ class TestFlashVerify:
         assert res["ok"] is True
         assert called == []          # verify=False -> no read-back CRC
         assert "verify" not in res
+
+
+class TestFlashChunking:
+    """<=64KB page-aligned sub-flashes (task #35): _flash_region_chunked splits a
+    large region so no single flash op starves the pod loop, with boundaries on
+    absolute 64KB multiples so no two sub-flashes share a flash page."""
+
+    def _chunk_pod(self):
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        subs = []
+
+        def fake_cmd(a, n, port, verify, loader="native"):
+            subs.append((a, n))
+            return "CMD"
+
+        p._flash_stream_cmd = fake_cmd
+        p._stream_region = lambda cmd, payload, size, port: {"ok": True,
+                                                             "addr": 0, "bytes": size}
+        p._verify_flashed = lambda lma, source, **k: {"ok": True}
+        p._subs = subs
+        return p
+
+    def test_small_region_single_subflash(self):
+        p = self._chunk_pod()
+        r = p._flash_region_chunked(0x0, b"\x00" * 4096, 3333, True, "native")
+        assert r["ok"] is True
+        assert p._subs == [(0x0, 4096)]
+
+    def test_large_aligned_region_splits_at_64k(self):
+        p = self._chunk_pod()
+        data = b"\x00" * (150 * 1024)
+        r = p._flash_region_chunked(0x0, data, 3333, True, "native")
+        assert r["ok"] is True
+        assert p._subs == [(0x0, 65536), (0x10000, 65536), (0x20000, 22528)]
+        assert all(n <= 64 * 1024 for _, n in p._subs)
+        assert all(a % (64 * 1024) == 0 for a, _ in p._subs)
+
+    def test_unaligned_start_boundaries_stay_64k_aligned(self):
+        p = self._chunk_pod()
+        data = b"\x00" * (80 * 1024)
+        start = 0x1000
+        r = p._flash_region_chunked(start, data, 3333, True, "native")
+        assert r["ok"] is True
+        # first sub-flash runs only to the next 64KB boundary
+        assert p._subs[0] == (0x1000, 0x10000 - 0x1000)
+        assert all(n <= 64 * 1024 for _, n in p._subs)
+        for a, _ in p._subs[1:]:
+            assert a % (64 * 1024) == 0          # no shared page at a boundary
+        # sub-flashes tile [start, start+len) exactly, no gap/overlap
+        pos = start
+        for a, n in p._subs:
+            assert a == pos
+            pos += n
+        assert pos == start + len(data)
+
+    def test_subflash_failure_stops_and_names_addr(self):
+        p = self._chunk_pod()
+        calls = []
+
+        def failing_stream(cmd, payload, size, port):
+            calls.append(size)
+            return {"ok": len(calls) < 2, "err": "reset"}   # 2nd sub-flash fails
+
+        p._stream_region = failing_stream
+        r = p._flash_region_chunked(0x0, b"\x00" * (100 * 1024), 3333, True, "native")
+        assert r["ok"] is False
+        assert "0x00010000" in r["err"]          # the failing sub-flash address
+
+    def test_verify_runs_once_over_whole_region(self):
+        p = self._chunk_pod()
+        vcalls = []
+        p._verify_flashed = lambda lma, source, **k: (
+            vcalls.append((lma, len(source))) or {"ok": True})
+        data = b"\xaa" * (130 * 1024)
+        r = p._flash_region_chunked(0x0, data, 3333, True, "native")
+        assert r["ok"] is True
+        assert vcalls == [(0x0, 130 * 1024)]     # one verify, whole region
