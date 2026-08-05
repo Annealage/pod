@@ -364,6 +364,43 @@ class Pod:
         out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader))
         return _last_dict(out)
 
+    def flash_crc(self, addr: int, length: int, clkdiv: int = 8) -> dict:
+        """CRC32 of a DUT flash region, read back over SWD (the pod-side
+        ops.flash_crc). Returns {ok, crc, addr, length, err}."""
+        out = self.exec(
+            "import annealage_pod.debug.ops as o; "
+            "print(o.flash_crc(%d, %d, clkdiv=%d))" % (addr, length, clkdiv)
+        )
+        return _last_dict(out)
+
+    def _verify_flashed(self, lma: int, source: bytes, clkdiv: int = 8,
+                        retries: int = 3) -> dict:
+        """End-to-end verify a just-flashed region: CRC32 the source bytes and
+        compare to a pod-side read-back CRC over SWD.
+
+        The streaming program path only verifies bytes it programs per chunk, so
+        a chunk lost mid-stream (Wi-Fi reset) or a flaky per-chunk verify leaves a
+        silent hole. This re-reads the whole region and compares.
+
+        Retries the read-back to absorb the flaky-bulk-read pattern: it PASSES as
+        soon as one read-back CRC matches the source, and FAILS only if none of
+        `retries` reads match - a genuine hole never matches, while a transient
+        read glitch is corrected by a clean retry. Returns {ok, crc[, err]}.
+        """
+        import zlib
+        want = zlib.crc32(source) & 0xFFFFFFFF
+        last = "no read-back attempted"
+        for _ in range(max(1, retries)):
+            r = self.flash_crc(lma, len(source), clkdiv=clkdiv)
+            if not r.get("ok"):
+                last = "read-back error: %s" % r.get("err")
+                continue
+            got = int(r.get("crc", -1)) & 0xFFFFFFFF
+            if got == want:
+                return {"ok": True, "crc": want}
+            last = "crc mismatch: flash=0x%08x source=0x%08x" % (got, want)
+        return {"ok": False, "err": last, "source_crc": want}
+
     def flash_dut(self, image: str, target: Optional[str] = None,
                   addr: int = 0, verify: bool = True, port: int = 3333,
                   keep_attached: bool = False,
@@ -373,8 +410,16 @@ class Pod:
 
         The pod runs a TCP receiver that double-buffers the image into two RAM
         buffers (Wi-Fi fills one while SWD programs the other) and never writes
-        the image to its filesystem or reads the prior DUT contents. The host
-        starts that receiver over the REPL and streams the file straight to it.
+        the image to its filesystem. The host starts that receiver over the REPL
+        and streams the file straight to it.
+
+        With verify=True (default) each flash region is checked end-to-end after
+        programming: the region is re-read over SWD (ops.flash_crc) and its CRC32
+        compared to the source. The streaming program path verifies only the
+        bytes it programs per chunk, so a chunk lost mid-stream (e.g. a Wi-Fi
+        reset) would otherwise leave a silent hole; the read-back CRC catches it
+        (and retries absorb the occasional flaky bulk read). A verify failure
+        makes the result ok=False and names the region.
 
         For ELF images (detected by the 4-byte magic, not extension):
             - flash_ranges are derived from the DUT registry entry geometry
@@ -428,7 +473,18 @@ class Pod:
         total = os.path.getsize(image)
         cmd = self._flash_stream_cmd(addr, total, port, verify, loader=bin_loader)
         with open(image, "rb") as f:
-            return self._stream_region(cmd, f, total, port)
+            result = self._stream_region(cmd, f, total, port)
+        # End-to-end verify: re-read the flashed range and compare its CRC to the
+        # source, catching a mid-stream chunk drop the per-chunk verify misses.
+        if verify and result.get("ok"):
+            with open(image, "rb") as f:
+                source = f.read()
+            v = self._verify_flashed(addr, source)
+            result["verify"] = v
+            if not v.get("ok"):
+                result["ok"] = False
+                result["err"] = "end-to-end verify: %s" % v.get("err")
+        return result
 
     def _flash_dut_elf(self, image: str, flash_ranges: list,
                        port: int = 3333, verify: bool = True,
@@ -472,6 +528,16 @@ class Pod:
             seg_dict = self._stream_region(cmd, data, size, port)
             seg_dict["lma"] = lma
             seg_dict["region"] = region
+            # End-to-end verify a flash segment: the per-chunk verify in the
+            # program path cannot catch a chunk lost mid-stream, so re-read the
+            # whole segment and compare its CRC to the source. RAM segments are
+            # MEM-AP writes (no erase/stream drop risk) and are not CRC-checked.
+            if seg_dict.get("ok") and region == "flash" and verify:
+                v = self._verify_flashed(lma, data)
+                seg_dict["verify"] = v
+                if not v.get("ok"):
+                    seg_dict["ok"] = False
+                    seg_dict["err"] = "end-to-end verify: %s" % v.get("err")
             seg_results.append(seg_dict)
             if not seg_dict.get("ok"):
                 # Fail fast: a partial flash is bad, so stop before writing more.

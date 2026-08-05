@@ -371,6 +371,41 @@ def dump_stream(addr, length, port=3334, clkdiv=8):
     return {"ok": err is None, "addr": addr, "bytes": length, "err": err}
 
 
+def flash_crc(addr, length, clkdiv=8):
+    # CRC32 of a DUT flash region, read over SWD - the end-to-end integrity check
+    # the streaming program path lacks. flash_stream verifies each chunk it
+    # programs, but cannot see a chunk lost mid-stream (Wi-Fi reset) or a flaky
+    # per-chunk verify; re-reading the whole region and folding a CRC catches any
+    # such hole. Reads in blocks via the MEM-AP so the region is never held whole
+    # in pod RAM (mirrors dump_stream). The host compares this against the CRC of
+    # the source image.
+    import binascii
+    import struct
+    dp, ap, cm, fl = _ensure(clkdiv)
+    if not cm.is_halted():
+        cm.halt()
+    err = None
+    crc = 0
+    try:
+        a = addr
+        left = length
+        while left > 0:
+            nwords = 256 if left >= 1024 else (left + 3) // 4
+            buf = b"".join(struct.pack("<I", w)
+                           for w in ap.read_block32(a, nwords))
+            if len(buf) > left:
+                buf = buf[:left]
+            crc = binascii.crc32(buf, crc)
+            a += len(buf)
+            left -= len(buf)
+    except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+        err = repr(e)
+    finally:
+        cm.resume()
+    return {"ok": err is None, "crc": crc & 0xFFFFFFFF, "addr": addr,
+            "length": length, "err": err}
+
+
 def reset(mode="sysreset", clkdiv=8):
     dp, ap, cm, fl = _ensure(clkdiv)
     if mode == "halt":

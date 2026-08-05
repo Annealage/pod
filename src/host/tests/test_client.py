@@ -709,6 +709,9 @@ class TestFlashDutLoaderConsistency:
                     "loader": "flm"}
 
         monkeypatch.setattr(p, "_stream_region", _fake_stream)
+        # This test is about loader threading, not the end-to-end verify; stub the
+        # read-back so it does not add its own exec call and shift call_args.
+        monkeypatch.setattr(p, "_verify_flashed", lambda *a, **k: {"ok": True})
 
         p._flash_dut_elf("fake.elf", flash_ranges=[(0x0, 0x100000)],
                          port=3333, verify=True, mass_erase=True, loader="flm")
@@ -748,6 +751,8 @@ class TestFlashDutLoaderConsistency:
             return {"ok": True, "addr": 0, "bytes": size, "err": None}
 
         monkeypatch.setattr(p, "_stream_region", _fake_stream)
+        # Loader-threading test; stub the read-back verify (see above).
+        monkeypatch.setattr(p, "_verify_flashed", lambda *a, **k: {"ok": True})
 
         p.flash_dut("fake.elf", mass_erase=True, loader="native")
 
@@ -852,3 +857,117 @@ class TestRecoverDutRepl:
         res = p.recover_dut_repl("/dev/ttyACM9")
         assert res["ok"] is False
         assert "could not open" in res["err"]
+
+
+class TestFlashVerify:
+    """End-to-end flash verify (task #11): _verify_flashed CRC-compares a
+    just-flashed region against the source, with retries so a flaky read cannot
+    false-fail. flash_dut wires it in so a mid-stream chunk drop fails loudly."""
+
+    def _pod_with_crc(self, crc_returns):
+        """Pod whose flash_crc yields the given result dicts in sequence."""
+        import zlib  # noqa: F401 - referenced by callers building expectations
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        seq = list(crc_returns)
+        calls = []
+
+        def fake_crc(addr, length, clkdiv=8):
+            calls.append((addr, length))
+            return seq.pop(0)
+
+        p.flash_crc = fake_crc
+        p._crc_calls = calls
+        return p
+
+    def test_verify_passes_on_match(self):
+        import zlib
+        src = b"firmware-bytes-example" * 8
+        want = zlib.crc32(src) & 0xFFFFFFFF
+        p = self._pod_with_crc([{"ok": True, "crc": want}])
+        v = p._verify_flashed(0x1000, src)
+        assert v["ok"] is True and v["crc"] == want
+
+    def test_verify_fails_on_persistent_mismatch(self):
+        src = b"x" * 100
+        bad = 0xDEADBEEF
+        p = self._pod_with_crc([{"ok": True, "crc": bad}] * 3)
+        v = p._verify_flashed(0x1000, src, retries=3)
+        assert v["ok"] is False
+        assert "crc mismatch" in v["err"]
+        assert len(p._crc_calls) == 3   # exhausted all retries
+
+    def test_verify_passes_when_a_retry_reads_clean(self):
+        import zlib
+        src = b"data" * 50
+        want = zlib.crc32(src) & 0xFFFFFFFF
+        # first read flaky (wrong crc), second read clean (matches)
+        p = self._pod_with_crc([{"ok": True, "crc": 0x1234},
+                                {"ok": True, "crc": want}])
+        v = p._verify_flashed(0x2000, src, retries=3)
+        assert v["ok"] is True
+        assert len(p._crc_calls) == 2   # stopped as soon as it matched
+
+    def test_verify_tolerates_read_error_then_matches(self):
+        import zlib
+        src = b"seg" * 40
+        want = zlib.crc32(src) & 0xFFFFFFFF
+        p = self._pod_with_crc([{"ok": False, "err": "flaky read"},
+                                {"ok": True, "crc": want}])
+        v = p._verify_flashed(0x3000, src, retries=3)
+        assert v["ok"] is True
+
+    def test_flash_dut_flat_fails_when_verify_mismatches(self, monkeypatch, tmp_path):
+        # A mid-stream drop: streaming reports ok, but the read-back CRC never
+        # matches -> flash_dut must return ok=False naming the verify failure.
+        import pod.elf_loader as el
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [])
+        monkeypatch.setattr(el, "is_elf", lambda path: False)
+        img = tmp_path / "fw.bin"
+        img.write_bytes(b"\xa5" * 4096)
+        p = Pod(addr4="10.0.0.1")
+        monkeypatch.setattr(p, "_stream_region",
+                            lambda cmd, payload, size, port: {"ok": True, "addr": 0, "bytes": size})
+        monkeypatch.setattr(p, "flash_crc",
+                            lambda addr, length, clkdiv=8: {"ok": True, "crc": 0x0})  # never matches
+        res = p.flash_dut(str(img))
+        assert res["ok"] is False
+        assert "end-to-end verify" in res["err"]
+        assert res["verify"]["ok"] is False
+
+    def test_flash_dut_flat_passes_when_verify_matches(self, monkeypatch, tmp_path):
+        import zlib
+        import pod.elf_loader as el
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [])
+        monkeypatch.setattr(el, "is_elf", lambda path: False)
+        data = b"\xa5" * 4096
+        img = tmp_path / "fw.bin"
+        img.write_bytes(data)
+        want = zlib.crc32(data) & 0xFFFFFFFF
+        p = Pod(addr4="10.0.0.1")
+        monkeypatch.setattr(p, "_stream_region",
+                            lambda cmd, payload, size, port: {"ok": True, "addr": 0, "bytes": size})
+        monkeypatch.setattr(p, "flash_crc",
+                            lambda addr, length, clkdiv=8: {"ok": True, "crc": want})
+        res = p.flash_dut(str(img))
+        assert res["ok"] is True
+        assert res["verify"]["ok"] is True
+
+    def test_flash_dut_skips_verify_when_disabled(self, monkeypatch, tmp_path):
+        import pod.elf_loader as el
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [])
+        monkeypatch.setattr(el, "is_elf", lambda path: False)
+        img = tmp_path / "fw.bin"
+        img.write_bytes(b"\x00" * 512)
+        p = Pod(addr4="10.0.0.1")
+        monkeypatch.setattr(p, "_stream_region",
+                            lambda cmd, payload, size, port: {"ok": True, "addr": 0, "bytes": size})
+        called = []
+        monkeypatch.setattr(p, "flash_crc",
+                            lambda addr, length, clkdiv=8: called.append(1) or {"ok": True, "crc": 0})
+        res = p.flash_dut(str(img), verify=False)
+        assert res["ok"] is True
+        assert called == []          # verify=False -> no read-back CRC
+        assert "verify" not in res
