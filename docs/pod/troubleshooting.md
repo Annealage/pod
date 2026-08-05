@@ -1,20 +1,44 @@
-# RP2350 pod: DUT troubleshooting (silent / stuck REPL)
+# RP2350 pod: DUT troubleshooting (silent / stuck / 0xff-flooding REPL)
 
 Practical recovery for the most common consumer-facing friction: a DUT forwarded
-over the pod's USB/IP appears dead - its REPL is silent, or `mpremote` says
-"could not enter raw repl". Almost always the DUT and the pod are both fine; the
-cause is one (or both) of two ecosystem issues on the host side. This is written
-so a person or a Claude session can get unstuck without a hardware teardown.
+over the pod's USB/IP appears dead - its REPL is silent, floods `0xff`, or
+`mpremote` says "could not enter raw repl". Almost always the DUT and the pod are
+both fine; the cause is one of a small set of DUT-state / host-ecosystem issues,
+each with a distinguishing symptom. This is written so a person or a Claude
+session can get unstuck without a hardware teardown.
 
-The short version: run `recover_dut_repl` first, install the ModemManager udev
-rule once, and only escalate to a reset / power-cycle if those do not fix it.
+Do NOT assume "the USB/IP forward is unreliable" - it is reliable once the DUT is
+correctly flashed, not DTR-gated by ModemManager, and not stuck in raw mode. Each
+cause below is distinguishable; pick by the symptom rather than guessing.
 
-## Symptom: forwarded DUT REPL is silent or won't enter raw REPL
+## Which symptom? (decision tree)
+
+Match the exact symptom to the cause, then jump to its fix:
+
+- REPL is **silent** - input accepted (echoes drain) but no output at all
+  -> Cause 2 (ModemManager gated DTR, so stdout is dropped).
+- **`mpremote` "could not enter raw repl"** but a raw pyserial read (stripping
+  `0xff`) works -> Cause 1 (RAW-mode latch) OR Cause 3 (a `0xff` flood buries the
+  banner). Tell them apart: is there a *sustained* `0xff` flood? -> Cause 3.
+- **Sustained `0xff` flood** (tens of KB of `0xff`, sometimes with a real prompt
+  buried in it) -> Cause 3 (the DUT is transmitting `0xff` - almost always an
+  INCOMPLETE FLASH; a hole over rodata prints `0xff`). NOT a pod relay bug.
+- **`0xff` flood then goes quiet** on a fresh attach, after prior attach/detach
+  churn -> Cause 4 (a stale usbip export slot); clears with `usbip.stop/start`.
+- Input **drains from stdin but never executes** (no echo, no result) -> Cause 1
+  (RAW-mode latch).
+
+The short version: run `recover_dut_repl` first (Cause 1); if it floods `0xff`,
+suspect an incomplete flash (Cause 3) or a stale slot (Cause 4); if it is silent,
+install the ModemManager udev rule (Cause 2); escalate to reset / power-cycle only
+if those do not fix it.
+
+## Symptom: forwarded DUT REPL is silent, floods 0xff, or won't enter raw REPL
 
 You attached the DUT (`attach_dut` -> a `/dev/ttyACM*`), but:
 - opening the tty and sending commands gets no response, no echo, no `>>>`; or
 - `mpremote` / a raw-REPL client reports "could not enter raw repl"; or
-- a fresh attach floods `0xff` then goes quiet.
+- a fresh attach floods `0xff` (sustained, or then goes quiet).
 
 ### Cause 1 - the DUT REPL is latched in RAW mode
 
@@ -59,6 +83,44 @@ ModemManager` (blunt, affects real modems too), or check who holds the port with
 `fuser /dev/ttyACM0`. Note pyserial deasserts DTR on close, so hold the port with
 a long-lived opener (`mpremote`) rather than repeated open/close cycles.
 
+### Cause 3 - a sustained 0xff flood: the DUT firmware is incompletely flashed
+
+If the forwarded REPL floods a *sustained* run of `0xff` (tens of KB, sometimes
+with a real prompt fragment buried in it) and `mpremote` can't match the raw-REPL
+banner, the DUT is genuinely transmitting those `0xff` bytes - it is NOT a pod
+relay bug (the pod faithfully forwards what the DUT sends). The usual cause is an
+INCOMPLETE FLASH: a chunk dropped mid-flash left a hole of erased `0xff` flash,
+and if that hole lands on a rodata string the firmware prints (e.g. the raw-REPL
+banner), `strlen` runs over the `0xff` and emits a long `0xff` run.
+
+Fix: re-flash a complete image and verify it.
+
+    pod flash <label> firmware.bin --addr 0 --mass-erase   # or flash_dut MCP tool
+
+`flash_dut` now does an end-to-end read-back verify (CRC of each flashed region
+vs the source) and fails loudly on a hole, so a fresh flash cannot leave a silent
+gap. An image flashed *before* that verify existed can still carry one - re-flash
+with `mass_erase`. To confirm a suspected hole directly, CRC-map the region over
+SWD (`ops.flash_crc(addr, len)`): an all-`0xff` region returns the CRC of `0xff`
+bytes, which a real image never matches. See `debug-stack.md` (flash) and the
+`pod-usbip-0xff-flood-dut-side` auto-memory for the worked example.
+
+(A second, firmware-side source of a real `0xff` flood is the nRF USBD re-clocking
+a stale EPIN EasyDMA buffer when its CDC tx_ff is empty - a DUT tinyusb/driver
+bug, not the pod. Same memory covers how to tell it apart from a flash hole with
+an SWD read of tx_ff + the EPIN buffer.)
+
+### Cause 4 - a 0xff flood that then goes quiet: a stale usbip export slot
+
+After repeated attach/detach churn (or a DUT re-enumeration), the pod's usbip
+export slot can go stale and flood ~30KB of `0xff` on a fresh attach before
+settling. Distinct from Cause 3 (that flood is sustained and is real DUT data);
+this one is the pod's stale slot and clears with a server restart:
+
+    pod exec <label> "import usbip; usbip.stop(); usbip.start()"
+
+Then re-attach. See the `pod-usbip-stale-slot-reenum` auto-memory.
+
 ## Recovery escalation ladder
 
 Try these in order; stop at the first that works.
@@ -67,6 +129,8 @@ Try these in order; stop at the first that works.
    stuck RAW mode and a running/looping program. Non-destructive.
 2. Install the ModemManager udev rule (`pod install-udev`) + re-attach, if the
    REPL is silent rather than mode-stuck (output produced but gated by DTR=0).
+   If instead it floods `0xff`: `usbip.stop/start` for a stale slot (Cause 4),
+   or re-flash with `mass_erase` for an incomplete flash (Cause 3).
 3. `reset_dut` (`pod reset`) - a SWD system reset re-inits the DUT core AND its
    peripherals (incl. USB), so it comes back with a fresh FRIENDLY REPL and
    re-enumerates cleanly. No physical replug needed. Use when 1+2 don't recover it
@@ -91,8 +155,21 @@ single bits on this rig):
   or never produced).
 - an SWD-observable command (e.g. a GPIO `OUTSET` then read the latch back) proves
   execute-vs-not independent of the CDC path.
+- `ops.flash_crc(addr, len)` - CRC a flash region; an all-`0xff` region (a flash
+  hole, Cause 3) returns the CRC of `0xff` bytes, which a real image never matches.
+  Map the region to find a hole; re-flash with `mass_erase` to fill it.
+- for a real `0xff` flood that is NOT a flash hole, read the DUT's CDC `tx_ff`
+  wr/rd (empty while it floods = the nRF EPIN re-clocking a stale buffer) and, to
+  find what fills it, a DWT data-write watchpoint on the nRF `EPIN.MAXCNT` /
+  an FPB breakpoint on `mp_hal_stdout_tx_str`. This is deep firmware-side work.
 
-Full diagnostic recipe and the worked example behind this doc: the
-`pod-usbip-dtr-drop` auto-memory. The relevant point for consumers is that both
-causes above are handled by steps 1-2; the SWD reads are only needed when
-diagnosing a new failure shape.
+Prove pod-vs-DUT before concluding: the pod's USB relay has been exonerated
+repeatedly (DTR forwarding, the host-controller completion path). A `0xff` flood
+is real DUT-transmitted data (a flash hole or the EPIN phantom), not a pod relay
+bug - the poison-the-host-DPRAM test in `pod-usbip-0xff-flood-dut-side` proves it.
+
+Worked examples and the full SWD recipes live in the auto-memories:
+`pod-usbip-dtr-drop` (DTR gating), `pod-usbip-0xff-flood-dut-side` (the `0xff`
+flood, flash-hole and EPIN), `pod-usbip-stale-slot-reenum` (Cause 4). For most
+consumers Causes 1-2 are handled by steps 1-2 of the ladder and Cause 3 by a
+re-flash; the SWD reads are only needed when diagnosing a new failure shape.

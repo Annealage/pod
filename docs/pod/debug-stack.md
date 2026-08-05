@@ -76,6 +76,15 @@ machines). All functions take an optional `clkdiv` (default 8).
 - `flash_file(addr, path, verify=True, chunk_words=256, loader="native") -> {ok, addr, bytes, ms}`
   Program from a pod-resident file in bounded chunks. Use when the image is
   already on the pod; otherwise prefer `flash_stream` (no filesystem).
+- `flash_crc(addr, length, clkdiv=8) -> {ok, crc, addr, length, err}` - CRC32 of a
+  flash region read back over SWD (MEM-AP block reads, never held whole in RAM).
+  The end-to-end integrity check the streaming path lacks: `flash_stream` verifies
+  each chunk it programs, but cannot see a chunk lost mid-stream, so `Pod.flash_dut`
+  (verify=True, default) re-reads each flashed region and compares this CRC to the
+  source, failing loudly on a hole. A silent flash hole is the classic cause of a
+  forwarded DUT REPL flooding `0xff` (an erased-`0xff` gap over a printed rodata
+  string); an all-`0xff` region returns the CRC of `0xff` bytes, which a real image
+  never matches. See `troubleshooting.md` Cause 3.
 
 Both take a `loader` selecting the flash backend: `loader="native"` (default) is
 the per-family native path (the validated nRF52 NVMC loader, `flash_nrf52`);

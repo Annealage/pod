@@ -673,9 +673,13 @@ def build_server():
                     "Run MicroPython on the DUT (turnkey): ensure the pod USB/IP "
                     "link, attach the DUT, and exec the code over its own CDC "
                     "REPL. Returns {tty, returncode, stdout, stderr}. For pod-side "
-                    "code use pod_exec instead. Relies on the USB/IP-forwarded DUT "
-                    "REPL, which is not yet reliable on RP2350 (intermittent), so "
-                    "this may fail to produce a tty."),
+                    "code use pod_exec instead. The forwarded REPL is reliable "
+                    "when the DUT is correctly flashed, is not DTR-gated by host "
+                    "ModemManager (run `pod install-udev` once), and is not stuck "
+                    "in raw mode (recover_dut_repl). If it fails or floods 0xff / "
+                    "'could not enter raw repl', do NOT assume a pod limitation - "
+                    "walk docs/pod/troubleshooting.md (a 0xff flood is usually an "
+                    "incomplete flash or a stale usbip slot, not a pod bug)."),
                 inputSchema={
                     "type": "object",
                     "properties": {
