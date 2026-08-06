@@ -139,10 +139,13 @@ and over the Wi-Fi socket REPL for the network proof.
   through the pod to an nRF52840: reset-halt, read registers/memory, an FPB
   hardware breakpoint that hit, backtrace, single-step, continue + re-hit (global
   observed incrementing), clean detach. `pod gdb <label>` and a `gdb` MCP tool.
-- **PIO SWD clock (D1.1 partial)**: `clkdiv=8` = 9.375 MHz reliable (100/100 DPIDR
-  clean); hard cliff at 12.5 MHz (input-sampling phase). Just under the >= 10 MHz
-  gate target; needs PIO input-phase tuning. RP-target + multidrop (TARGETSEL)
-  remain blocked (no RP DUT wired).
+- **PIO SWD clock (D1.1 partial)**: the spike ran `clkdiv=8` = 9.375 MHz write
+  and read 100/100 DPIDR clean, but that clock is over the nRF52840's 8 MHz
+  SWDCLK max - the clean run was rig margin, not spec, and it later showed
+  intermittent ACK=3 / parity errors on a cold DUT. The default is now
+  `clkdiv=16` (spec-compliant; `swd_pio.DEFAULT_CLKDIV`). Hard cliff at 12.5 MHz
+  (input-sampling phase). A clean >= 10 MHz write clock needs PIO input-phase
+  tuning. RP-target + multidrop (TARGETSEL) remain blocked (no RP DUT wired).
 - **PIO/core coexistence (D1.2 partial)**: CYW43 Wi-Fi + PIO SWD (PIO1 SM4)
   running together, 300/300 MEM-AP read-pairs clean while commands flow over
   Wi-Fi; Wi-Fi stays connected and mDNS keeps answering throughout. The

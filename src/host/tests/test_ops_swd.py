@@ -25,6 +25,14 @@ for _name in ("annealage_pod.debug.swd_dap", "annealage_pod.debug.flash_nrf52",
               "annealage_pod.debug.netutil", "annealage_pod._rp2_pinmap"):
     sys.modules.setdefault(_name, types.ModuleType(_name))
 
+# ops imports swd_pio directly for DEFAULT_CLKDIV (used in its entry-point
+# default args, evaluated at import), so the stub must carry that attribute; the
+# real swd_pio pulls in rp2. Value mirrors swd_pio.DEFAULT_CLKDIV.
+_swd_pio_stub = sys.modules.setdefault(
+    "annealage_pod.debug.swd_pio", types.ModuleType("annealage_pod.debug.swd_pio"))
+if not hasattr(_swd_pio_stub, "DEFAULT_CLKDIV"):
+    _swd_pio_stub.DEFAULT_CLKDIV = 16
+
 import annealage_pod.debug.ops as ops          # noqa: E402
 import annealage_pod.debug.dbgsrv as dbgsrv     # noqa: E402
 
@@ -146,3 +154,70 @@ class TestMemory:
         r = ops.write_mem(0x20000000, "deadbeef")
         assert r["ok"] is True and r["length"] == 4
         assert seen["addr"] == 0x20000000 and seen["data"] == b"\xde\xad\xbe\xef"
+
+
+class _FakeSWDPio:
+    def __init__(self, clkdiv):
+        self.clkdiv = clkdiv
+        self.released = False
+
+    def release(self):
+        self.released = True
+
+
+class _FakeDP:
+    """Fake DebugPort recording its build clkdiv + connect count."""
+    built = []            # every instance, in build order
+
+    def __init__(self, swdio=None, swclk=None, sm_id=None, clkdiv=None):
+        self.swd = _FakeSWDPio(clkdiv)
+        self.connects = 0
+        _FakeDP.built.append(self)
+
+    def connect(self):
+        self.connects += 1
+        return 0x2BA01477
+
+
+class TestEnsureClkdiv:
+    """ops._ensure must honour a changed clkdiv on a warm stack by rebuilding
+    the SWD transport (the #2 caching bug), and reuse it when unchanged."""
+
+    def _wire_fakes(self, monkeypatch):
+        import annealage_pod.debug.pio_arbiter as pio_arbiter
+        _FakeDP.built = []
+        # Fresh, torn-down session each time.
+        for g in ("_dp", "_ap", "_cm", "_flash", "_fpb", "_dwt", "_flm"):
+            monkeypatch.setattr(ops, g, None)
+        monkeypatch.setattr(ops._rp2_pinmap, "SWD_SWDIO", 14, raising=False)
+        monkeypatch.setattr(ops._rp2_pinmap, "SWD_SWCLK", 15, raising=False)
+        monkeypatch.setattr(ops.swd_dap, "DebugPort", _FakeDP, raising=False)
+        monkeypatch.setattr(ops.swd_dap, "MEMAP", lambda dp: object(), raising=False)
+        monkeypatch.setattr(ops.swd_dap, "CortexM", lambda ap: object(), raising=False)
+        monkeypatch.setattr(ops.swd_dap, "FPB", lambda ap: object(), raising=False)
+        monkeypatch.setattr(ops.swd_dap, "DWT", lambda ap: object(), raising=False)
+        monkeypatch.setattr(ops.flash_nrf52, "NRF52Flash",
+                            lambda ap, cm: object(), raising=False)
+        monkeypatch.setattr(pio_arbiter, "claim", lambda *a, **k: None)
+
+    def test_same_clkdiv_reuses_session(self, monkeypatch):
+        self._wire_fakes(monkeypatch)
+        ops._ensure(16)
+        ops._ensure(16)
+        assert len(_FakeDP.built) == 1          # not rebuilt
+        assert _FakeDP.built[0].connects == 2   # reconnected each call
+
+    def test_changed_clkdiv_rebuilds_transport(self, monkeypatch):
+        self._wire_fakes(monkeypatch)
+        ops._ensure(16)
+        first = _FakeDP.built[0]
+        ops._ensure(32)
+        assert len(_FakeDP.built) == 2          # rebuilt at the new clock
+        assert first.swd.released is True        # old transport released
+        assert _FakeDP.built[1].swd.clkdiv == 32
+        assert ops._dp.swd.clkdiv == 32
+
+    def test_default_clkdiv_is_spec_compliant(self, monkeypatch):
+        self._wire_fakes(monkeypatch)
+        ops._ensure()                            # no arg -> module default
+        assert _FakeDP.built[0].swd.clkdiv == ops.swd_pio.DEFAULT_CLKDIV

@@ -160,9 +160,9 @@ The pod runs a PIO SWD debugger (PIO1). Wire three lines:
 | GP15 (SWCLK) | SWCLK / SWD clock |
 | GND | GND |
 
-Default SWCLK is ~9.375 MHz (`clkdiv=8`), validated on an nRF52840; keep the two
-SWD leads short. Pins are fixed in `swd_pio.py` / `ops.py`. Usage and the layered
-DP/AP/MEM-AP + flash stack are in `debug-stack.md`.
+Default SWCLK is ~4.69 MHz (`clkdiv=16`), inside the nRF52840's 8 MHz maximum;
+keep the two SWD leads short. Pins are fixed in `swd_pio.py` / `ops.py`. Usage
+and the layered DP/AP/MEM-AP + flash stack are in `debug-stack.md`.
 
 ### 5b. I2C - DUT drives the pod as an I2C target (VERIFIED)
 

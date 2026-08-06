@@ -12,7 +12,7 @@
 import struct
 import time
 
-from . import swd_dap, flash_nrf52, netutil, dbgsrv
+from . import swd_dap, swd_pio, flash_nrf52, netutil, dbgsrv
 from .. import _rp2_pinmap
 
 _dp = None
@@ -41,8 +41,23 @@ def _flm_algo():
     return flm_nrf52840.FLASH_ALGO
 
 
-def _ensure(clkdiv=8):
-    global _dp, _ap, _cm, _flash, _fpb, _dwt
+def _ensure(clkdiv=swd_pio.DEFAULT_CLKDIV):
+    global _dp, _ap, _cm, _flash, _fpb, _dwt, _flm
+    if _dp is not None and _dp.swd.clkdiv != clkdiv:
+        # A prior call built the SWD stack at a different clock. A running PIO
+        # state machine's divisor can't be retuned in place, so drop the whole
+        # cached stack and rebuild below at the requested clkdiv - otherwise the
+        # clkdiv argument would be silently ignored on a warm stack. The DUT's
+        # halt / breakpoint / watchpoint state lives in the target's debug
+        # hardware (DHCSR / FPB / DWT), not in these Python objects, so it
+        # survives the rebuild; unlike close() we deliberately do NOT resume the
+        # core here. Release only the SWD PIO program (the arbiter claim is
+        # re-taken idempotently below).
+        try:
+            _dp.swd.release()
+        except Exception:
+            pass
+        _dp = _ap = _cm = _flash = _fpb = _dwt = _flm = None
     if _dp is None:
         from . import pio_arbiter
         pio_arbiter.claim("swd", 1, 0)   # PIO1 sm0 (PIO2 = CYW43; PIO0 = SPI/LA)
@@ -115,7 +130,7 @@ def _flm_program_file(flm_fl, addr, fileobj, verify):
     return n
 
 
-def info(clkdiv=8):
+def info(clkdiv=swd_pio.DEFAULT_CLKDIV):
     dp, ap, cm, fl = _ensure(clkdiv)
     return {
         "dpidr": dp.dpidr,
@@ -126,7 +141,7 @@ def info(clkdiv=8):
     }
 
 
-def discover(clkdiv=8):
+def discover(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Identify the connected DUT with architecturally-generic ADIv5/Cortex-M
     # reads only - the DP IDCODE, the MEM-AP IDR, the Cortex-M CPUID, and the
     # debug ROM-table base. No core halt and no family-specific memory probe
@@ -146,7 +161,7 @@ def discover(clkdiv=8):
         return {"ok": False, "err": repr(e)}
 
 
-def flash_file(addr, path, clkdiv=8, verify=True, chunk_words=256,
+def flash_file(addr, path, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True, chunk_words=256,
                loader="native"):
     # Program target flash from a pod-side file, bounded memory, then resume.
     # loader: "native" (default, validated NVMC path) or "flm" (generic CMSIS
@@ -172,7 +187,7 @@ def flash_file(addr, path, clkdiv=8, verify=True, chunk_words=256,
     return {"ok": True, "addr": addr, "bytes": n, "ms": dt, "loader": loader}
 
 
-def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True,
+def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True,
                  loader="native"):
     # Flash a DUT image streamed over TCP straight into pod RAM, no filesystem.
     # The image is received into a RAM buffer a chunk at a time and programmed
@@ -239,7 +254,7 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8, verify=True,
             "loader": loader}
 
 
-def erase_all(clkdiv=8, loader="flm"):
+def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="flm"):
     # Erase the entire DUT flash, returning timing and loader info. loader="flm"
     # runs the generic CMSIS FLMFlasher.erase_all() (halts core, runs the
     # algorithm blob, resumes); loader="native" uses NRF52Flash.mass_erase()
@@ -267,7 +282,7 @@ def erase_all(clkdiv=8, loader="flm"):
     return {"ok": err is None, "ms": dt, "loader": loader, "err": err}
 
 
-def write_mem_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8,
+def write_mem_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_CLKDIV,
                      protect=None):
     # Write a raw byte stream received over TCP directly into target memory via
     # the MEM-AP. No erase, no flash involvement. Uses the same dual-stack
@@ -329,7 +344,7 @@ def write_mem_stream(addr, total_len, port=3333, chunk=4096, clkdiv=8,
     return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err}
 
 
-def dump_stream(addr, length, port=3334, clkdiv=8):
+def dump_stream(addr, length, port=3334, clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Explicit read of target memory streamed to the host over TCP, no
     # filesystem (the reverse of flash_stream). Reads the DUT in bounded
     # 256-word blocks and sends each over the socket; nothing is written to the
@@ -371,7 +386,7 @@ def dump_stream(addr, length, port=3334, clkdiv=8):
     return {"ok": err is None, "addr": addr, "bytes": length, "err": err}
 
 
-def flash_crc(addr, length, clkdiv=8):
+def flash_crc(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
     # CRC32 of a DUT flash region, read over SWD - the end-to-end integrity check
     # the streaming program path lacks. flash_stream verifies each chunk it
     # programs, but cannot see a chunk lost mid-stream (Wi-Fi reset) or a flaky
@@ -406,7 +421,7 @@ def flash_crc(addr, length, clkdiv=8):
             "length": length, "err": err}
 
 
-def reset(mode="sysreset", clkdiv=8):
+def reset(mode="sysreset", clkdiv=swd_pio.DEFAULT_CLKDIV):
     dp, ap, cm, fl = _ensure(clkdiv)
     if mode == "halt":
         cm.reset_and_halt()
@@ -432,7 +447,7 @@ def reset(mode="sysreset", clkdiv=8):
 # the flash-region write guard are reused from dbgsrv so there is one
 # implementation of each.
 
-def halt(clkdiv=8):
+def halt(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Halt the core where it is and hold it (no auto-resume). Required before a
     # register read/write; also freezes the DUT (incl. its USB) for the duration.
     try:
@@ -443,7 +458,7 @@ def halt(clkdiv=8):
         return {"ok": False, "err": repr(e)}
 
 
-def resume(clkdiv=8):
+def resume(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Resume a core halted by halt() / reset(mode="halt").
     try:
         dp, ap, cm, fl = _ensure(clkdiv)
@@ -453,7 +468,7 @@ def resume(clkdiv=8):
         return {"ok": False, "err": repr(e)}
 
 
-def read_reg(regsel, clkdiv=8):
+def read_reg(regsel, clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Validate the (cheap) argument before _ensure, which line-resets the DP.
     if regsel < 0 or regsel > dbgsrv.REGSEL_MAX:
         return {"ok": False, "err": "regsel out of range 0..%d" % dbgsrv.REGSEL_MAX}
@@ -467,7 +482,7 @@ def read_reg(regsel, clkdiv=8):
         return {"ok": False, "err": repr(e)}
 
 
-def write_reg(regsel, value, clkdiv=8):
+def write_reg(regsel, value, clkdiv=swd_pio.DEFAULT_CLKDIV):
     if regsel < 0 or regsel > dbgsrv.REGSEL_MAX:
         return {"ok": False, "err": "regsel out of range 0..%d" % dbgsrv.REGSEL_MAX}
     value &= 0xFFFFFFFF
@@ -482,7 +497,7 @@ def write_reg(regsel, value, clkdiv=8):
         return {"ok": False, "err": repr(e)}
 
 
-def read_mem(addr, length, clkdiv=8):
+def read_mem(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
     import binascii
     if length < 0 or length > dbgsrv.MAX_DATA:
         return {"ok": False, "err": "length out of range 0..%d "
@@ -496,7 +511,7 @@ def read_mem(addr, length, clkdiv=8):
         return {"ok": False, "err": repr(e)}
 
 
-def write_mem(addr, data_hex, protect=None, clkdiv=8):
+def write_mem(addr, data_hex, protect=None, clkdiv=swd_pio.DEFAULT_CLKDIV):
     import binascii
     try:
         data = binascii.unhexlify(data_hex)
@@ -528,7 +543,7 @@ def write_mem(addr, data_hex, protect=None, clkdiv=8):
     return {"ok": True, "addr": addr, "length": len(data)}
 
 
-def gdb_serve(port=3335, clkdiv=8, reset_halt=True):
+def gdb_serve(port=3335, clkdiv=swd_pio.DEFAULT_CLKDIV, reset_halt=True):
     # Bring the DP up ONCE, halt, and hand the live session to the binary debug
     # server (dbgsrv). The dbgsrv loop runs against this session and never calls
     # _ensure/connect again: a per-command _dp.connect() would line-reset the DP

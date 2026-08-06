@@ -184,11 +184,19 @@ that is a separate, deliberate operation, not part of the flash path.
   overhead). Program and verify in bounded chunks (`flash_nrf52` uses
   `chunk_words`); for real images stream from a pod-side file rather than holding
   the image in RAM.
-- SWD clock: `clkdiv=8` = 9.375 MHz is reliable (100/100 DPIDR clean, valid
-  MEM-AP reads). Hard cliff at `clkdiv=6` = 12.5 MHz (0/100), the PIO input
-  sampling phase is the limit. Reaching the >= 10 MHz gate target needs input-
-  phase PIO tuning (add a settle cycle / restructure the read), not just a lower
-  clkdiv.
+- SWD clock: the default is `clkdiv=16` (`swd_pio.DEFAULT_CLKDIV`) = 4.69 MHz
+  write / 3.13 MHz read, inside the nRF52840's characterised 8 MHz SWDCLK max.
+  The PIO clocks the write phase at 2 cyc/bit and the read phase at 3 cyc/bit, so
+  the read side is the tighter limit and `f_swclk` reports only the write clock.
+  `clkdiv=8` = 9.4 MHz write / 6.25 MHz read runs over spec: it samples the
+  target-driven bits in too narrow a plateau and gives intermittent ACK=3 /
+  parity errors (single-bit flips), worst on a cold DUT with the least margin -
+  it is not "reliable", it was riding rig margin. Hard cliff at `clkdiv=6` =
+  12.5 MHz write (0/100). Reaching a >= 10 MHz write clock cleanly would need
+  input-phase PIO tuning (add a settle cycle / restructure the read), not just a
+  lower clkdiv. Note: a warm `ops` session ignores a new `clkdiv` unless it
+  differs from the live one (then it rebuilds the transport); it is honoured on
+  the first `_ensure` or across `ops.close()`.
 
 ## 8. CYW43 Wi-Fi is on PIO2, not PIO0 - never build a PIO SM on PIO2
 

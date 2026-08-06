@@ -31,6 +31,15 @@ class SWDError(Exception):
 SEL_OUTPUT = 0
 SEL_INPUT = 1
 
+# Default SWD clock divisor. The PIO clocks the output (write) phase at 2 PIO
+# cycles/bit and the input (read) phase at 3 cycles/bit, so at clkdiv=16 the
+# write clock is SYS/16/2 = 4.69 MHz and the read clock SYS/16/3 = 3.13 MHz -
+# both inside the nRF52840's characterised 8 MHz SWDCLK maximum. A smaller
+# divisor (clkdiv=8 -> 9.4 MHz write, 6.25 MHz read) runs the bus over spec and
+# samples the target-driven bits in too narrow a plateau, which shows up as
+# intermittent ACK=3 / parity errors, worst on a cold DUT with the least margin.
+DEFAULT_CLKDIV = 16
+
 
 def parity32(v):
     v ^= v >> 16
@@ -93,9 +102,8 @@ class SWDPio:
     # PIO clock base (RP2350 sys clock). f_swclk(write) = SYS / clkdiv / 2.
     SYS_HZ = 150_000_000
 
-    def __init__(self, swdio=14, swclk=15, sm_id=4, clkdiv=8):
-        # clkdiv=8 -> 9.375 MHz SWCLK, validated 100/100 clean on the nRF52840
-        # (12.5 MHz fails: input-sampling phase limit). See spike-findings.md.
+    def __init__(self, swdio=14, swclk=15, sm_id=4, clkdiv=DEFAULT_CLKDIV):
+        # clkdiv sets the SWCLK rate (see DEFAULT_CLKDIV for the spec envelope).
         # sm_id 4..7 = PIO1. (CYW43 Wi-Fi runs on PIO2, not PIO0, on the RP2350
         # Pico 2 W; PIO0 is free and used by the logic analyser. Authoritative
         # block map: annealage_pod.debug.pio_arbiter.PIO_MAP.)
@@ -133,6 +141,8 @@ class SWDPio:
 
     @property
     def f_swclk(self):
+        # Write-phase clock only (2 PIO cyc/bit). The input phase runs slower at
+        # 3 cyc/bit = SYS / clkdiv / 3, so the read side is the tighter limit.
         return int(self.SYS_HZ / self.clkdiv / 2)
 
     def deinit(self):

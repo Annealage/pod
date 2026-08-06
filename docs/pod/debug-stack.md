@@ -13,8 +13,10 @@ hardware-validated results, see `spike-findings.md` section 6.
 ## Hardware
 
 - Pod `GP14` = SWDIO, `GP15` = SWCLK, common GND to the target.
-- Default SWCLK is `clkdiv=8` = 9.375 MHz (validated 100/100 clean on an
-  nRF52840; 12.5 MHz fails, the PIO input-sampling phase is the limit).
+- Default SWCLK is `clkdiv=16` = 4.69 MHz write / 3.13 MHz read, inside the
+  nRF52840's 8 MHz SWDCLK maximum (authoritative: `swd_pio.DEFAULT_CLKDIV`).
+  Smaller divisors run over spec: `clkdiv=8` = 9.4 MHz write / 6.25 MHz read
+  gives intermittent ACK=3 / parity errors, worst on a cold DUT.
 - PIO allocation (authoritative map: `annealage_pod.debug.pio_arbiter.PIO_MAP`):
   CYW43 Wi-Fi runs on PIO2 (reserved, never claimable), the SWD transport uses
   PIO1 SM4, and the logic analyser plus the optional write-streamer use PIO0 (the
@@ -65,7 +67,9 @@ The package must be importable on the pod. Two ways:
 
 `ops` lazily creates one `DebugPort`/`MEMAP`/`CortexM`/`NRF52Flash` session and
 reuses it across calls (so repeated host commands do not re-create PIO state
-machines). All functions take an optional `clkdiv` (default 8).
+machines). All functions take an optional `clkdiv` (default `swd_pio.DEFAULT_CLKDIV`
+= 16). Passing a different `clkdiv` than the live session rebuilds the SWD
+transport at the new clock (the target's halt/breakpoint state is preserved).
 
 - `info() -> {dpidr, cpuid, part, flash_kb, ram_kb}` - identify the target.
 - `flash_stream(addr, total_len, port=3333, chunk=4096, verify=True, loader="native") -> {ok, addr, bytes, err}`
@@ -76,7 +80,7 @@ machines). All functions take an optional `clkdiv` (default 8).
 - `flash_file(addr, path, verify=True, chunk_words=256, loader="native") -> {ok, addr, bytes, ms}`
   Program from a pod-resident file in bounded chunks. Use when the image is
   already on the pod; otherwise prefer `flash_stream` (no filesystem).
-- `flash_crc(addr, length, clkdiv=8) -> {ok, crc, addr, length, err}` - CRC32 of a
+- `flash_crc(addr, length, clkdiv=16) -> {ok, crc, addr, length, err}` - CRC32 of a
   flash region read back over SWD (MEM-AP block reads, never held whole in RAM).
   The end-to-end integrity check the streaming path lacks: `flash_stream` verifies
   each chunk it programs, but cannot see a chunk lost mid-stream, so `Pod.flash_dut`
@@ -149,7 +153,7 @@ bare `exec` (which would block at `accept`).
 
 ```python
 import annealage_pod.debug.swd_dap as dap
-dp = dap.DebugPort(swdio=14, swclk=15, sm_id=4)   # clkdiv default 8
+dp = dap.DebugPort(swdio=14, swclk=15, sm_id=4)   # clkdiv default 16
 dp.connect()                                       # line reset + DPIDR + power-up
 ap = dap.MEMAP(dp)
 cm = dap.CortexM(ap)

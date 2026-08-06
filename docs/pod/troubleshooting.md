@@ -143,8 +143,9 @@ Try these in order; stop at the first that works.
 ## Confirming which layer is at fault (SWD oracle, for maintainers)
 
 The pod can SWD-read the DUT to pinpoint the cause without guessing (needs the
-on-pod debug stack; read at `clkdiv>=32`, never the default 8 - clkdiv=8 flips
-single bits on this rig):
+on-pod debug stack; for these one-shot forensic reads pass `clkdiv>=32` for the
+widest sampling margin - the default `clkdiv=16` is spec-compliant, but a slower
+clock further cuts the single-bit-flip risk this rig shows at over-spec clocks):
 - `pyexec_mode_kind` (0 = FRIENDLY, 1 = RAW; address is build-specific, from the
   DUT ELF) - is the REPL mode-stuck?
 - the tinyusb `_cdcd_itf[0].line_state` bit0 - is DTR actually asserted at the DUT

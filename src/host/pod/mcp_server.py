@@ -29,7 +29,7 @@ import time
 from pod.discovery import discover_pods as _discover_pods
 from pod.registry import (get_pod, load_registry, update_pod, reconcile_dut,
                           dut_protect_ranges)
-from pod.client import Pod, PodExecError
+from pod.client import Pod, PodExecError, DEFAULT_SWD_CLKDIV
 from pod.target import PodUnreachable
 from pod import enroll
 
@@ -195,7 +195,7 @@ def handle_flash_dut(label: str, image: str, target: str = None,
                          keep_attached=keep_attached, mass_erase=mass_erase)
 
 
-def handle_erase_dut(label: str, clkdiv: int = 8,
+def handle_erase_dut(label: str, clkdiv: int = DEFAULT_SWD_CLKDIV,
                      loader: str = "flm") -> dict:
     """Erase the entire DUT flash via the on-pod debug stack.
 
@@ -1429,7 +1429,7 @@ def build_server():
             elif name == "erase_dut":
                 result = await asyncio.to_thread(
                     handle_erase_dut, arguments["label"],
-                    arguments.get("clkdiv", 8),
+                    arguments.get("clkdiv", DEFAULT_SWD_CLKDIV),
                     arguments.get("loader", "flm"))
             elif name == "reset_dut":
                 result = await asyncio.to_thread(

@@ -25,6 +25,15 @@ from typing import Callable, List, Optional
 from pod.target import TargetResolver
 
 
+# Default SWD clock divisor the host asks the pod to run at. Mirrors the pod's
+# own default (annealage_pod.debug.swd_pio.DEFAULT_CLKDIV) so a host command that
+# does not override clkdiv lands on the same spec-compliant clock the pod would
+# pick on its own; the two live in separate codebases (host Python vs on-pod
+# MicroPython) and cannot share the literal, so both name a documented constant.
+# clkdiv=16 keeps the nRF52840 SWDCLK inside its 8 MHz maximum (see swd_pio.py).
+DEFAULT_SWD_CLKDIV = 16
+
+
 def _last_dict(stdout: str) -> dict:
     """Parse the last printed dict literal from on-pod stdout."""
     for line in reversed((stdout or "").strip().splitlines()):
@@ -280,7 +289,7 @@ class Pod:
         )
 
     @staticmethod
-    def _erase_all_cmd(clkdiv: int = 8, loader: str = "flm") -> str:
+    def _erase_all_cmd(clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "flm") -> str:
         """Build the on-pod erase_all invocation (pure, for testability)."""
         return (
             "import annealage_pod.debug.ops as o;"
@@ -353,7 +362,7 @@ class Pod:
             raise result["exc"]
         return _last_dict(result.get("out", ""))
 
-    def erase_dut(self, clkdiv: int = 8, loader: str = "flm") -> dict:
+    def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "flm") -> dict:
         """Erase the entire DUT flash via the on-pod debug stack.
 
         Runs ops.erase_all() on the pod over the REPL. loader selects the
@@ -364,7 +373,7 @@ class Pod:
         out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader))
         return _last_dict(out)
 
-    def flash_crc(self, addr: int, length: int, clkdiv: int = 8) -> dict:
+    def flash_crc(self, addr: int, length: int, clkdiv: int = DEFAULT_SWD_CLKDIV) -> dict:
         """CRC32 of a DUT flash region, read back over SWD (the pod-side
         ops.flash_crc). Returns {ok, crc, addr, length, err}."""
         out = self.exec(
@@ -411,7 +420,7 @@ class Pod:
                 result["err"] = "end-to-end verify: %s" % v.get("err")
         return result
 
-    def _verify_flashed(self, lma: int, source: bytes, clkdiv: int = 8,
+    def _verify_flashed(self, lma: int, source: bytes, clkdiv: int = DEFAULT_SWD_CLKDIV,
                         retries: int = 3) -> dict:
         """End-to-end verify a just-flashed region: CRC32 the source bytes and
         compare to a pod-side read-back CRC over SWD.
