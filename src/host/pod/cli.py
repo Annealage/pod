@@ -651,6 +651,13 @@ def cmd_recover(args):
     return 0 if result.get("recovered") else 1
 
 
+def cmd_reprobe(args):
+    entry = _require_pod(args.label)
+    result = Pod.from_entry(entry).reprobe_dut()
+    print(result)
+    return 0 if result.get("ok") else 1
+
+
 _UDEV_RULE_PATH = "/etc/udev/rules.d/99-annealage-pod.rules"
 
 
@@ -1182,6 +1189,13 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--read-wait", type=float, default=0.6, dest="read_wait",
                    help="Seconds before reading the prompt back (default 0.6)")
 
+    # reprobe
+    p = sub.add_parser(
+        "reprobe",
+        help="Recover a DUT the pod is not exporting (mounted-but-unexportable "
+             "or a warm-reset edge-miss) without a cold power cycle")
+    p.add_argument("label")
+
     # install-udev
     p = sub.add_parser(
         "install-udev",
@@ -1380,6 +1394,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "erase": cmd_erase,
         "reset": cmd_reset,
         "recover-dut": cmd_recover,
+        "reprobe": cmd_reprobe,
         "install-udev": cmd_install_udev,
         "gdb": cmd_gdb,
         "halt": cmd_halt,

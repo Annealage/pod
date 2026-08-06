@@ -1232,6 +1232,31 @@ class Pod:
         from pod import usbip as _u
         return _u.list_remote(self._usbip_host())
 
+    def reprobe_dut(self) -> dict:
+        """Recover a DUT the pod host is not exporting, without a cold power cycle.
+
+        Runs usbhost.reprobe() on the pod. Two cases it covers:
+          - mounted-but-unexportable: the DUT enumerated (tuh_mounted) but the
+            USB/IP export slot was never populated because no rescan ran after it
+            mounted (mount-after-initial-rescan / hot-plug-after-start). reprobe
+            re-seeds the slot from the already-valid descriptor cache.
+          - warm-reset connect-edge miss: the DUT re-presented D+ with no 0->1
+            edge, so the host never enumerated it; reprobe synthesizes the attach
+            to re-enumerate, then re-seeds.
+        Non-destructive to a working forward. Returns {ok, mounted[, err]} where
+        mounted is the tuh_mounted address bitmask. ok=False if the pod firmware
+        predates the reprobe verb.
+        """
+        out = self.exec(
+            "import usbhost\n"
+            "if hasattr(usbhost, 'reprobe'):\n"
+            "    usbhost.reprobe()\n"
+            "    print({'ok': True, 'mounted': usbhost.mounted()})\n"
+            "else:\n"
+            "    print({'ok': False, 'err': 'pod firmware has no usbhost.reprobe'})\n"
+        )
+        return _last_dict(out)
+
     def usbip_attach(self, ensure: bool = True) -> dict:
         """Export the DUT over USB/IP and attach it on this host.
 
@@ -1240,6 +1265,10 @@ class Pod:
         exported device for its live VID:PID + busid, attaches it (sudo), and
         returns {busid, vid, pid, tty}; tty is the DUT's CDC device, or None if
         it did not enumerate in time.
+
+        If the pod exports nothing on the first list, reprobe_dut() is tried once
+        (the DUT may be mounted-but-unexportable or a warm-reset edge-miss) and
+        the list retried, so a consumer recovers without a manual step.
         """
         from pod import usbip as _u
         if ensure:
@@ -1247,9 +1276,12 @@ class Pod:
         host = self._usbip_host()
         devs = _u.list_remote(host)
         if not devs:
+            self.reprobe_dut()
+            devs = _u.list_remote(host)
+        if not devs:
             raise RuntimeError(
                 "pod %s exports no USB device - is the DUT on the pod USB host "
-                "port and enumerated?" % host)
+                "port and enumerated? (reprobe did not recover it)" % host)
         dev = dict(devs[0])
         before = _u.serial_devices()
         _u.attach(host, dev["busid"])

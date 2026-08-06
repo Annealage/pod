@@ -176,6 +176,31 @@ bool usbhost_is_verbose(void);
 int usbhost_flush(bool force_bus_reset);
 int usbhost_bus_reset(void);
 
+/* usbhost_reprobe: recover a device that reconnected on the root port WITHOUT
+ * a connect-detect edge - the exact edge-trigger-miss case above (a DUT warm
+ * reset / machine.reset() with no VBUS drop, or a D+ pull-up reconnect). Where
+ * flush()/bus_reset() depend on the PHY sensing a 0->1 transition that a held-
+ * high D+ never produces, reprobe synthesizes HCD_EVENT_DEVICE_ATTACH directly
+ * (hcd_event_device_attach) and pumps tuh_task: TinyUSB force-removes the stale
+ * device at the root-port bus address and runs enum_new_device, whose port
+ * reset + descriptor/SET_ADDRESS sequence re-enumerates the device on the wire.
+ * No-op (returns -ENODEV) when the host is not started or no device is present
+ * on the port (hcd_port_connect_status). Returns 0 on success, negative errno
+ * otherwise. reprobe re-seeds the forwarding slot table itself before returning,
+ * so a separate usbip.start() rescan is not required. */
+int usbhost_reprobe(void);
+
+/* Bitmask of TinyUSB device addresses currently mounted (bit N = address N).
+ * Diagnostic to tell "enumeration failed" (0) from "mounted but the forwarding
+ * slot / export did not populate" (nonzero). */
+uint32_t usbhost_mounted_mask(void);
+
+/* Bitmask of device addresses whose descriptor cache is valid (bit N = addr N).
+ * Diagnostic: enumerate_device needs a valid cache to build the export slot.
+ * Compare with usbhost_mounted_mask() to tell a cache-missing fault from a
+ * rescan-not-run fault. */
+uint32_t usbhost_cache_valid_mask(void);
+
 /* Diagnostic: return the raw 32-bit value of the DWC2 HPRT (Host Port
  * Control and Status) register, or 0 if the host stack is not running.
  * Useful to disambiguate "no device on the bus" from "device on bus but

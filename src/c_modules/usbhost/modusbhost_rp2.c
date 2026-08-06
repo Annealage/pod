@@ -9,6 +9,9 @@
  * Surface:
  *   usbhost.flush(force_bus_reset=True) -> None
  *   usbhost.bus_reset()                 -> None
+ *   usbhost.reprobe()                   -> None
+ *   usbhost.mounted()                   -> int  (tuh_mounted address bitmask)
+ *   usbhost.cache_valid()               -> int  (desc-cache-valid address bitmask)
  */
 
 #include "py/runtime.h"
@@ -44,10 +47,32 @@ static mp_obj_t mod_usbhost_bus_reset(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_bus_reset_obj, mod_usbhost_bus_reset);
 
+static mp_obj_t mod_usbhost_reprobe(void) {
+    int rc = usbhost_reprobe();
+    if (rc != 0) {
+        mp_raise_OSError(-rc);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_reprobe_obj, mod_usbhost_reprobe);
+
+static mp_obj_t mod_usbhost_mounted(void) {
+    return mp_obj_new_int_from_uint(usbhost_mounted_mask());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_mounted_obj, mod_usbhost_mounted);
+
+static mp_obj_t mod_usbhost_cache_valid(void) {
+    return mp_obj_new_int_from_uint(usbhost_cache_valid_mask());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usbhost_cache_valid_obj, mod_usbhost_cache_valid);
+
 static const mp_rom_map_elem_t mod_usbhost_globals_table[] = {
-    { MP_ROM_QSTR(MP_QSTR___name__),  MP_ROM_QSTR(MP_QSTR_usbhost) },
-    { MP_ROM_QSTR(MP_QSTR_flush),     MP_ROM_PTR(&mod_usbhost_flush_obj) },
-    { MP_ROM_QSTR(MP_QSTR_bus_reset), MP_ROM_PTR(&mod_usbhost_bus_reset_obj) },
+    { MP_ROM_QSTR(MP_QSTR___name__),    MP_ROM_QSTR(MP_QSTR_usbhost) },
+    { MP_ROM_QSTR(MP_QSTR_flush),       MP_ROM_PTR(&mod_usbhost_flush_obj) },
+    { MP_ROM_QSTR(MP_QSTR_bus_reset),   MP_ROM_PTR(&mod_usbhost_bus_reset_obj) },
+    { MP_ROM_QSTR(MP_QSTR_reprobe),     MP_ROM_PTR(&mod_usbhost_reprobe_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mounted),     MP_ROM_PTR(&mod_usbhost_mounted_obj) },
+    { MP_ROM_QSTR(MP_QSTR_cache_valid), MP_ROM_PTR(&mod_usbhost_cache_valid_obj) },
 };
 static MP_DEFINE_CONST_DICT(mod_usbhost_globals, mod_usbhost_globals_table);
 

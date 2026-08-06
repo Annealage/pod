@@ -231,6 +231,12 @@ def handle_recover_dut_repl(label: str, device: str, settle: float = 0.4,
         device, settle=settle, read_wait=read_wait)
 
 
+def handle_reprobe_dut(label: str) -> dict:
+    """Recover a DUT the pod is not exporting (mounted-but-unexportable or a
+    warm-reset connect-edge miss) without a cold power cycle."""
+    return _pod_for(label).reprobe_dut()
+
+
 def handle_read_dut(label: str, addr: int, length: int, out_path: str) -> str:
     """Read DUT memory to a host file via the pod (streamed, no pod FS)."""
     entry = get_pod(label)
@@ -864,6 +870,29 @@ def build_server():
                 },
             ),
             Tool(
+                name="reprobe_dut",
+                description=(
+                    "Recover a DUT the pod is NOT exporting over USB/IP, without a "
+                    "cold power cycle - try this when attach_dut / dut_exec report "
+                    "'pod exports no USB device' but the DUT is wired and powered. "
+                    "Runs usbhost.reprobe() on the pod: if the DUT enumerated but "
+                    "was never exported (it mounted after the initial rescan) it "
+                    "re-seeds the USB/IP slot; if a warm reset (DUT machine.reset() "
+                    "with no VBUS drop) re-presented D+ with no connect edge the "
+                    "host missed, it synthesizes the attach to re-enumerate first. "
+                    "Non-destructive to a working forward. attach_dut already tries "
+                    "this once automatically; use it explicitly to recover a DUT "
+                    "that dropped off mid-session. If it does not recover the DUT, "
+                    "escalate to reset_dut then a physical power-cycle."),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
                 name="read_dut",
                 description=(
                     "Read DUT memory to a host file via the pod, streamed from "
@@ -1441,6 +1470,9 @@ def build_server():
                     handle_recover_dut_repl, arguments["label"],
                     arguments["device"], arguments.get("settle", 0.4),
                     arguments.get("read_wait", 0.6))
+            elif name == "reprobe_dut":
+                result = await asyncio.to_thread(
+                    handle_reprobe_dut, arguments["label"])
             elif name == "read_dut":
                 result = await asyncio.to_thread(
                     handle_read_dut, arguments["label"], arguments["addr"],

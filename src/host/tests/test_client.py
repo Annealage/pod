@@ -364,8 +364,38 @@ class TestUsbipAttach:
         import pod.usbip as u
         monkeypatch.setattr(u, "ensure_server", lambda p: None)
         monkeypatch.setattr(u, "list_remote", lambda host: [])
+        monkeypatch.setattr(pod, "reprobe_dut", lambda: {"ok": True, "mounted": 0})
         with pytest.raises(RuntimeError):
             pod.usbip_attach()
+
+    def test_attach_reprobes_then_succeeds(self, pod, monkeypatch):
+        """An empty first export triggers reprobe_dut, and the retry finds the
+        DUT (the mounted-but-unexportable / warm-reset recovery path)."""
+        import pod.usbip as u
+        calls = {"list": 0, "reprobe": 0}
+
+        def _list(host):
+            calls["list"] += 1
+            return [] if calls["list"] == 1 else [
+                {"busid": "1-1", "vid": "f055", "pid": "9802"}]
+
+        def _reprobe():
+            calls["reprobe"] += 1
+            return {"ok": True, "mounted": 2}
+
+        monkeypatch.setattr(u, "ensure_server", lambda p: None)
+        monkeypatch.setattr(u, "list_remote", _list)
+        monkeypatch.setattr(u, "attach", lambda host, busid: None)
+        monkeypatch.setattr(u, "serial_devices", lambda: set())
+        monkeypatch.setattr(u, "wait_for_new_tty", lambda before: "/dev/ttyACM1")
+        monkeypatch.setattr(pod, "reprobe_dut", _reprobe)
+        dev = pod.usbip_attach()
+        assert dev["busid"] == "1-1" and dev["tty"] == "/dev/ttyACM1"
+        assert calls["reprobe"] == 1 and calls["list"] == 2
+
+    def test_reprobe_dut_parses_result(self, pod, monkeypatch):
+        monkeypatch.setattr(pod, "exec", lambda code: "{'ok': True, 'mounted': 2}\n")
+        assert pod.reprobe_dut() == {"ok": True, "mounted": 2}
 
 
 class TestNotImplementedStubs:

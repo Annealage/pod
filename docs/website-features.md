@@ -199,7 +199,7 @@ should be replaced. An agent adds it with, for example:
 claude mcp add pod -- pod-mcp
 ```
 
-The server wraps the `pod` client and exposes **38 tools**. Grouped:
+The server wraps the `pod` client and exposes **39 tools**. Grouped:
 
 - **Discovery / registry:** `discover_pods`, `pod_info`, `register_pod`, `dut` (probe and
   reconcile the wired DUT's SWD identity).
@@ -207,7 +207,9 @@ The server wraps the `pod` client and exposes **38 tools**. Grouped:
   `reset_dut`, `read_dut`, `gdb_dut`, `dut_halt`, `dut_resume`, `dut_read_reg`,
   `dut_write_reg`, `dut_read_mem`, `dut_write_mem`. The register tools additionally require a halted core.
 - **USB/IP:** `dut_usb`, `attach_dut`, `detach_dut`, `ensure_dut_link`, `dut_exec`
-  (run code on the DUT's own REPL over USB/IP).
+  (run code on the DUT's own REPL over USB/IP), `reprobe_dut` (recover a DUT the pod
+  is not exporting - mounted-but-unexportable or a warm-reset edge-miss - without a
+  cold cycle; attach_dut tries it once automatically).
 - **Pod-side exec / files:** `pod_exec`, `mount_dir`.
 - **Persistent REPL session:** `repl_open`, `repl_read`, `repl_send`, `repl_interrupt`,
   `repl_close`, `repl_list`.

@@ -166,6 +166,32 @@ class TestFlashReset:
             main()
 
 
+class TestReprobe:
+    def test_reprobe_unknown_label_errors(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["pod", "reprobe", "nope"])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_reprobe_calls_reprobe_dut(self, monkeypatch):
+        monkeypatch.setattr(cli, "get_pod", lambda label: {"addr4": "10.0.0.1"})
+        fake_pod = MagicMock()
+        fake_pod.reprobe_dut.return_value = {"ok": True, "mounted": 2}
+        monkeypatch.setattr(cli, "Pod",
+                            SimpleNamespace(from_entry=lambda entry: fake_pod))
+        monkeypatch.setattr(sys, "argv", ["pod", "reprobe", "rp"])
+        assert main() == 0
+        fake_pod.reprobe_dut.assert_called_once_with()
+
+    def test_reprobe_exit_1_when_not_ok(self, monkeypatch):
+        monkeypatch.setattr(cli, "get_pod", lambda label: {"addr4": "10.0.0.1"})
+        fake_pod = MagicMock()
+        fake_pod.reprobe_dut.return_value = {"ok": False, "err": "no reprobe verb"}
+        monkeypatch.setattr(cli, "Pod",
+                            SimpleNamespace(from_entry=lambda entry: fake_pod))
+        monkeypatch.setattr(sys, "argv", ["pod", "reprobe", "rp"])
+        assert main() == 1
+
+
 class TestRegisterGdbPort:
     def test_register_with_gdb_port_then_info(self, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", [

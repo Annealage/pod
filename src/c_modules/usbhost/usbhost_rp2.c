@@ -1277,3 +1277,111 @@ int usbhost_bus_reset(void)
     tuh_rhport_reset_bus(BOARD_TUH_RHPORT, false);
     return 0;
 }
+
+/* How long to pump the host task after synthesizing the attach so enumeration
+ * (a ~150 ms debounce, then a root-port reset + the descriptor/SET_ADDRESS
+ * sequence) can complete. Yields to the scheduler each pass so Wi-Fi is not
+ * starved. Override at link time with -DUSBHOST_REPROBE_PUMP_MS=N. */
+#ifndef USBHOST_REPROBE_PUMP_MS
+#define USBHOST_REPROBE_PUMP_MS 500
+#endif
+
+/* Bitmask of TinyUSB device addresses (1..CFG_TUH_DEVICE_MAX) currently
+ * tuh_mounted(). Diagnostic: distinguishes "enumeration/mount failed" (mask 0)
+ * from "mounted but the forwarding slot did not populate" (mask nonzero, yet
+ * usbip exports nothing). Bit N set => address N mounted. */
+uint32_t usbhost_mounted_mask(void)
+{
+    uint32_t mask = 0;
+    for (uint8_t addr = 1; addr <= CFG_TUH_DEVICE_MAX; addr++) {
+        if (tuh_mounted(addr)) {
+            mask |= (1u << addr);
+        }
+    }
+    return mask;
+}
+
+/* Bitmask of device addresses whose descriptor cache is valid (bit N = addr N).
+ * Diagnostic: the export path (enumerate_device) needs a valid cache, filled by
+ * the enum descriptor cbs. Comparing this with usbhost_mounted_mask() tells a
+ * "mounted but cache-missing" fault (needs re-enum) from a "mounted, cached, but
+ * no rescan ran" fault (needs only rescan_mounted). */
+uint32_t usbhost_cache_valid_mask(void)
+{
+    uint32_t mask = 0;
+    for (uint8_t addr = 1; addr <= CFG_TUH_DEVICE_MAX; addr++) {
+        if (s_desc_cache[addr - 1].valid) {
+            mask |= (1u << addr);
+        }
+    }
+    return mask;
+}
+
+static void reprobe_pump_ms(uint32_t ms)
+{
+    uint32_t t = mp_hal_ticks_ms();
+    while ((mp_hal_ticks_ms() - t) < ms) {
+        mp_usbh_task();
+        mp_event_handle_nowait();
+    }
+}
+
+int usbhost_reprobe(void)
+{
+    if (!s_state.started) {
+        return -ENODEV;
+    }
+    if (!tuh_rhport_is_active(BOARD_TUH_RHPORT)) {
+        return -ENODEV;
+    }
+    /* Only meaningful when a device is physically present on the root port. A
+     * warm reset (DUT machine.reset(), no VBUS drop) or a pull-up reconnect
+     * holds D+ high, so the DWC2 connect-detect edge the ISR needs
+     * (HPRT.PRTCONNDET latches only on a 0->1 connect transition) never fires
+     * and TinyUSB never re-enumerates - yet the port still reads connected. If
+     * nothing is present there is nothing to reprobe. */
+    if (!hcd_port_connect_status(BOARD_TUH_RHPORT)) {
+        return -ENODEV;
+    }
+
+    /* Two cases, handled non-destructively:
+     *
+     *  - Something is already mounted (tuh_mounted). A bring-up or a
+     *    machine.USBHost enumeration mounted the DUT, but no rescan re-ran to
+     *    export it - the "mount-after-initial-rescan / hot-plug-after-start" gap
+     *    the module doc flags. The descriptor cache the enum cbs filled is still
+     *    valid, so just (re)build the forwarding slot table from it. Do NOT
+     *    remove/re-enumerate a working mount: a second GET_DESCRIPTOR can STALL
+     *    (see the desc-cache note), and a REMOVE would tear down a live forward
+     *    (and can hit the tinyusb double-arm panic).
+     *
+     *  - Nothing is mounted: the DWC2 missed the connect edge (the true
+     *    warm-reset / held-high-D+ edge-miss). Synthesize the ATTACH the ISR
+     *    would have raised so tuh_task's enum_new_device drives a real root-port
+     *    reset + full enumeration (its cbs repopulate the cache), then rescan.
+     *    Pump mp_usbh_task since the periodic timer does not fire while this
+     *    synchronous call holds the main thread; mp_event_handle_nowait keeps
+     *    Wi-Fi RX alive. */
+    if (usbhost_mounted_mask() == 0) {
+        USBHOST_DBG("reprobe: no mount; synthesizing attach on rhport %d",
+                    BOARD_TUH_RHPORT);
+        hcd_event_device_attach(BOARD_TUH_RHPORT, false);
+        uint32_t start_ms = mp_hal_ticks_ms();
+        while ((mp_hal_ticks_ms() - start_ms) < USBHOST_REPROBE_PUMP_MS) {
+            mp_usbh_task();
+            mp_event_handle_nowait();
+            if (usbhost_mounted_mask()) {
+                reprobe_pump_ms(50);   /* let the fresh mount settle */
+                break;
+            }
+        }
+    } else {
+        USBHOST_DBG("reprobe: device already mounted; rescanning to export");
+    }
+
+    /* (Re)build the forwarding slot table from whatever is mounted so the DUT is
+     * exported without a separate usbip.start() rescan. rescan_mounted drops
+     * stale slots and adds fresh ones. */
+    rescan_mounted();
+    return 0;
+}

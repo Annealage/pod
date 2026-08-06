@@ -121,12 +121,32 @@ this one is the pod's stale slot and clears with a server restart:
 
 Then re-attach. See the `pod-usbip-stale-slot-reenum` auto-memory.
 
+## Symptom: the pod exports no DUT (`attach` / `dut_exec` says "exports no USB device")
+
+Distinct from a silent REPL above: here the DUT is not forwarded at all - `pod usb`
+lists nothing and `usbip list -r` is empty, though the DUT is wired and powered.
+The usual cause is that the pod host enumerated the DUT but never populated the
+USB/IP export slot: the DUT mounted just after the pod's start-up rescan (or a warm
+reset / `machine.reset()` re-presented D+ with no connect edge the host caught), and
+nothing re-ran the rescan. It is NOT a dead DUT and does NOT need a power cycle.
+
+Recover it with `reprobe` - non-destructive, no cold cycle:
+
+    pod reprobe <label>        # or the reprobe_dut MCP tool
+
+`attach_dut` / `pod dut-exec` already call it once automatically when the first
+export list is empty, so a consumer usually recovers without a manual step; run it
+explicitly for a DUT that dropped off mid-session. If reprobe does not bring the DUT
+back, escalate to `reset_dut` (a clean SWD reset re-enumerates from scratch) then a
+physical power-cycle.
+
 ## Recovery escalation ladder
 
 Try these in order; stop at the first that works.
 
 1. `recover_dut_repl` (`pod recover-dut`) - Ctrl-C + Ctrl-B over the tty. Clears a
-   stuck RAW mode and a running/looping program. Non-destructive.
+   stuck RAW mode and a running/looping program. Non-destructive. (If the pod
+   exports NO DUT at all, use `pod reprobe` first - see the symptom above.)
 2. Install the ModemManager udev rule (`pod install-udev`) + re-attach, if the
    REPL is silent rather than mode-stuck (output produced but gated by DTR=0).
    If instead it floods `0xff`: `usbip.stop/start` for a stale slot (Cause 4),
