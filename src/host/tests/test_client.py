@@ -558,6 +558,46 @@ class TestAttachedPorts:
         p._resolver._resolved = "fd00:dead:beef::9"
         assert p.attached_ports() == [3]
 
+    def test_matches_ipv6_by_interface_id_across_prefix_change(self, monkeypatch):
+        """#3: the pod is known only by its old ULA, but the DUT is attached over
+        a different ULA/global prefix sharing the pod's EUI-64 interface id. The
+        exact-string compare misses it; the interface-id match still finds it, so
+        detach does not silently no-op and run SWD under a live forward."""
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [
+            {"port": 2, "remote": "fd99:aaaa:bbbb:0:2ecf:67ff:feb1:8946",
+             "busid": "1-1"}])
+        p = Pod(addr6=["fd32:7709:b6ad:0:2ecf:67ff:feb1:8946"])
+        assert p.attached_ports() == [2]
+
+    def test_matches_link_local_by_interface_id(self, monkeypatch):
+        """A link-local attach matches by interface id even when only the ULA is
+        a stored handle (both share the pod's EUI-64 id)."""
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [
+            {"port": 4, "remote": "fe80::2ecf:67ff:feb1:8946", "busid": "1-1"}])
+        p = Pod(addr6=["fd32:7709:b6ad:0:2ecf:67ff:feb1:8946"])
+        assert p.attached_ports() == [4]
+
+    def test_ignores_ipv6_with_different_interface_id(self, monkeypatch):
+        """A different board (different MAC -> different interface id) is not
+        matched, so detach never touches another pod's port."""
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [
+            {"port": 0, "remote": "fd32:7709:b6ad:0:aaaa:bbbb:cccc:dddd",
+             "busid": "1-1"}])
+        p = Pod(addr6=["fd32:7709:b6ad:0:2ecf:67ff:feb1:8946"])
+        assert p.attached_ports() == []
+
+    def test_ipv4_only_pod_keeps_exact_match(self, monkeypatch):
+        """A v4-only pod has no interface id, so matching stays exact - an
+        unrelated IPv6 attach is never matched by an empty interface-id set."""
+        import pod.usbip as u
+        monkeypatch.setattr(u, "ports", lambda: [
+            {"port": 1, "remote": "fe80::2ecf:67ff:feb1:8946", "busid": "1-1"}])
+        p = Pod(addr4="192.168.0.146")
+        assert p.attached_ports() == []
+
 
 class TestMcpPodExec:
     def test_pod_exec_runs_on_pod(self, monkeypatch):

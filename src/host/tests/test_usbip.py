@@ -181,3 +181,37 @@ class TestAttachedPortsIPv6:
         from pod.client import Pod
         pod = Pod(addr6=["fd32:7709:b6ad:0:2ecf:67ff:feb1:0001"])
         assert self._match(monkeypatch, pod, USBIP_PORT_IPV6) == []
+
+    def test_matches_across_ula_prefix_change(self, monkeypatch):
+        # #3: the pod is stored under an OLD ULA prefix, but the DUT is attached
+        # over a NEW prefix (router re-advertised) sharing the pod's EUI-64
+        # interface id. The exact-address compare misses it; the interface-id
+        # match keeps detach working across the drift.
+        from pod.client import Pod
+        pod = Pod(addr6=["fdaa:1111:2222:0:2ecf:67ff:feb1:8946"])
+        assert self._match(monkeypatch, pod, USBIP_PORT_IPV6) == [0]
+
+
+class TestIid6:
+    def test_extracts_low64(self):
+        from pod.client import _iid6
+        assert _iid6("fd32:7709:b6ad:0:2ecf:67ff:feb1:8946") == 0x2ecf67fffeb18946
+
+    def test_link_local_and_ula_share_id(self):
+        from pod.client import _iid6
+        assert _iid6("fe80::2ecf:67ff:feb1:8946") == \
+            _iid6("fd32:7709:b6ad:0:2ecf:67ff:feb1:8946")
+
+    def test_strips_zone(self):
+        from pod.client import _iid6
+        assert _iid6("fe80::2ecf:67ff:feb1:8946%eth0") == 0x2ecf67fffeb18946
+
+    def test_strips_brackets(self):
+        from pod.client import _iid6
+        assert _iid6("[fd32:7709:b6ad:0:2ecf:67ff:feb1:8946]") == 0x2ecf67fffeb18946
+
+    def test_ipv4_and_hostname_and_none_are_none(self):
+        from pod.client import _iid6
+        assert _iid6("192.168.0.146") is None
+        assert _iid6("annealage-pod.local") is None
+        assert _iid6(None) is None

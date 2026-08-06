@@ -34,6 +34,29 @@ from pod.target import TargetResolver
 DEFAULT_SWD_CLKDIV = 16
 
 
+def _iid6(addr):
+    """The 64-bit EUI-64 interface identifier (low 64 bits) of an IPv6 address,
+    or None if `addr` is not an IPv6 literal.
+
+    The pod's IPv6 addresses are SLAAC/EUI-64 derived, so its ULA, any global,
+    and its link-local all share one interface id built from the CYW43 MAC. That
+    id is stable across a ULA-prefix change or a newly-advertised global prefix,
+    and is unique per NIC (a MAC cannot collide), so it identifies the pod's
+    interface regardless of which prefix a vhci port happened to attach over.
+    Strips a %zone and surrounding brackets first.
+    """
+    a = (addr or "").split("%")[0].strip().rstrip(".")
+    if a.startswith("[") and a.endswith("]"):
+        a = a[1:-1]
+    try:
+        ip = ipaddress.ip_address(a)
+    except ValueError:
+        return None
+    if ip.version != 6:
+        return None
+    return int(ip) & 0xFFFFFFFFFFFFFFFF
+
+
 def _last_dict(stdout: str) -> dict:
     """Parse the last printed dict literal from on-pod stdout."""
     for line in reversed((stdout or "").strip().splitlines()):
@@ -1234,20 +1257,25 @@ class Pod:
         return dev
 
     def attached_ports(self) -> list:
-        """Host vhci ports currently attached to THIS pod (matched by address).
+        """Host vhci ports currently attached to THIS pod.
 
-        Matches `usbip port`'s remote against this pod's static handles
-        (hostname/addr4/addr6), the seed address, and the resolver's cached
-        connect address. Normalises an IP literal to its canonical compressed
-        form (stripping surrounding brackets, any %zone, and casing) via
-        ipaddress, so a v4, ULA, global, or link-local attachment matches
-        regardless of how each side spelled the address; a hostname falls back to
-        a lowercased, trailing-dot-stripped compare. Uses no network.
+        A port matches if its `usbip port` remote either
+
+          - equals one of this pod's handles (hostname / addr4 / addr6 / seed /
+            the resolver's cached connect address), each normalised to a
+            canonical compressed IP or a lowercased, dot-stripped hostname
+            (surrounding brackets and any %zone stripped) so a v4, ULA, global,
+            or link-local attach matches however each side spelled it; or
+          - is an IPv6 address whose EUI-64 interface id equals one of the pod's
+            (see _iid6). This is the drift-proof match: if the pod's ULA prefix
+            changed or it attached over a global/link-local not among the stored
+            handles, the exact-string compare misses it but the interface id
+            still identifies the same NIC. Without it detach silently no-ops and
+            an SWD reset/flash runs under a live forward (the task-#1 hazard).
 
         The cached connect address is included because usbip_attach connects to
         resolver.resolve(), which on the mDNS-fallback tier returns a live-resolved
-        address that need not be one of the static handles; without it the vhci
-        port that attach created would not match here and detach would no-op.
+        address that need not be one of the static handles. Uses no network.
         """
         from pod import usbip as _u
 
@@ -1260,11 +1288,17 @@ class Pod:
             except ValueError:
                 return a.lower()
         r = self._resolver
-        mine = {_norm(a) for a in [r.hostname, r.addr4, r.cached] + list(r.addr6)
-                if a}
+        handles = [r.hostname, r.addr4, r.cached] + list(r.addr6)
         if self._seed_address:
-            mine.add(_norm(self._seed_address))
-        return [p["port"] for p in _u.ports() if _norm(p.get("remote")) in mine]
+            handles.append(self._seed_address)
+        mine = {_norm(a) for a in handles if a}
+        my_iids = {i for i in (_iid6(a) for a in handles) if i is not None}
+        matched = []
+        for p in _u.ports():
+            remote = p.get("remote")
+            if _norm(remote) in mine or _iid6(remote) in my_iids:
+                matched.append(p["port"])
+        return matched
 
     def usbip_detach(self, port=None):
         """Detach a vhci port, or (port=None) every port attached to this pod.
