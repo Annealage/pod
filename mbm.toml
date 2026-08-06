@@ -29,8 +29,7 @@ title = "lib/tinyusb: bump to rp2 host endpoint abort/close fix (hathach/tinyusb
 
 [[submodules.branches]]
 name = "manifest_c_module"
-pr_url = "https://github.com/micropython/micropython/pull/18229"
-pr_number = 18229
+pr_url = "https://github.com/andrewleech/micropython/tree/manifest_c_module"
 title = "Add c_module() manifest function for user C modules"
 
 [[submodules.branches]]
