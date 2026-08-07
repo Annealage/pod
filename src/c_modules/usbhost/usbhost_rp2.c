@@ -1223,6 +1223,49 @@ bool usbhost_is_verbose(void)
  * rp2 (mp_usbh_deinit only skips it on ESP32).
  * ------------------------------------------------------------------------- */
 
+/* Abort every in-flight forwarder URB so no endpoint is left with its DWC2
+ * buffer-control armed when tuh_deinit tears the controller down. A live
+ * forward's in-flight IN/OUT URBs are the #74 double-arm trigger: deinit (and
+ * the subsequent re-init/re-arm) over an EP whose AVAILABLE bit the hardware
+ * still owns trips tinyusb's "buf_ctrl already available" - a panic on stock
+ * tinyusb, degraded to a skip-and-record on the pinned build, but a spurious
+ * double-arm we should not provoke either way. tuh_edpt_abort_xfer runs the
+ * EP_ABORT handshake and clears the buffer-control (plus the tinyusb epx
+ * quiesce guard), so quiescing first makes flush's teardown clean. Mirrors
+ * usbhost_cancel_ep's synthesise-completion path (the bundled TinyUSB pin does
+ * not fire the abort callback): deliver -ECONNRESET and free the record here.
+ * Single-core: flush holds the main thread, so no new submit races this, and
+ * -ECONNRESET does not re-submit (same contract usbhost_cancel_ep relies on).
+ * Even if it did, the EP is now quiesced, so a fresh arm would be clean. */
+static void quiesce_all_inflight(void)
+{
+    for (int slot = 0; slot < USBHOST_MAX_DEVICES; slot++) {
+        uint8_t dev_addr = s_state.devices[slot].dev_addr;
+        if (dev_addr == 0) {
+            continue;
+        }
+        for (uint8_t ep_idx = 0; ep_idx < 32; ep_idx++) {
+            usbhost_inflight_t *inflight = s_state.devices[slot].current_inflight[ep_idx];
+            if (inflight == NULL) {
+                continue;
+            }
+            /* Reverse ep_mutex_index: dir bit4 -> ep_addr bit7, number in [3:0]. */
+            uint8_t ep_addr = (uint8_t)((ep_idx & 0x0F) | ((ep_idx & 0x10) << 3));
+            tuh_edpt_abort_xfer(dev_addr, ep_addr);
+            inflight = s_state.devices[slot].current_inflight[ep_idx];
+            if (inflight != NULL) {
+                s_state.devices[slot].current_inflight[ep_idx] = NULL;
+                void (*pending_cb)(void *, int, size_t) = inflight->user_cb;
+                void *pending_ctx = inflight->user_ctx;
+                inflight_free(inflight);
+                if (pending_cb) {
+                    pending_cb(pending_ctx, -ECONNRESET, 0);
+                }
+            }
+        }
+    }
+}
+
 int usbhost_flush(bool force_bus_reset)
 {
     if (!s_state.started) {
@@ -1247,6 +1290,9 @@ int usbhost_flush(bool force_bus_reset)
      * through the normal disconnect path and resets the DWC2 controller; the
      * re-init re-arms hot-plug detection. */
     USBHOST_DBG("flush: full host stack restart (tuh_deinit + tuh_init)");
+    /* Quiesce in-flight forwarder URBs first so tuh_deinit does not tear down an
+     * endpoint whose hardware buffer-control is still armed (the #74 double-arm). */
+    quiesce_all_inflight();
     tuh_deinit(BOARD_TUH_RHPORT);
 
     for (int i = 0; i < USBHOST_MAX_DEVICES; i++) {
