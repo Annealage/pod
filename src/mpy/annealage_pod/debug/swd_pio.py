@@ -32,12 +32,14 @@ SEL_OUTPUT = 0
 SEL_INPUT = 1
 
 # Default SWD clock divisor. The PIO clocks the output (write) phase at 2 PIO
-# cycles/bit and the input (read) phase at 3 cycles/bit, so at clkdiv=16 the
-# write clock is SYS/16/2 = 4.69 MHz and the read clock SYS/16/3 = 3.13 MHz -
+# cycles/bit and the input (read) phase at 4 cycles/bit, so at clkdiv=16 the
+# write clock is SYS/16/2 = 4.69 MHz and the read clock SYS/16/4 = 2.34 MHz -
 # both inside the nRF52840's characterised 8 MHz SWDCLK maximum. A smaller
-# divisor (clkdiv=8 -> 9.4 MHz write, 6.25 MHz read) runs the bus over spec and
+# divisor (clkdiv=8 -> 9.4 MHz write, 4.69 MHz read) runs the bus over spec and
 # samples the target-driven bits in too narrow a plateau, which shows up as
 # intermittent ACK=3 / parity errors, worst on a cold DUT with the least margin.
+# The read phase samples late on a widened high plateau (see swd_prog) to keep a
+# byte-exact read margin even as the bus rate rises.
 DEFAULT_CLKDIV = 16
 
 
@@ -68,13 +70,23 @@ def swd_prog():
     out(x, 1)                               # x = routine select bit
     jmp(not_x, "output")
 
-    # ---- input routine: 2 PIO cycles/bit, sample on the SWCLK-high plateau ----
+    # ---- input routine: 4 PIO cycles/bit, sample LATE on a widened SWCLK-high
+    #      plateau. Two settle cycles before the sample give a target-driven bit
+    #      time to settle - especially a 1->0 fall, which fights the SWDIO
+    #      pull-up and so falls slower than it rises - so a late/runt edge is not
+    #      sampled one bit off (the #71 single-bit-flip-HIGH). Only the first nop
+    #      raises SWCLK; the other high cycles add no edge, so the target still
+    #      advances one bit per iteration and the write->read turnaround framing
+    #      (TRN_WR=0, ACK[0] is the first sampled bit) is unchanged. Read wire
+    #      time is a negligible fraction of the per-word cost, so the extra cycle
+    #      does not matter for throughput. ----
     out(x, 27)                              # bit count - 1
     set(pindirs, 0)             .side(0)    # release SWDIO (input), clk low
     label("in_loop")
-    nop()                       .side(1)    # clk high, let SWDIO settle
-    in_(pins, 1)                .side(1)    # sample while clk high
-    jmp(x_dec, "in_loop")       .side(0)    # clk low, next bit
+    nop()                       .side(1)    # rising edge; clk high
+    nop()                       .side(1)    # settle (clk high, no new edge)
+    in_(pins, 1)                .side(1)    # sample late in the high plateau
+    jmp(x_dec, "in_loop")       .side(0)    # falling edge; clk low, next bit
     push()
     jmp("start")
 
@@ -142,7 +154,9 @@ class SWDPio:
     @property
     def f_swclk(self):
         # Write-phase clock only (2 PIO cyc/bit). The input phase runs slower at
-        # 3 cyc/bit = SYS / clkdiv / 3, so the read side is the tighter limit.
+        # 4 cyc/bit = SYS / clkdiv / 4 and samples late on a widened plateau, so
+        # the read side carries ample margin; the write ACK sample is the tighter
+        # one.
         return int(self.SYS_HZ / self.clkdiv / 2)
 
     def deinit(self):
