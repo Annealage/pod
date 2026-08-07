@@ -244,7 +244,7 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
     finally:
         if cl is not None:
             try:
-                cl.send(b"\x01" if err is None else b"\x00")
+                netutil.send_all(cl, b"\x01" if err is None else b"\x00", timeout_s=5)
             except Exception:
                 pass
             cl.close()
@@ -335,7 +335,7 @@ def write_mem_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFA
     finally:
         if cl is not None:
             try:
-                cl.send(b"\x01" if err is None else b"\x00")
+                netutil.send_all(cl, b"\x01" if err is None else b"\x00", timeout_s=5)
             except Exception:
                 pass
             cl.close()
@@ -373,7 +373,7 @@ def dump_stream(addr, length, port=3334, clkdiv=swd_pio.DEFAULT_CLKDIV):
                            for w in ap.read_block32(a, nwords))
             if len(buf) > left:
                 buf = buf[:left]
-            cl.sendall(buf)
+            netutil.send_all(cl, buf)   # EAGAIN-robust: raw sendall aborts under backpressure
             a += len(buf)
             left -= len(buf)
     except Exception as e:  # noqa: BLE001 - return as a result, not a raise

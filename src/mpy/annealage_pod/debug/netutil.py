@@ -14,6 +14,11 @@
 import select
 import time
 
+try:
+    from errno import EAGAIN as _EAGAIN
+except ImportError:
+    _EAGAIN = 11
+
 
 class AcceptTimeout(OSError):
     pass
@@ -72,3 +77,37 @@ def recv_into(cl, mv, timeout_s=30, slice_ms=1):
         got += r
         deadline = time.ticks_add(time.ticks_ms(), int(timeout_s * 1000))
     return got
+
+
+def send_all(cl, buf, timeout_s=30, slice_ms=1):
+    """Send all of `buf` on the non-blocking socket `cl`, retrying on EAGAIN.
+
+    The accepted socket inherits the listener's non-blocking mode (see accept),
+    so send() signals a full lwIP TCP send buffer with EAGAIN - raised as
+    OSError, or a None/0 return on some builds. A raw sendall aborts the whole
+    transfer on that transient backpressure, which truncates a long stream
+    (dump_stream) whenever the receiver briefly outruns the drain. Retry: send
+    what fits, and on backpressure sleep_ms so the single event loop services
+    lwIP/cyw43 (ACKs drain, the send buffer frees), then continue - the mirror
+    of recv_into on the send side. `timeout_s` bounds a receiver that stops
+    draining so a dead peer cannot spin forever.
+    """
+    mv = memoryview(buf)
+    n = len(mv)
+    sent = 0
+    deadline = time.ticks_add(time.ticks_ms(), int(timeout_s * 1000))
+    while sent < n:
+        try:
+            w = cl.send(mv[sent:n])
+        except OSError as e:                 # non-blocking: buffer full
+            if e.args[0] != _EAGAIN:
+                raise
+            w = None
+        if not w:                           # EAGAIN (None) or 0 bytes accepted
+            if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+                raise OSError(110)          # ETIMEDOUT - stalled receiver
+            time.sleep_ms(slice_ms)         # yield to lwIP/cyw43, avoid a tight spin
+            continue
+        sent += w                           # send() may accept a partial write
+        deadline = time.ticks_add(time.ticks_ms(), int(timeout_s * 1000))
+    return sent
