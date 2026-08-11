@@ -25,20 +25,23 @@ _flm = None
 
 
 # Selectable flash backend. "native" is the per-family NVM path
-# (flash_nrf52.NRF52Flash), driven directly through the NVMC; "flm" is the
-# generic CMSIS flash-algorithm runner (flm.FLMFlasher + flm_<part>.FLASH_ALGO)
-# that runs a standard algorithm blob on the target and so generalises to any
-# chip with a CMSIS pack. Both are hardware-validated (nRF52840, 2026-07-09:
-# program + full-chip erase). Default per operation: the flat-binary flash_stream
-# path defaults to "native" (nRF fast-path, preserves prior behaviour), while the
-# ELF flash path and mass-erase (erase_all) default to "flm" so they generalise
-# across pack targets. _select_loader keeps the choice out of the hot path.
+# (flash_nrf52.NRF52Flash), driven directly through the NVMC and hardware-validated
+# on the nRF52840 (2026-07-09: program + full-chip erase). "flm" is the generic
+# CMSIS flash-algorithm runner (flm.FLMFlasher) that runs a standard algorithm on
+# the target and so generalises to any chip with a CMSIS pack; it needs the
+# algorithm supplied by the host from the target's on-demand CMSIS pack, so until
+# that host path lands "flm" has no algorithm source (see _flm_algo) and every
+# operation defaults to "native". _select_loader keeps the choice out of the hot
+# path.
 def _flm_algo():
-    # The CMSIS flash algorithm for the connected DUT. nRF52840 is the only
-    # extracted pack present; a real multi-DUT pod would pick this from the
-    # discovered part id. Imported lazily so the native path never loads it.
-    from . import flm_nrf52840
-    return flm_nrf52840.FLASH_ALGO
+    # The CMSIS flash algorithm for the connected DUT. The host supplies this from
+    # the target's CMSIS Device Family Pack, downloaded on demand and keyed off the
+    # discovered part id; on-pod hardcoded algorithms are not carried. Until that
+    # host path lands the generic FLM loader has no algorithm source, so the native
+    # per-family path (flash_nrf52) is the default for every operation.
+    raise NotImplementedError(
+        "no on-pod CMSIS flash algorithm; use loader='native', or supply an "
+        "algorithm from the host's on-demand CMSIS pack (not yet implemented)")
 
 
 def _ensure(clkdiv=swd_pio.DEFAULT_CLKDIV):
@@ -254,11 +257,12 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
             "loader": loader}
 
 
-def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="flm"):
-    # Erase the entire DUT flash, returning timing and loader info. loader="flm"
-    # runs the generic CMSIS FLMFlasher.erase_all() (halts core, runs the
-    # algorithm blob, resumes); loader="native" uses NRF52Flash.mass_erase()
-    # directly through the NVMC. The core is always resumed in the finally.
+def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
+    # Erase the entire DUT flash, returning timing and loader info. loader="native"
+    # (default) uses NRF52Flash.mass_erase() directly through the NVMC; loader="flm"
+    # runs the generic CMSIS FLMFlasher.erase_all() (halts core, runs the algorithm,
+    # resumes) once a host-supplied CMSIS-pack algorithm is available. The core is
+    # always resumed in the finally.
     dp, ap, cm, fl = _ensure(clkdiv)
     err = None
     t0 = time.ticks_ms()

@@ -3,7 +3,7 @@
 # Layers, bottom up:
 #   swd_pio  : SWD bit transport over a PIO state machine (the proven primitive).
 #   swd_dap  : ADIv5 DP / AP / MEM-AP on top of the transport, plus Cortex-M
-#              halt/run control. Implemented from the ARM ADIv5 / ARMv7-M specs so it stays portable.
+#              halt/run control, from the ARM ADIv5 / ARMv7-M specs so it stays portable.
 #   flash_*  : per-target flash loaders driven through the MEM-AP (nRF52 NVMC
 #              first; CMSIS-FLM general path and the RP-native fast path later).
 #

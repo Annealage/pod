@@ -17,12 +17,12 @@ pod, over the network.
   (AIRCR.SYSRESETREQ / VECTRESET), DEMCR vector-catch, register file read/write
   (DCRSR/DCRDR), hardware breakpoints (FPB) and watchpoints (DWT).
 
-### D3.2 GDB server (implemented from the ARM/GDB specs)
-- Implement a GDB-remote (RSP) server to MicroPython: RSP packet framing, the core
+### D3.2 GDB server (GDB RSP, independent implementation)
+- Implement a GDB-remote (RSP) server in MicroPython: RSP packet framing, the core
   command set (`?`, `g`/`G`, `m`/`M`, `c`, `s`, `Z`/`z`, `qSupported`,
   vCont, memory-map and target XML), served over a TCP socket on the pod.
-- Trim to the subset `pico_debug`'s server implements where a full desktop GDB server is too heavy
-  for RAM; add features lazily.
+- Trim to the subset `pico_debug`'s server implements where a full desktop GDB
+  server is too heavy for RAM; add features lazily.
 - Reuse the memory cache idea from `pico_debug` (coalesce GDB's many small reads)
   to keep stepping responsive over Wi-Fi.
 
@@ -56,5 +56,5 @@ Wi-Fi.
 
 ## References
 
-- pyOCD `gdbserver`; `github.com/essele/pico_debug` (`gdb.c`, memory cache)
+- `github.com/essele/pico_debug` (`gdb.c`, memory cache) - the GDB RSP + memory-cache model
 - S3 spec §3.4 (reset paths)

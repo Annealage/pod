@@ -557,7 +557,23 @@ def build_server():
     if not _MCP_AVAILABLE:
         raise RuntimeError("mcp package is not installed.")
 
-    server = Server("annealage-pod")
+    server = Server(
+        "annealage-pod",
+        instructions=(
+            "One pod is typically shared across agents. Two usage contracts:\n"
+            "1. SINGLE-CLIENT REPL: the pod's socket REPL has one slot. A repl_open "
+            "session (or a pod_exec) holds it, and a second concurrent connect is "
+            "refused by design - agents must SERIALIZE pod REPL access (finish an "
+            "exec, or repl_close a session, before another agent connects). This is "
+            "not a fault; it is the pod's contract.\n"
+            "2. DUT RE-ENUM -> STALE EXPORT: if a forwarded DUT re-enumerates "
+            "(reset / replug / re-flash), the usbip export slot can go stale - a "
+            "fresh attach then floods 0xff-then-quiet, or the host logs 'string "
+            "descriptor 0 read error: -19'. Call reprobe_dut to refresh it "
+            "(attach_dut / dut_exec auto-reprobe only on an EMPTY export, not a "
+            "stale-but-present one). See docs/pod/troubleshooting.md."
+        ),
+    )
 
     @server.list_tools()
     async def list_tools():
@@ -779,9 +795,10 @@ def build_server():
                 name="erase_dut",
                 description=(
                     "Erase the entire DUT flash via the on-pod debug stack. "
-                    "loader 'flm' uses the generic CMSIS-FLM path (works for "
-                    "any pack target); 'native' uses the nRF NVMC mass-erase "
-                    "fast-path. Returns {ok, ms, loader, err}."
+                    "loader 'native' (default) uses the nRF NVMC mass-erase "
+                    "fast-path; 'flm' is the generic CMSIS-FLM path (pending "
+                    "host-supplied on-demand CMSIS packs). Returns {ok, ms, "
+                    "loader, err}."
                 ),
                 inputSchema={
                     "type": "object",
@@ -789,9 +806,9 @@ def build_server():
                         "label": {"type": "string", "description": "Pod label."},
                         "loader": {
                             "type": "string",
-                            "enum": ["flm", "native"],
-                            "description": "Flash algorithm: 'flm' (generic) or 'native' (nRF NVMC fast-path).",
-                            "default": "flm",
+                            "enum": ["native", "flm"],
+                            "description": "Flash algorithm: 'native' (nRF NVMC fast-path, default) or 'flm' (generic, pending on-demand CMSIS packs).",
+                            "default": "native",
                         },
                     },
                     "required": ["label"],

@@ -41,7 +41,7 @@ divergence in the silicon backends.
 
 | Concern | ESP32-S3 | RP2350 | Rationale |
 |---|---|---|---|
-| Debug probe | synthetic CMSIS-DAP-v2 over USB/IP, host pyOCD drives | debug-probe subset runs **on the pod**, drives SWD locally | removes the CMSIS-DAP-over-USB/IP latency stack-up the S3 spec flagged as a pivot trigger (§9.2) |
+| Debug probe | synthetic CMSIS-DAP-v2 over USB/IP, host pyOCD drives | a debug-probe subset runs **on the pod**, drives SWD locally | removes the CMSIS-DAP-over-USB/IP latency stack-up the S3 spec flagged as a pivot trigger (§9.2) |
 | SWD I/O | SPI2 + GDMA register-direct | PIO state machine | PIO is the native fit on RP2350; `pico_debug` proves the approach |
 | USB host | USB-OTG (TinyUSB), full speed | native USB controller, host mode | native host is more reliable than Pico-PIO-USB and consumes no PIO |
 | Pod management | console UART + Wi-Fi REPL | Wi-Fi socket REPL only | native USB is spoken for by the DUT host role |

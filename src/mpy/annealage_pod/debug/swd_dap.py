@@ -1,7 +1,9 @@
 # ADIv5 DP / AP / MEM-AP and Cortex-M debug control over the PIO SWD transport.
 #
-# Implemented from the ARM ADIv5 (IHI0031) and ARMv7-M (DDI0403) reference manuals, trimmed to what the
-# pod's flasher needs and kept structurally close so behaviour is familiar:
+# Implemented from the ARM ADIv5 (IHI0031) and ARMv7-M (DDI0403) architecture
+# reference manuals: the register offsets and bit fields are the architecture's;
+# the transport, caching, block access and error recovery are the pod's own, over
+# swd_pio.
 #   DebugPort : line bring-up, DPIDR, power handshake, SELECT banking, sticky
 #               error / ABORT recovery, posted AP reads via RDBUFF.
 #   MEMAP     : 8/16/32-bit single access and 32-bit block access with TAR

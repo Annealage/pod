@@ -3,8 +3,9 @@
 # Runs a standard CMSIS flash algorithm on the target itself, the general path
 # that works for any chip with a CMSIS pack, as opposed to the per-family native
 # NVM path (flash_nrf52). The algorithm is a position-independent Thumb blob with
-# fixed entry points (Init / EraseSector / ProgramPage / EraseChip), the same
-# standard CMSIS-FLM contract, as Keil and CMSIS-DAP tooling use; we drive it through the MEM-AP + core registers:
+# fixed entry points (Init / EraseSector / ProgramPage / EraseChip), the standard
+# CMSIS-FLM contract (as Keil and CMSIS-DAP tooling use); we drive it through the
+# MEM-AP + core registers:
 #
 #   1. load the blob into target SRAM at load_address;
 #   2. per call: set R0..R3 = args, R9 = static_base (PIC data), SP = begin_stack,
@@ -12,10 +13,10 @@
 #      halts the core), PC = entry, xPSR = Thumb;
 #   3. resume, wait for the BKPT halt, read R0 = status (0 = ok).
 #
-# The algorithm dict (see flm_nrf52840.py) carries the blob, entry points,
-# begin_data / begin_stack / static_base, flash_base/size and page_size. Target
-# data is produced host-side from a CMSIS Device Family Pack; on-device pack handling is
-# out of scope.
+# The algorithm dict carries the blob, entry points, begin_data / begin_stack /
+# static_base, flash_base/size and page_size. The host supplies it from the
+# target's CMSIS Device Family Pack, downloaded on demand; on-pod pack handling
+# and on-pod hardcoded algorithms are out of scope.
 
 import time
 

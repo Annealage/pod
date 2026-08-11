@@ -736,16 +736,30 @@ class TestFlashDutLoaderConsistency:
         cmd = Pod._flash_stream_cmd(0x0, 64, 3333, True)
         assert "loader='native'" in cmd
 
-    def test_elf_flash_uses_flm_by_default(self, monkeypatch, fake_runner):
-        # ELF path defaults to "flm"; _flash_stream_cmd for flash segments must
-        # carry loader='flm', not fall through to the "native" default.
+    def test_elf_flash_defaults_to_native(self, monkeypatch, fake_runner):
+        # ELF path defaults to "native" (nRF NVMC); the generic "flm" path awaits a
+        # host-supplied on-demand CMSIS-pack algorithm. A flash_dut on an ELF with no
+        # loader must thread loader='native' into both the erase and the flash segments.
         p = self._make_elf_pod(monkeypatch, fake_runner)
-        cmd = p._flash_stream_cmd(0x0, 8, 3333, True, loader="flm")
-        assert "loader='flm'" in cmd
-        # Verify _flash_dut_elf builds the correct cmd by inspecting what the
-        # static helper would produce for the chosen loader.
-        cmd_native = p._flash_stream_cmd(0x0, 8, 3333, True, loader="native")
-        assert "loader='native'" in cmd_native
+        fake_runner.return_value = MagicMock(
+            stdout="{'ok': True, 'ms': 100, 'loader': 'native', 'err': None}\n",
+            returncode=0)
+        stream_cmds = []
+
+        def _fake_stream(cmd, payload, size, port):
+            stream_cmds.append(cmd)
+            return {"ok": True, "addr": 0, "bytes": size, "err": None,
+                    "loader": "native"}
+
+        monkeypatch.setattr(p, "_stream_region", _fake_stream)
+        monkeypatch.setattr(p, "_verify_flashed", lambda *a, **k: {"ok": True})
+        p.flash_dut("fake.elf", mass_erase=True)   # no loader -> ELF default
+        erase_code = fake_runner.call_args[0][0][4]
+        assert "loader='native'" in erase_code, (
+            "erase_all defaulted to wrong loader: %r" % erase_code)
+        assert stream_cmds, "no _stream_region call recorded"
+        assert "loader='native'" in stream_cmds[0], (
+            "flash_stream defaulted to wrong loader: %r" % stream_cmds[0])
 
     def test_elf_mass_erase_and_program_use_same_loader(self, monkeypatch,
                                                          fake_runner):

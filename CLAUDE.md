@@ -6,7 +6,7 @@ and naming conventions.
 ## Targets
 
 - **RP2350 (Pico 2 W)** (canonical, current target): the pod runs the debugger
-  itself in MicroPython (PIO SWD + DP/AP/MEM-AP + CMSIS FLM flash loader + a
+  itself in MicroPython (PIO SWD + DP/AP/MEM-AP + CMSIS FLM flash loader + an
   on-pod GDB RSP server) instead of exporting a synthetic CMSIS-DAP probe over
   USB/IP. The native USB controller is the DUT host port; pod management (REPL,
   flashing, mount) rides Wi-Fi over a socket REPL.

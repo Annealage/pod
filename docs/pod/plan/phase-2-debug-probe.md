@@ -12,12 +12,12 @@ using an on-pod CMSIS FLM flash loader plus reused target descriptions.
 
 ## Tasks
 
-### D2.1 DP/AP/MEM-AP layer (implemented from the ARM/GDB specs)
-- Implement the ADIv5 debug-port / access-port / MEM-AP logic to MicroPython on top of
+### D2.1 DP/AP/MEM-AP layer (ADIv5, from the ARM spec)
+- Implement the ADIv5 debug-port / access-port / MEM-AP logic in MicroPython on top of
   the PIO SWD primitive: DPIDR, CTRL/STAT power handshake, SELECT banking, MEM-AP
   CSW/TAR/DRW with auto-increment, 8/16/32-bit access, block read/write, RDBUFF
   posted-read handling, sticky-error/ABORT recovery, WAIT retry.
-- Keep the layering conventional so behaviour is familiar and portable.
+- Keep the layering conventional (ADIv5 DP/AP/MEM-AP) so behaviour is familiar and portable.
 
 ### D2.2 CMSIS FLM flash loader
 - Implement the CMSIS flash-algorithm contract: load the position-independent
@@ -38,7 +38,7 @@ using an on-pod CMSIS FLM flash loader plus reused target descriptions.
 - Define a compact on-VFS format for what the loader needs per target: memory map
   (flash/RAM regions), the FLM blob, page/sector geometry, RAM load address.
 - Host-side extraction tool (part of the `pod` toolchain, Phase 6 seed): turn a
-  CMSIS pack / pyOCD `FLASH_ALGO` into the on-VFS format. On-device pack search and
+  CMSIS pack `FLASH_ALGO` into the on-VFS format. On-device pack search and
   download are out of scope; the host produces the data and serves it via the VFS
   or `ampremote mount`.
 
@@ -54,7 +54,7 @@ using an on-pod CMSIS FLM flash loader plus reused target descriptions.
 
 - MicroPython modules: `swd_dap` (DP/AP/MEM-AP), `flash_loader` (FLM + RP-native),
   target-data loader.
-- Host extraction tool: CMSIS pack / pyOCD algo -> on-VFS target data.
+- Host extraction tool: CMSIS pack algo -> on-VFS target data.
 - A flashed-and-verified DUT over the network.
 
 ## Exit gate

@@ -385,12 +385,13 @@ class Pod:
             raise result["exc"]
         return _last_dict(result.get("out", ""))
 
-    def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "flm") -> dict:
+    def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native") -> dict:
         """Erase the entire DUT flash via the on-pod debug stack.
 
         Runs ops.erase_all() on the pod over the REPL. loader selects the
-        flash algorithm: "flm" for the generic CMSIS-FLM path (works for any
-        pack target), "native" for the nRF NVMC mass-erase fast-path.
+        flash algorithm: "native" (default) for the nRF NVMC mass-erase
+        fast-path, "flm" for the generic CMSIS-FLM path once a host-supplied
+        on-demand CMSIS-pack algorithm is available.
         Returns the on-pod result dict {ok, ms, loader, err}.
         """
         out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader))
@@ -505,8 +506,9 @@ class Pod:
               segment (err names it), leaving the earlier segments applied.
             addr is ignored for ELF images.
             loader selects the flash algorithm for both erase (if mass_erase=True)
-            and per-segment programming. Defaults to "flm" for the ELF path (the
-            generic CMSIS algorithm, which works for any pack target).
+            and per-segment programming. Defaults to "native" (nRF NVMC); the
+            generic "flm" path awaits a host-supplied on-demand CMSIS-pack
+            algorithm.
 
         For flat binaries (non-ELF): single-segment flash at addr. mass_erase
         issues ops.erase_all() before streaming. Defaults to "native" for
@@ -525,10 +527,11 @@ class Pod:
                 raise ValueError(
                     "DUT flash geometry (flash_base + flash_size) must be "
                     "declared in the registry dut block to flash an ELF image")
-            # Default to "flm" for ELF: the generic CMSIS algorithm works for
-            # any pack target, whereas "native" is nRF-only. Both erase and
-            # program use the same backend so they agree on the flash layout.
-            elf_loader = loader if loader is not None else "flm"
+            # Default to "native" (nRF NVMC): the generic "flm" path needs a
+            # host-supplied on-demand CMSIS-pack algorithm, which is not wired up
+            # yet. Both erase and program use the same backend so they agree on
+            # the flash layout.
+            elf_loader = loader if loader is not None else "native"
             return self._flash_dut_elf(
                 image, flash_ranges=flash_ranges, port=port, verify=verify,
                 mass_erase=mass_erase, loader=elf_loader)
@@ -551,7 +554,7 @@ class Pod:
     def _flash_dut_elf(self, image: str, flash_ranges: list,
                        port: int = 3333, verify: bool = True,
                        mass_erase: bool = False,
-                       loader: str = "flm") -> dict:
+                       loader: str = "native") -> dict:
         """Flash an ELF image segment-by-segment via flash_stream / write_mem_stream.
 
         loader is used for both the mass_erase (if requested) and every flash

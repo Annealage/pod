@@ -76,8 +76,8 @@ spike, but the headroom is larger.
 
 ### Debug probe runs on the pod
 
-The probe is a pure-MicroPython debug stack: PIO SWD line layer, DP/AP/MEM-AP
-register access, a CMSIS FLM-blob flash loader, and a ported GDB server. Target
+The probe is a pure-MicroPython debug stack: PIO SWD line layer, an ADIv5
+DP/AP/MEM-AP register layer, a CMSIS FLM-blob flash loader, and a GDB RSP server. Target
 descriptions and flash-algorithm blobs are CMSIS-pack data stored on the pod VFS
 or served over `mount`; host-side tooling handles pack search/download/extraction.
 Reference for the on-device PIO-SWD + GDB-server + flashing shape:
@@ -128,9 +128,9 @@ and over the Wi-Fi socket REPL for the network proof.
 - **Generic CMSIS-FLM loader (D2.2)**: runs a standard CMSIS flash algorithm on
   the target (load blob to SRAM, call Init/EraseSector/ProgramPage via core
   registers + MEM-AP, resume with interrupts masked, BKPT-return). Validated on
-  the nRF52840 with the CMSIS-pack flash algorithm (FLM erase+program+verify, ~570 ms
-  / 1 KB), 3/3 deterministic. Generalises flashing to any CMSIS-pack target;
-  `tools/flm_extract.py` produces the on-VFS algo data. RP-native (bootrom) flash
+  the nRF52840 with a CMSIS-pack flash algorithm (FLM erase+program+verify, ~570 ms
+  / 1 KB), 3/3 deterministic. Generalises flashing to any CMSIS-pack target; the
+  host supplies the on-VFS algo data from the target's CMSIS pack. RP-native (bootrom) flash
   remains, blocked on a wired RP DUT.
 - **GDB debugging (Phase 3)**: hybrid GDB server, a stateless on-pod binary
   debug-command server (`dbgsrv`, port 3335) + host GDB RSP translator
