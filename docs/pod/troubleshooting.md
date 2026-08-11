@@ -24,7 +24,9 @@ Match the exact symptom to the cause, then jump to its fix:
   buried in it) -> Cause 3 (the DUT is transmitting `0xff` - almost always an
   INCOMPLETE FLASH; a hole over rodata prints `0xff`). NOT a pod relay bug.
 - **`0xff` flood then goes quiet** on a fresh attach, after prior attach/detach
-  churn -> Cause 4 (a stale usbip export slot); clears with `usbip.stop/start`.
+  churn, OR a host attach that fails with `string descriptor 0 read error: -19`
+  in `dmesg` after a DUT reset/replug -> Cause 4 (a stale usbip export slot);
+  clears with `pod reprobe` or `usbip.stop/start`.
 - Input **drains from stdin but never executes** (no echo, no result) -> Cause 1
   (RAW-mode latch).
 
@@ -110,16 +112,28 @@ a stale EPIN EasyDMA buffer when its CDC tx_ff is empty - a DUT tinyusb/driver
 bug, not the pod. Same memory covers how to tell it apart from a flash hole with
 an SWD read of tx_ff + the EPIN buffer.)
 
-### Cause 4 - a 0xff flood that then goes quiet: a stale usbip export slot
+### Cause 4 - a stale usbip export slot after a DUT re-enumeration
 
-After repeated attach/detach churn (or a DUT re-enumeration), the pod's usbip
-export slot can go stale and flood ~30KB of `0xff` on a fresh attach before
-settling. Distinct from Cause 3 (that flood is sustained and is real DUT data);
-this one is the pod's stale slot and clears with a server restart:
+After repeated attach/detach churn, or a DUT re-enumeration (an SWD/`machine`
+reset, a self-reset, or a replug), the pod's usbip export slot can go stale: it
+still carries the previous enumeration's cached descriptors while the DUT's live
+USB state has moved on. Two presentations of the same stale slot:
 
-    pod exec <label> "import usbip; usbip.stop(); usbip.start()"
+- a fresh attach floods ~30KB of `0xff` then goes quiet - distinct from Cause 3,
+  whose flood is sustained real DUT data; or
+- the host attach cannot read the device: `dmesg` shows
+  `usb N-1: string descriptor 0 read error: -19` (the cached config descriptor
+  imports fine, but the live EP0 string-descriptor read hits the stale
+  enumeration and returns ENODEV).
 
-Then re-attach. See the `pod-usbip-stale-slot-reenum` auto-memory.
+Both clear the same way - refresh the slot, then re-attach. Either works:
+
+    pod reprobe <label>                                          # re-seed from the live mount
+    pod exec <label> "import usbip; usbip.stop(); usbip.start()"  # or rebuild the server
+
+Note the host-side auto-reprobe (`attach_dut` / `pod dut-exec`) only fires on an
+EMPTY export, not a stale-but-present one, so this case needs an explicit
+`reprobe` or server restart. See the `pod-usbip-stale-slot-reenum` auto-memory.
 
 ## Symptom: the pod exports no DUT (`attach` / `dut_exec` says "exports no USB device")
 

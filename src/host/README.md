@@ -266,9 +266,13 @@ paths are validated against hardware, not in the unit tests.
 
 When the DUT's native USB is wired to the **pod's** USB host port, the pod exports
 it over USB/IP (TCP 3240) and the host attaches it as a local device. Device
-enumeration, attach, and the forwarded DUT REPL are validated. One caveat:
-sustained rapid USB-host attach/detach churn can wedge the pod's Wi-Fi (a separate
-known issue) and needs a reset; normal attach, use, and detach is reliable:
+enumeration, attach, and the forwarded DUT REPL are validated, and stay reliable
+under sustained attach/detach churn (the earlier Wi-Fi churn wedge is fixed). One
+caveat: if the DUT re-enumerates (reset / replug / re-flash) the export slot can
+go stale - a fresh attach then floods `0xff`-then-quiet, or the host logs
+`string descriptor 0 read error: -19`. Run `pod reprobe <label>` (or
+`usbip.stop()/start()` on the pod) to refresh it; see
+`docs/pod/troubleshooting.md`.
 
 ```bash
 pod usb lab1                 # list exported devices (live VID:PID + busid)
