@@ -199,7 +199,7 @@ should be replaced. An agent adds it with, for example:
 claude mcp add pod -- pod-mcp
 ```
 
-The server wraps the `pod` client and exposes **39 tools**. Grouped:
+The server wraps the `pod` client and exposes **40 tools**. Grouped:
 
 - **Discovery / registry:** `discover_pods`, `pod_info`, `register_pod`, `dut` (probe and
   reconcile the wired DUT's SWD identity).
@@ -209,7 +209,9 @@ The server wraps the `pod` client and exposes **39 tools**. Grouped:
 - **USB/IP:** `dut_usb`, `attach_dut`, `detach_dut`, `ensure_dut_link`, `dut_exec`
   (run code on the DUT's own REPL over USB/IP), `reprobe_dut` (recover a DUT the pod
   is not exporting - mounted-but-unexportable or a warm-reset edge-miss - without a
-  cold cycle; attach_dut tries it once automatically).
+  cold cycle; attach_dut tries it once automatically), `recover_dut_repl` (un-stick a
+  forwarded DUT REPL over its CDC tty - the first, non-destructive thing to try before
+  reset_dut).
 - **Pod-side exec / files:** `pod_exec`, `mount_dir`.
 - **Persistent REPL session:** `repl_open`, `repl_read`, `repl_send`, `repl_interrupt`,
   `repl_close`, `repl_list`.
@@ -245,7 +247,7 @@ The real command names and ports (the current page invents `annealage-pod flash`
 5. **Drive the DUT:** `pod flash <label> firmware.bin`, `pod reset <label>`,
    `pod gdb <label>` (prints a `target extended-remote host:port` for your gdb),
    `pod la <label> --pins 16-19 --out cap.vcd`, `pod repl <label>` (live streaming REPL).
-6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 38 tools above are
+6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 40 tools above are
    available over Wi-Fi.
 
 Ports in use: socket REPL `8266`, USB/IP `3240`, GDB/DAP RPC `3335`, flash-in `3333`,
@@ -342,9 +344,9 @@ the older ESP32-S3 design. Specific fixes:
 - **CLI names** - `annealage-pod flash` and `pod uart tail dut` are invented. The real CLI
   is `pod <verb>` (`pod flash`, `pod reset`, `pod gdb`, `pod repl`, `pod la`, ...). There is
   no UART tail command.
-- **No MCP action list** - the page has none; use the 38-tool list above.
+- **No MCP action list** - the page has none; use the 40-tool list above.
 - **Missing the actual differentiators** - the on-pod debugger, GDB-through-pod, the PIO
-  logic analyser, IPv6-first discovery, and the 38-tool MCP surface are the strongest,
+  logic analyser, IPv6-first discovery, and the 40-tool MCP surface are the strongest,
   validated capabilities and are absent from the page.
 
 Note on positioning: "shipping now" for Pod (alongside Canvas) is retained per the product
