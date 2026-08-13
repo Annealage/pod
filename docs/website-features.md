@@ -97,8 +97,9 @@ quickstart does not require USB/IP.
 
 Per-DUT-family status of the SWD debug / flash path. The on-pod debugger
 speaks SWD to ARM Cortex-M targets only. Any Cortex-M with a CMSIS pack is
-reachable in principle through the generic FLM runner (algo extracted
-host-side with `tools/flm_extract.py`), but a family is listed validated only
+reachable in principle through the generic FLM runner (the host supplies the
+algo from the target's CMSIS Device Family Pack, downloaded on demand; that
+pack lookup is not built yet), but a family is listed validated only
 after the operations were exercised on that silicon.
 
 | DUT family | Status | Flash path | Validated operations | Known limits |

@@ -177,23 +177,21 @@ the bound; reads were the original bottleneck until `read_drw_block` was inlined
 
 The per-family native path (`flash_nrf52`) is fastest where it exists; the
 generic path runs a standard CMSIS flash algorithm on the target and works for
-any chip with a CMSIS pack. Target data (the FLM blob + entry points + RAM
-layout + flash geometry) is generated host-side and deployed with the package:
+any chip with a CMSIS pack. `flm.FLMFlasher` takes an `algo` dict (the blob,
+entry points, `begin_data`/`begin_stack`/`static_base`, flash geometry, and
+`page_size`) sourced from the target's CMSIS Device Family Pack. The host is
+meant to supply this on demand, keyed off the discovered part id; that pack
+lookup is not built yet, so `ops.erase_all`/`ops.flash_dut` default to
+`loader="native"` and `ops._flm_algo()` raises `NotImplementedError` until it
+lands.
 
-```bash
-python tools/flm_extract.py --target target_nRF52840_xxAA \
-    --flash-base 0 --flash-size 0x100000 --page-size 0x1000 \
-    --out src/mpy/annealage_pod/debug/flm_nrf52840.py
-```
-
-Driving it on the pod:
+Driving it directly once you have an `algo` dict for the target:
 
 ```python
 import annealage_pod.debug.swd_dap as dap, annealage_pod.debug.flm as flm
-import annealage_pod.debug.flm_nrf52840 as algo
 dp = dap.DebugPort(swdio=14, swclk=15, sm_id=4); dp.connect()
 ap = dap.MEMAP(dp); cm = dap.CortexM(ap)
-f = flm.FLMFlasher(ap, cm, algo.FLASH_ALGO)
+f = flm.FLMFlasher(ap, cm, algo)  # algo: a CMSIS-FLM algo dict for the target
 f.program(0x000FF000, open("img.bin", "rb").read(), erase=True, verify=True)
 ```
 
@@ -256,8 +254,9 @@ through the pod over Wi-Fi.
 
 - Flashing: nRF52 native-NVM path and the generic CMSIS-FLM path both work
   (validated on the nRF52840). RP-native (bootrom) flashing is not built yet and
-  needs an RP DUT wired to validate. Other CMSIS-FLM targets need their algo
-  extracted (`tools/flm_extract.py`) and validation on that silicon.
+  needs an RP DUT wired to validate. Other CMSIS-FLM targets need an `algo` dict
+  sourced from that part's CMSIS Device Family Pack (the host-side on-demand
+  pack lookup is not built yet) and validation on that silicon.
 - SWD clock tops out at 9.375 MHz reliably; >= 10 MHz needs PIO input-phase
   tuning.
 - `resume` + editing PIO modules accumulates PIO instruction memory; clear with

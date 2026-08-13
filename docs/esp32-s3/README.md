@@ -6,11 +6,11 @@ CMSIS-DAP-v2 probe, a UART bridge, and I2C/SPI slave personalities. It mates wit
 the Octoprobe DUT carrier over a 2x20 connector.
 
 This is **not** the board in active bring-up. The live target is the **RP2350
-(Pico 2 W)** variant under [`../rp2350/`](../rp2350/), which inverts the
+(Pico 2 W)** variant under [`../pod/`](../pod/), which inverts the
 debug-probe decision (the pod runs the debugger itself over PIO SWD) and uses the
 native USB controller as the DUT host port. If you are wiring up hardware or
 following a recipe, use the RP2350 docs - in particular
-[`../rp2350/hardware-setup.md`](../rp2350/hardware-setup.md) for the DUT-to-pod
+[`../pod/hardware-setup.md`](../pod/hardware-setup.md) for the DUT-to-pod
 wiring. **The pin numbers in these ESP32-S3 documents (GPIO assignments up to
 GPIO48, USB on GPIO19/20, SWD on GPIO10/11, etc.) do not apply to the RP2350 and
 will mis-wire a Pico 2 W.**
