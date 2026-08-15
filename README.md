@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/pod-slab-dark.svg">
+  <img src="assets/pod-slab.svg" alt="Annealage Pod" width="320">
+</picture>
+
 # Annealage Pod
 
 Wi-Fi hardware-in-the-loop test rig: flash, debug, and exercise a device-under-test over the network, with the debugger running on the pod itself. No wired host, no separate probe.
