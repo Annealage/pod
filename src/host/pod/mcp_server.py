@@ -178,12 +178,16 @@ def handle_mount_dir(label: str, directory: str) -> str:
 
 def handle_flash_dut(label: str, image: str, target: str = None,
                      addr: int = 0, keep_attached: bool = False,
-                     mass_erase: bool = False) -> dict:
+                     mass_erase: bool = False, loader: str = None) -> dict:
     """Flash a firmware image to the DUT via the pod (streamed, no pod FS).
 
     Accepts a flat binary or an ELF file (detected by magic, not extension).
     For ELF images the DUT flash geometry must be declared in the registry dut
     block (flash_base + flash_size); addr is ignored.
+
+    loader selects the flash backend: "native" (default) is the per-family NVM
+    path; "flm" runs the target's CMSIS-pack algorithm, installed on the pod
+    first.
 
     Detaches a live USB/IP session first (reflashing the DUT mid-forward wedges
     the pod); keep_attached=True overrides.
@@ -193,15 +197,17 @@ def handle_flash_dut(label: str, image: str, target: str = None,
         raise KeyError(f"Pod '{label}' not found in registry.")
     pod = Pod.from_entry(entry)
     return pod.flash_dut(image, target=target, addr=addr,
-                         keep_attached=keep_attached, mass_erase=mass_erase)
+                         keep_attached=keep_attached, mass_erase=mass_erase,
+                         loader=loader)
 
 
 def handle_erase_dut(label: str, clkdiv: int = DEFAULT_SWD_CLKDIV,
-                     loader: str = "flm") -> dict:
+                     loader: str = "native") -> dict:
     """Erase the entire DUT flash via the on-pod debug stack.
 
-    loader: "flm" = generic CMSIS-FLM path (works for any pack target);
-    "native" = nRF NVMC mass-erase fast-path.
+    loader: "native" (default) = nRF NVMC mass-erase fast-path; "flm" = the
+    generic CMSIS path, which resolves the target's CMSIS-pack algorithm and
+    installs it on the pod first.
     Returns {ok, ms, loader, err}.
     """
     entry = get_pod(label)
@@ -792,6 +798,11 @@ def build_server():
                             "description": "Erase the entire DUT flash before programming.",
                             "default": False,
                         },
+                        "loader": {
+                            "type": "string",
+                            "enum": ["native", "flm"],
+                            "description": "Flash algorithm: 'native' (per-family NVM, default) or 'flm' (the target's CMSIS-pack algorithm).",
+                        },
                     },
                     "required": ["label", "image"],
                 },
@@ -801,9 +812,9 @@ def build_server():
                 description=(
                     "Erase the entire DUT flash via the on-pod debug stack. "
                     "loader 'native' (default) uses the nRF NVMC mass-erase "
-                    "fast-path; 'flm' is the generic CMSIS-FLM path (pending "
-                    "host-supplied on-demand CMSIS packs). Returns {ok, ms, "
-                    "loader, err}."
+                    "fast-path; 'flm' runs the target's CMSIS-pack algorithm, "
+                    "resolved from the DUT's declared target_family and "
+                    "installed on the pod first. Returns {ok, ms, loader, err}."
                 ),
                 inputSchema={
                     "type": "object",
@@ -812,7 +823,7 @@ def build_server():
                         "loader": {
                             "type": "string",
                             "enum": ["native", "flm"],
-                            "description": "Flash algorithm: 'native' (nRF NVMC fast-path, default) or 'flm' (generic, pending on-demand CMSIS packs).",
+                            "description": "Flash algorithm: 'native' (nRF NVMC fast-path, default) or 'flm' (generic CMSIS-pack algorithm, any target with a pack).",
                             "default": "native",
                         },
                     },
@@ -1480,12 +1491,13 @@ def build_server():
                     handle_flash_dut, arguments["label"], arguments["image"],
                     arguments.get("target"), arguments.get("addr", 0),
                     arguments.get("keep_attached", False),
-                    arguments.get("mass_erase", False))
+                    arguments.get("mass_erase", False),
+                    arguments.get("loader"))
             elif name == "erase_dut":
                 result = await asyncio.to_thread(
                     handle_erase_dut, arguments["label"],
                     arguments.get("clkdiv", DEFAULT_SWD_CLKDIV),
-                    arguments.get("loader", "flm"))
+                    arguments.get("loader", "native"))
             elif name == "reset_dut":
                 result = await asyncio.to_thread(
                     handle_reset_dut, arguments["label"],

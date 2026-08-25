@@ -12,6 +12,7 @@ Stubbed methods raise NotImplementedError with the phase they're pending:
 """
 
 import ast
+import base64 as _b64
 import ipaddress
 import os
 import socket
@@ -91,6 +92,17 @@ def _last_dict(stdout: str) -> dict:
             except (ValueError, SyntaxError):
                 pass
     return {"raw": stdout}
+
+
+def _last_int(stdout: str, default: int = 0) -> int:
+    """Parse the last printed integer from on-pod stdout."""
+    for line in reversed((stdout or "").strip().splitlines()):
+        line = line.strip()
+        try:
+            return int(line)
+        except ValueError:
+            pass
+    return default
 
 
 def _classify_exec_failure(stderr, stdout):
@@ -219,7 +231,9 @@ class Pod:
 
         Also captures DUT flash geometry (flash_base + flash_size from the
         declared dut block) so the ELF flash path can derive flash_ranges
-        without hardcoding target addresses.
+        without hardcoding target addresses, and the declared target_family,
+        which is the CMSIS device name the generic FLM path resolves a pack
+        with.
         """
         pod = cls(
             address=entry.get("address"),
@@ -240,6 +254,7 @@ class Pod:
             pod._elf_flash_ranges = [(fb, fb + fs)]
         else:
             pod._elf_flash_ranges = None
+        pod._cmsis_device = dut.get("target_family")
         return pod
 
     @property
@@ -336,7 +351,7 @@ class Pod:
         )
 
     @staticmethod
-    def _erase_all_cmd(clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "flm") -> str:
+    def _erase_all_cmd(clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native") -> str:
         """Build the on-pod erase_all invocation (pure, for testability)."""
         return (
             "import annealage_pod.debug.ops as o;"
@@ -409,15 +424,121 @@ class Pod:
             raise result["exc"]
         return _last_dict(result.get("out", ""))
 
+    # ── generic CMSIS flash algorithm (loader="flm") ─────────────────────
+    # The pod carries no flash algorithms. One is extracted here from the
+    # target's CMSIS Device Family Pack and installed over the REPL, in base64
+    # chunks so a large vendor algorithm is never one huge source literal on
+    # the pod. It stays installed for the pod's VM lifetime.
+
+    _FLM_B64_CHUNK = 6144
+
+    @staticmethod
+    def _stage_flm_cmd(b64: Optional[str] = None) -> str:
+        """Build the on-pod stage_flm_blob invocation (pure, for testability)."""
+        return (
+            "import annealage_pod.debug.ops as o;"
+            "print(o.stage_flm_blob(%s))" % ("" if b64 is None else repr(b64))
+        )
+
+    @staticmethod
+    def _set_flm_algo_cmd(meta: dict) -> str:
+        """Build the on-pod set_flm_algo invocation from metadata (no image).
+
+        The image is not in meta: it was staged in chunks beforehand, and
+        set_flm_algo takes the staged bytes when "instructions" is absent.
+        """
+        return (
+            "import annealage_pod.debug.ops as o;"
+            "print(o.set_flm_algo(%r))" % (meta,)
+        )
+
+    def install_flm_algo(self, algo: dict) -> dict:
+        """Install a CMSIS flash algorithm on the pod for loader="flm".
+
+        Stages the algorithm image in base64 chunks, checks the pod received
+        every byte, then installs it with the rest of the algo dict. Returns
+        the pod's summary {installed, name, blob_bytes, ...}.
+
+        Raises:
+            RuntimeError: if the staged byte count does not match what was sent.
+        """
+        image = algo["instructions"]
+        b64 = _b64.b64encode(image).decode("ascii")
+
+        self.exec(self._stage_flm_cmd())          # start a fresh image
+        staged = 0
+        for i in range(0, len(b64), self._FLM_B64_CHUNK):
+            out = self.exec(self._stage_flm_cmd(b64[i:i + self._FLM_B64_CHUNK]))
+            staged = _last_int(out, staged)
+        if staged != len(image):
+            raise RuntimeError(
+                "pod staged %d of %d algorithm bytes; transfer incomplete"
+                % (staged, len(image)))
+
+        meta = {k: v for k, v in algo.items() if k != "instructions"}
+        info = _last_dict(self.exec(self._set_flm_algo_cmd(meta)))
+        self._flm_installed = info if info.get("installed") else None
+        return info
+
+    def flm_algo_info(self) -> dict:
+        """What algorithm the pod currently has installed, if any."""
+        return _last_dict(self.exec(
+            "import annealage_pod.debug.ops as o;print(o.flm_algo_info())"))
+
+    def resolve_flm_algo(self, device: Optional[str] = None, addr=None,
+                         pack=None, allow_download: bool = False,
+                         **kwargs) -> dict:
+        """Build the algo dict for this DUT from its CMSIS pack.
+
+        device defaults to the registry dut block's declared target_family,
+        which is the CMSIS device name (e.g. "nRF52840_xxAA"). addr picks the
+        algorithm covering that flash address when a device has several.
+        Downloading a pack is opt-in; see pod.cmsis_pack.
+        """
+        from pod import cmsis_pack
+
+        device = device or getattr(self, "_cmsis_device", None)
+        if not device:
+            raise ValueError(
+                "no CMSIS device name: declare the DUT's target_family in the "
+                "registry (pod dut set --dut-family <name>) or pass device=")
+        return cmsis_pack.algo_for_device(
+            device, addr=addr, pack=pack, allow_download=allow_download,
+            **kwargs)
+
+    def ensure_flm_algo(self, addr=None, force: bool = False, **kwargs) -> dict:
+        """Make sure the pod has an algorithm installed for loader="flm".
+
+        Free once this client has installed one, so a mass-erase followed by
+        several flashes does not re-ship the image or even re-query the pod.
+        Falls back to asking the pod (a pod may already carry one from an
+        earlier session) before resolving a pack. force=True reinstalls: use it
+        after changing DUT, or to select an algorithm for a different flash
+        region.
+        """
+        installed = getattr(self, "_flm_installed", None)
+        if installed and not force:
+            return installed
+        if not force:
+            info = self.flm_algo_info()
+            if info.get("installed"):
+                self._flm_installed = info
+                return info
+        info = self.install_flm_algo(self.resolve_flm_algo(addr=addr, **kwargs))
+        self._flm_installed = info
+        return info
+
     def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native") -> dict:
         """Erase the entire DUT flash via the on-pod debug stack.
 
         Runs ops.erase_all() on the pod over the REPL. loader selects the
         flash algorithm: "native" (default) for the nRF NVMC mass-erase
-        fast-path, "flm" for the generic CMSIS-FLM path once a host-supplied
-        on-demand CMSIS-pack algorithm is available.
+        fast-path, "flm" for the generic CMSIS path, which resolves and
+        installs the target's CMSIS-pack algorithm first if the pod has none.
         Returns the on-pod result dict {ok, ms, loader, err}.
         """
+        if loader == "flm":
+            self.ensure_flm_algo()
         out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader))
         return _last_dict(out)
 
@@ -530,9 +651,9 @@ class Pod:
               segment (err names it), leaving the earlier segments applied.
             addr is ignored for ELF images.
             loader selects the flash algorithm for both erase (if mass_erase=True)
-            and per-segment programming. Defaults to "native" (nRF NVMC); the
-            generic "flm" path awaits a host-supplied on-demand CMSIS-pack
-            algorithm.
+            and per-segment programming. Defaults to "native" (nRF NVMC);
+            "flm" runs the target's CMSIS-pack algorithm, resolved and installed
+            on the pod first (see ensure_flm_algo) if it has none.
 
         For flat binaries (non-ELF): single-segment flash at addr. mass_erase
         issues ops.erase_all() before streaming. Defaults to "native" for
@@ -551,17 +672,20 @@ class Pod:
                 raise ValueError(
                     "DUT flash geometry (flash_base + flash_size) must be "
                     "declared in the registry dut block to flash an ELF image")
-            # Default to "native" (nRF NVMC): the generic "flm" path needs a
-            # host-supplied on-demand CMSIS-pack algorithm, which is not wired up
-            # yet. Both erase and program use the same backend so they agree on
-            # the flash layout.
+            # Default to "native" (nRF NVMC), the validated per-family path that
+            # needs no algorithm install. Both erase and program use the same
+            # backend so they agree on the flash layout.
             elf_loader = loader if loader is not None else "native"
+            if elf_loader == "flm":
+                self.ensure_flm_algo(addr=flash_ranges[0][0])
             return self._flash_dut_elf(
                 image, flash_ranges=flash_ranges, port=port, verify=verify,
                 mass_erase=mass_erase, loader=elf_loader)
 
         # Flat binary path - default "native" preserves prior behaviour.
         bin_loader = loader if loader is not None else "native"
+        if bin_loader == "flm":
+            self.ensure_flm_algo(addr=addr)
         if mass_erase:
             erase_result = self.erase_dut(loader=bin_loader)
             if not erase_result.get("ok"):

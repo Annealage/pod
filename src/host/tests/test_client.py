@@ -807,6 +807,10 @@ class TestFlashDutLoaderConsistency:
         # This test is about loader threading, not the end-to-end verify; stub the
         # read-back so it does not add its own exec call and shift call_args.
         monkeypatch.setattr(p, "_verify_flashed", lambda *a, **k: {"ok": True})
+        # This test is about loader threading, not algorithm resolution: stand
+        # in for an already-installed CMSIS algorithm so erase_dut does not go
+        # looking for a pack.
+        p._flm_installed = {"installed": True, "name": "fake"}
 
         p._flash_dut_elf("fake.elf", flash_ranges=[(0x0, 0x100000)],
                          port=3333, verify=True, mass_erase=True, loader="flm")
@@ -1199,3 +1203,119 @@ class TestAmpremoteResolution:
         client._AMPREMOTE_EXE = None
         p = Pod(addr4="10.0.0.1")
         assert p._argv("exec", "x")[0] == str(exe)
+
+class TestFlmAlgoInstall:
+    """Shipping a CMSIS algorithm to the pod for loader="flm".
+
+    The image goes over the REPL in base64 chunks (a vendor algorithm is tens
+    of KB and must not become one huge source literal on the pod), then the
+    metadata installs it. These cover the chunking, the transfer check, and the
+    caching that stops a mass-erase-then-flash re-shipping the image.
+    """
+
+    def _algo(self, size=32):
+        return {
+            "name": "TESTDEV",
+            "instructions": bytes(range(256)) * (size // 256 + 1),
+            "load_address": 0x20000000,
+            "page_size": 0x1000,
+            "flash_base": 0x0,
+            "flash_size": 0x100000,
+            "sectors": [(0x0, 0x1000)],
+        }
+
+    def _pod(self, monkeypatch, staged_reply=None):
+        p = Pod(addr4="10.0.0.1")
+        sent = []
+
+        def _fake_exec(code):
+            sent.append(code)
+            if "stage_flm_blob" in code:
+                return "%d\n" % (staged_reply if staged_reply is not None
+                                 else _fake_exec.staged)
+            return "{'installed': True, 'name': 'TESTDEV', 'blob_bytes': 1}\n"
+
+        _fake_exec.staged = 0
+        monkeypatch.setattr(p, "exec", _fake_exec)
+        return p, sent, _fake_exec
+
+    def test_image_is_staged_in_chunks_then_installed(self, monkeypatch):
+        algo = self._algo(size=20000)
+        p, sent, fx = self._pod(monkeypatch)
+        fx.staged = len(algo["instructions"])
+
+        info = p.install_flm_algo(algo)
+
+        stages = [c for c in sent if "stage_flm_blob" in c]
+        # one reset call with no argument, then one per base64 chunk
+        assert stages[0].endswith("stage_flm_blob())")
+        expected_chunks = -(-len(_b64_of(algo)) // Pod._FLM_B64_CHUNK)
+        assert len(stages) == 1 + expected_chunks
+        assert info["installed"] is True
+
+    def test_metadata_is_installed_without_the_image(self, monkeypatch):
+        algo = self._algo()
+        p, sent, fx = self._pod(monkeypatch)
+        fx.staged = len(algo["instructions"])
+
+        p.install_flm_algo(algo)
+
+        install = [c for c in sent if "set_flm_algo" in c]
+        assert len(install) == 1
+        # The image never appears in the install call; it was staged already.
+        assert "instructions" not in install[0]
+        assert "'page_size': 4096" in install[0]
+        assert "'sectors': [(0, 4096)]" in install[0]
+
+    def test_short_transfer_is_refused(self, monkeypatch):
+        algo = self._algo()
+        p, sent, fx = self._pod(monkeypatch, staged_reply=3)
+        with pytest.raises(RuntimeError, match="transfer incomplete"):
+            p.install_flm_algo(algo)
+
+    def test_ensure_uses_the_pod_when_it_already_has_one(self, monkeypatch):
+        p = Pod(addr4="10.0.0.1")
+        monkeypatch.setattr(
+            p, "exec",
+            lambda code: "{'installed': True, 'name': 'ALREADY'}\n")
+        monkeypatch.setattr(p, "resolve_flm_algo",
+                            lambda **k: pytest.fail("should not resolve a pack"))
+        assert p.ensure_flm_algo()["name"] == "ALREADY"
+
+    def test_ensure_is_free_after_the_first_install(self, monkeypatch):
+        p = Pod(addr4="10.0.0.1")
+        calls = []
+        monkeypatch.setattr(p, "exec", lambda code: calls.append(code) or
+                            "{'installed': False}\n")
+        monkeypatch.setattr(p, "resolve_flm_algo", lambda **k: self._algo())
+        monkeypatch.setattr(p, "install_flm_algo",
+                            lambda algo: {"installed": True, "name": "X"})
+
+        p.ensure_flm_algo()
+        before = len(calls)
+        p.ensure_flm_algo()
+        p.ensure_flm_algo()
+        assert len(calls) == before, "cached install still talked to the pod"
+
+    def test_resolve_needs_a_declared_device(self, monkeypatch):
+        p = Pod(addr4="10.0.0.1")
+        with pytest.raises(ValueError, match="no CMSIS device name"):
+            p.resolve_flm_algo()
+
+    def test_resolve_uses_the_registry_target_family(self, monkeypatch):
+        from pod import cmsis_pack
+        p = Pod.from_entry({"address": "10.0.0.1",
+                            "dut": {"target_family": "nRF52840_xxAA"}})
+        seen = {}
+        monkeypatch.setattr(cmsis_pack, "algo_for_device",
+                            lambda device, **kw: seen.update(
+                                device=device, **kw) or {"name": device})
+        p.resolve_flm_algo(addr=0x1000)
+        assert seen["device"] == "nRF52840_xxAA"
+        assert seen["addr"] == 0x1000
+        assert seen["allow_download"] is False
+
+
+def _b64_of(algo):
+    import base64
+    return base64.b64encode(algo["instructions"]).decode("ascii")
