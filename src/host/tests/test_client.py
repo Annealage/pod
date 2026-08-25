@@ -341,15 +341,15 @@ class TestMcpDutDebugPeek:
 
     def test_read_write_reg(self, monkeypatch):
         m, calls = self._fake_pod(monkeypatch)
-        assert m.handle_dut_read_reg("x", "pc")["value"] == 0x1000
-        m.handle_dut_write_reg("x", "sp", 0x20004000)
+        assert m._read_reg("x", "pc")["value"] == 0x1000
+        m._write_reg("x", "sp", 0x20004000)
         assert calls["read_reg"] == "pc"
         assert calls["write_reg"] == ("sp", 0x20004000)
 
     def test_read_write_mem(self, monkeypatch):
         m, calls = self._fake_pod(monkeypatch)
-        m.handle_dut_read_mem("x", 0x20000000, 16)
-        m.handle_dut_write_mem("x", 0x20000000, "deadbeef")
+        m._read_mem_inline("x", 0x20000000, 16)
+        m._write_mem("x", 0x20000000, "deadbeef")
         assert calls["read_mem"] == (0x20000000, 16)
         assert calls["write_mem"] == (0x20000000, "deadbeef")
 

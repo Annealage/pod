@@ -1,6 +1,6 @@
 """Discover-and-register: enroll a pod from its mDNS broadcast.
 
-Shared by the `pod register` CLI (no-address form) and the MCP register_pod
+Shared by the `pod register` CLI (no-address form) and the MCP pod_register
 tool, so an agent or a human enrolls a freshly-flashed pod by name without
 hand-copying an address. Stores the stable handles (hostname + IPv6 + IPv4) and
 reads the identity fingerprint so an IPv4/mDNS connect is trusted from session
