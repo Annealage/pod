@@ -172,7 +172,8 @@ class TestAttachedPortsIPv6:
     def test_matches_ipv6_attach_for_detach(self, monkeypatch):
         # Pod's stored ULA is spelled with an expanded zero group; the vhci
         # remote uses the compressed form. Both normalise to the same address,
-        # so the port is matched and detach_dut / `pod detach` can act on it.
+        # so the port is matched and dut_link(action="down") / `pod dut link
+        # <label> down` can act on it.
         from pod.client import Pod
         pod = Pod(addr6=["fd32:7709:b6ad:0000:2ecf:67ff:feb1:8946"])
         assert self._match(monkeypatch, pod, USBIP_PORT_IPV6) == [0]

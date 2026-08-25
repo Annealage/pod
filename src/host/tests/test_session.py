@@ -1,7 +1,9 @@
-"""Tests for the persistent streaming REPL session (pod.session), the repl_*
-MCP tools, and the `pod repl` CLI (streaming + --raw + chained mount/exec/cp),
-all against a fake transport so no real ampremote/device is needed."""
+"""Tests for the persistent streaming REPL session (pod.session), the
+session_* MCP tools, and the `pod open` / `pod open-raw` CLI (streaming +
+chained mount/exec/cp vs. raw-terminal passthrough), all against a fake
+transport so no real ampremote/device is needed."""
 
+import sys
 import io
 import threading
 import time
@@ -376,25 +378,25 @@ def mcp_repl(monkeypatch):
 class TestMcpRepl:
     def test_open_send_read_list_close(self, mcp_repl):
         m, fake, opened = mcp_repl
-        info = m.handle_repl_open("lab")
+        info = m._open_session("lab")
         assert info["running"] is True
         assert info["target"] == fake.target
         assert info["log_path"]                       # defaulted to a temp file
 
-        r = m.handle_repl_send("lab", "print(1)", wait=0)
+        r = m._session_write("lab", "print(1)", wait=0)
         assert fake.sent == [("print(1)", True)]
         assert r["sent"] == len("print(1)")
 
-        assert m.handle_repl_read("lab")["text"] == "out"
-        assert m.handle_repl_list()[0]["label"] == "lab"
+        assert m.handle_session_read("lab")["text"] == "out"
+        assert m._open_sessions()[0]["label"] == "lab"
 
-        res = m.handle_repl_close("lab")
+        res = m.handle_session_close("lab")
         assert res["ok"] is True and fake.closed is True
-        assert m.handle_repl_list() == []
+        assert m._open_sessions() == []
 
     def test_open_builds_chain(self, mcp_repl):
         m, _, opened = mcp_repl
-        info = m.handle_repl_open("lab", mount="/d", exec="import x",
+        info = m._open_session("lab", mount="/d", exec="import x",
                                   cp=["a.py", ":a.py"], soft_reset=True)
         assert opened["mount"] == "/d"
         assert opened["pre_exec"] == ["import x"]
@@ -404,32 +406,114 @@ class TestMcpRepl:
 
     def test_open_chain_list_forms(self, mcp_repl):
         m, _, opened = mcp_repl
-        m.handle_repl_open("lab", exec=["a", "b"], cp=[["x", ":x"], ["y", ":y"]])
+        m._open_session("lab", exec=["a", "b"], cp=[["x", ":x"], ["y", ":y"]])
         assert opened["pre_exec"] == ["a", "b"]
         assert opened["pre_cp"] == [("x", ":x"), ("y", ":y")]
 
     def test_open_is_idempotent(self, mcp_repl):
         m, _, _ = mcp_repl
-        m.handle_repl_open("lab")
-        assert m.handle_repl_open("lab").get("already_open") is True
+        m._open_session("lab")
+        assert m._open_session("lab").get("already_open") is True
 
     def test_read_without_open_raises(self, mcp_repl):
         m, _, _ = mcp_repl
         with pytest.raises(KeyError):
-            m.handle_repl_read("nope")
+            m.handle_session_read("nope")
 
     def test_interrupt(self, mcp_repl):
         m, fake, _ = mcp_repl
-        m.handle_repl_open("lab")
-        m.handle_repl_interrupt("lab", wait=0)
+        m._open_session("lab")
+        m._session_interrupt("lab", wait=0)
         assert fake.interrupted is True
 
     def test_close_without_open_is_ok(self, mcp_repl):
         m, _, _ = mcp_repl
-        assert m.handle_repl_close("nope")["ok"] is True
+        assert m.handle_session_close("nope")["ok"] is True
+
+    def test_session_send_without_control_writes_data(self, mcp_repl):
+        """session_send with no `control` writes `data` to the session's stdin."""
+        m, fake, _ = mcp_repl
+        m._open_session("lab")
+        r = m.handle_session_send("lab", data="print(1)", wait=0)
+        assert fake.sent == [("print(1)", True)]
+        assert fake.interrupted is False
+        assert r["sent"] == len("print(1)")
+
+    def test_session_send_control_c_interrupts(self, mcp_repl):
+        """control='c' interrupts, returning _session_interrupt's result (no `sent` key)."""
+        m, fake, _ = mcp_repl
+        m._open_session("lab")
+        r = m.handle_session_send("lab", control="c", wait=0)
+        assert fake.interrupted is True
+        assert fake.sent == []
+        assert "sent" not in r
+
+    def test_session_send_control_b_sends_ctrl_b(self, mcp_repl):
+        """control='b' writes a raw Ctrl-B (0x02) with no trailing newline."""
+        m, fake, _ = mcp_repl
+        m._open_session("lab")
+        m.handle_session_send("lab", control="b", wait=0)
+        assert fake.sent == [("\x02", False)]
+
+    def test_session_send_control_d_sends_ctrl_d(self, mcp_repl):
+        """control='d' writes a raw Ctrl-D (0x04) with no trailing newline."""
+        m, fake, _ = mcp_repl
+        m._open_session("lab")
+        m.handle_session_send("lab", control="d", wait=0)
+        assert fake.sent == [("\x04", False)]
+
+    def test_session_send_requires_data_when_no_control(self, mcp_repl):
+        m, _, _ = mcp_repl
+        m._open_session("lab")
+        with pytest.raises(ValueError):
+            m.handle_session_send("lab")
+
+    def test_session_send_rejects_unknown_control(self, mcp_repl):
+        m, _, _ = mcp_repl
+        m._open_session("lab")
+        with pytest.raises(ValueError):
+            m.handle_session_send("lab", control="x")
+
+    def test_pod_open_targets_pod_socket_repl(self, mcp_repl):
+        """pod_open omits device, targeting the pod's own socket REPL."""
+        m, _, opened = mcp_repl
+        m.handle_pod_open("lab")
+        assert opened["device"] is None
+
+    def test_dut_open_targets_given_device(self, mcp_repl):
+        """dut_open passes device through, targeting the DUT's CDC tty."""
+        m, _, opened = mcp_repl
+        m.handle_dut_open("lab", "/dev/ttyACM0")
+        assert opened["device"] == "/dev/ttyACM0"
 
 
-# ── `pod repl` CLI ──────────────────────────────────────────────────────────
+class TestMcpPodInfo:
+    """pod_info returns the registry entry for a label plus every session
+    open in this process, which is the only view of open sessions the
+    surface offers."""
+
+    def test_merges_registry_entry_with_open_sessions(self, mcp_repl):
+        m, _, _ = mcp_repl
+        m._open_session("lab")
+        info = m.handle_pod_info("lab")
+        assert info["label"] == "lab"
+        assert info["addr4"] == "10.0.0.1"
+        assert info["sessions"] == m._open_sessions()
+        assert info["sessions"][0]["label"] == "lab"
+
+    def test_no_open_sessions_gives_empty_list(self, mcp_repl):
+        m, _, _ = mcp_repl
+        info = m.handle_pod_info("lab")
+        assert info["sessions"] == []
+
+    def test_unknown_label_raises(self, mcp_repl, monkeypatch):
+        m, _, _ = mcp_repl
+        monkeypatch.setattr(m, "get_pod", lambda label: None)
+        with pytest.raises(KeyError):
+            m.handle_pod_info("nope")
+
+
+# ── `pod open` CLI ─────────────────────────────────────────────────────────
 
 
 def _repl_args(**over):
@@ -440,7 +524,7 @@ def _repl_args(**over):
     return type("A", (), base)()
 
 
-class TestCliRepl:
+class TestCliPodOpen:
     def _patch(self, monkeypatch, fakepod):
         import pod.cli as c
         monkeypatch.setattr(c, "get_pod", lambda label: {"addr4": "10.0.0.1"})
@@ -492,10 +576,16 @@ class TestCliRepl:
                 return _FakeSession()
 
         c = self._patch(monkeypatch, FakePod())
-        assert c.cmd_repl(_repl_args(raw=True)) == 0
+        assert c.cmd_repl_raw(_repl_args()) == 0
         assert called.get("repl") is True
         assert "open_session" not in called
 
-    def test_raw_with_chain_flag_errors(self, monkeypatch):
-        c = self._patch(monkeypatch, _FakeSession())
-        assert c.cmd_repl(_repl_args(raw=True, mount="/d")) == 1
+    def test_raw_rejects_chain_flags_at_the_cli(self, monkeypatch):
+        """`pod open-raw` has no --mount/--exec/--cp/--soft-reset options; a
+        chained setup flag is an argparse error, not an application-level
+        one, since raw passthrough cannot run pre-connect setup."""
+        import pod.cli as c
+        monkeypatch.setattr(sys, "argv",
+                            ["pod", "open-raw", "lab", "--mount", "/d"])
+        with pytest.raises(SystemExit):
+            c.main()

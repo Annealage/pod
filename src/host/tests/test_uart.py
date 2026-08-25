@@ -55,11 +55,11 @@ class TestUartPortResolutionRegistry:
 
 
 class TestCliUartArgConstruction:
-    """Test CLI argument parsing for the 'pod uart' subcommand."""
+    """Test CLI argument parsing for the 'pod bench uart' subcommand."""
 
     def test_uart_subcommand_label_required(self, monkeypatch, capsys):
         """uart subcommand requires a label argument."""
-        monkeypatch.setattr(sys, "argv", ["pod", "uart"])
+        monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart"])
         with pytest.raises(SystemExit):
             main()
 
@@ -73,7 +73,7 @@ class TestCliUartArgConstruction:
 
         with patch("pod.cli.Pod") as MockPod:
             MockPod.from_entry.return_value = FakePod()
-            monkeypatch.setattr(sys, "argv", ["pod", "uart", "p3"])
+            monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "p3"])
             ret = main()
             assert ret == 0
 
@@ -90,7 +90,7 @@ class TestCliUartArgConstruction:
 
         with patch("pod.cli.Pod") as MockPod:
             MockPod.from_entry.return_value = FakePod()
-            monkeypatch.setattr(sys, "argv", ["pod", "uart", "p4", "--port", "5555"])
+            monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "p4", "--port", "5555"])
             ret = main()
             assert ret == 0
             assert ports_used == [5555]
@@ -107,7 +107,7 @@ class TestCliUartArgConstruction:
 
         with patch("pod.cli.Pod") as MockPod:
             MockPod.from_entry.return_value = FakePod()
-            monkeypatch.setattr(sys, "argv", ["pod", "uart", "p5"])
+            monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "p5"])
             ret = main()
             assert ret == 0
             assert ports_used == [3001]
@@ -124,7 +124,7 @@ class TestCliUartArgConstruction:
 
         with patch("pod.cli.Pod") as MockPod:
             MockPod.from_entry.return_value = FakePod()
-            monkeypatch.setattr(sys, "argv", ["pod", "uart", "p6"])
+            monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "p6"])
             ret = main()
             assert ret == 0
             assert ports_used == [2000]
@@ -141,7 +141,7 @@ class TestCliUartArgConstruction:
 
         with patch("pod.cli.Pod") as MockPod:
             MockPod.from_entry.return_value = FakePod()
-            monkeypatch.setattr(sys, "argv", ["pod", "uart", "p7", "--duration", "10.5"])
+            monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "p7", "--duration", "10.5"])
             ret = main()
             assert ret == 0
             assert durations_used == [10.5]
@@ -158,7 +158,7 @@ class TestCliUartArgConstruction:
 
         with patch("pod.cli.Pod") as MockPod:
             MockPod.from_entry.return_value = FakePod()
-            monkeypatch.setattr(sys, "argv", ["pod", "uart", "p8", "--tx"])
+            monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "p8", "--tx"])
             ret = main()
             assert ret == 0
             assert interactive_modes == [True]
@@ -175,7 +175,7 @@ class TestCliUartArgConstruction:
 
         with patch("pod.cli.Pod") as MockPod:
             MockPod.from_entry.return_value = FakePod()
-            monkeypatch.setattr(sys, "argv", ["pod", "uart", "p9", "--out", "/tmp/log.bin"])
+            monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "p9", "--out", "/tmp/log.bin"])
             ret = main()
             assert ret == 0
             assert out_paths == ["/tmp/log.bin"]
@@ -190,22 +190,22 @@ class TestCliUartArgConstruction:
 
         with patch("pod.cli.Pod") as MockPod:
             MockPod.from_entry.return_value = FakePod()
-            monkeypatch.setattr(sys, "argv", ["pod", "uart", "p10"])
+            monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "p10"])
             ret = main()
             assert ret == 0
 
     def test_uart_unknown_label_errors(self, monkeypatch):
         """uart with unknown label exits nonzero."""
-        monkeypatch.setattr(sys, "argv", ["pod", "uart", "nonexistent"])
+        monkeypatch.setattr(sys, "argv", ["pod", "bench", "uart", "nonexistent"])
         with pytest.raises(SystemExit):
             main()
 
 
 class TestMcpHandlerTailUart:
-    """Test the MCP server handler for tail_uart."""
+    """Test the MCP server handler for bench_uart."""
 
-    def test_handle_tail_uart_basic(self, monkeypatch):
-        """handle_tail_uart resolves label and calls uart_stream."""
+    def test_handle_bench_uart_basic(self, monkeypatch):
+        """handle_bench_uart resolves label and calls uart_stream."""
         monkeypatch.setattr(mcp_server, "get_pod",
                             lambda label: {"addr4": "192.168.0.100", "repl_port": 8266})
         uart_stream_calls = []
@@ -217,13 +217,13 @@ class TestMcpHandlerTailUart:
 
         with patch.object(mcp_server.Pod, "from_entry",
                           classmethod(lambda cls, e: FakePod())):
-            result = mcp_server.handle_tail_uart("test-pod")
+            result = mcp_server.handle_bench_uart("test-pod")
             assert result["ok"] is True
             assert result["bytes_received"] == 42
             assert uart_stream_calls[0]["port"] == 2000
 
-    def test_handle_tail_uart_uses_registry_port(self, monkeypatch):
-        """handle_tail_uart uses registry uart_port when present."""
+    def test_handle_bench_uart_uses_registry_port(self, monkeypatch):
+        """handle_bench_uart uses registry uart_port when present."""
         monkeypatch.setattr(mcp_server, "get_pod",
                             lambda label: {"addr4": "192.168.0.100", "uart_port": 3001})
         uart_stream_calls = []
@@ -235,11 +235,11 @@ class TestMcpHandlerTailUart:
 
         with patch.object(mcp_server.Pod, "from_entry",
                           classmethod(lambda cls, e: FakePod())):
-            mcp_server.handle_tail_uart("test-pod")
+            mcp_server.handle_bench_uart("test-pod")
             assert uart_stream_calls[0]["port"] == 3001
 
-    def test_handle_tail_uart_explicit_port_overrides(self, monkeypatch):
-        """handle_tail_uart explicit port parameter overrides registry."""
+    def test_handle_bench_uart_explicit_port_overrides(self, monkeypatch):
+        """handle_bench_uart explicit port parameter overrides registry."""
         monkeypatch.setattr(mcp_server, "get_pod",
                             lambda label: {"addr4": "192.168.0.100", "uart_port": 3001})
         uart_stream_calls = []
@@ -251,11 +251,11 @@ class TestMcpHandlerTailUart:
 
         with patch.object(mcp_server.Pod, "from_entry",
                           classmethod(lambda cls, e: FakePod())):
-            mcp_server.handle_tail_uart("test-pod", port=5555)
+            mcp_server.handle_bench_uart("test-pod", port=5555)
             assert uart_stream_calls[0]["port"] == 5555
 
-    def test_handle_tail_uart_default_duration(self, monkeypatch):
-        """handle_tail_uart uses default duration of 30s."""
+    def test_handle_bench_uart_default_duration(self, monkeypatch):
+        """handle_bench_uart uses default duration of 30s."""
         monkeypatch.setattr(mcp_server, "get_pod",
                             lambda label: {"addr4": "192.168.0.100"})
         uart_stream_calls = []
@@ -267,11 +267,11 @@ class TestMcpHandlerTailUart:
 
         with patch.object(mcp_server.Pod, "from_entry",
                           classmethod(lambda cls, e: FakePod())):
-            mcp_server.handle_tail_uart("test-pod")
+            mcp_server.handle_bench_uart("test-pod")
             assert uart_stream_calls[0]["duration"] == 30.0
 
-    def test_handle_tail_uart_explicit_duration(self, monkeypatch):
-        """handle_tail_uart uses explicit duration when provided."""
+    def test_handle_bench_uart_explicit_duration(self, monkeypatch):
+        """handle_bench_uart uses explicit duration when provided."""
         monkeypatch.setattr(mcp_server, "get_pod",
                             lambda label: {"addr4": "192.168.0.100"})
         uart_stream_calls = []
@@ -283,14 +283,14 @@ class TestMcpHandlerTailUart:
 
         with patch.object(mcp_server.Pod, "from_entry",
                           classmethod(lambda cls, e: FakePod())):
-            mcp_server.handle_tail_uart("test-pod", duration=15.5)
+            mcp_server.handle_bench_uart("test-pod", duration=15.5)
             assert uart_stream_calls[0]["duration"] == 15.5
 
-    def test_handle_tail_uart_missing_label_raises_keyerror(self, monkeypatch):
-        """handle_tail_uart raises KeyError when label not found."""
+    def test_handle_bench_uart_missing_label_raises_keyerror(self, monkeypatch):
+        """handle_bench_uart raises KeyError when label not found."""
         monkeypatch.setattr(mcp_server, "get_pod", lambda label: None)
         with pytest.raises(KeyError):
-            mcp_server.handle_tail_uart("nonexistent-pod")
+            mcp_server.handle_bench_uart("nonexistent-pod")
 
 
 class TestPodUartStreamConnect:

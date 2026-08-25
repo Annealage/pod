@@ -477,7 +477,7 @@ class Pod:
         if not device:
             raise ValueError(
                 "no CMSIS device name: declare the DUT's target_family in the "
-                "registry (pod dut set --dut-family <name>) or pass device=")
+                "registry (pod dut identify --dut-family <name>) or pass device=")
         return cmsis_pack.algo_for_device(
             device, addr=addr, pack=pack, allow_download=allow_download,
             **kwargs)
@@ -779,7 +779,7 @@ class Pod:
         friendly '>>>' came back. Holding the tty open keeps DTR asserted so the
         recovery output is not itself gated.
 
-        device: the DUT CDC tty returned by attach_dut (e.g. '/dev/ttyACM0').
+        device: the DUT CDC tty from dut_link(action="up") (e.g. '/dev/ttyACM0').
         Returns {ok, device, recovered, prompt_seen, was_raw, output}; on a busy
         or absent tty returns {ok: False, err}. If it does not recover, escalate:
         reset_dut (SWD reset -> fresh FRIENDLY REPL), then a power-cycle for a

@@ -9,7 +9,8 @@ VID:PID comes from (the pod has no separate descriptor read).
 Requirements and caveats:
   - host `usbip` tooling + the vhci_hcd kernel module;
   - attach/detach write to vhci sysfs and need root, so they run under `sudo -n`
-    (configure passwordless sudo for usbip, or run `pod attach` in a shell);
+    (configure passwordless sudo for usbip, or run `pod dut link <label> up`
+    in a shell);
   - ensure_server() activates the pod's native USB controller in host mode.
     NOTE: bringing USB host up after boot has been observed to disturb the pod's
     Wi-Fi link (the pod's only management channel) - call it deliberately.

@@ -207,7 +207,7 @@ def reconcile_dut(declared: Optional[dict], live: Optional[dict]) -> dict:
 
     Returns {"verdict": <str>, "fields": {name: {declared, live, match}}, ...}.
     Never mutates the declared block; the only write paths to "dut" are the
-    explicit `pod dut` set/adopt verbs.
+    explicit `pod dut identify` --dut-* and --adopt flags.
 
     verdict:
       MATCH        every declared expected id present equals the live read
@@ -257,8 +257,8 @@ CORTEX_M_SRAM_BASE = 0x20000000
 def dut_protect_ranges(entry: Optional[dict]):
     """Write-protected [lo, hi) address ranges for guarding DUT word-writes.
 
-    Flash/ROM are not word-writable (flash needs erase), so dut_write_mem
-    refuses writes landing in these ranges. Always includes the Cortex-M code
+    Flash/ROM are not word-writable (flash needs erase), so dut_mem refuses a
+    write (data=) landing in these ranges. Always includes the Cortex-M code
     region floor (everything below the SRAM base); appends any declared DUT
     flash geometry (flash_base/flash_size) that extends above the floor - e.g.
     external/QSPI flash mapped high - so a non-standard map is covered from the

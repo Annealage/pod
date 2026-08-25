@@ -116,7 +116,7 @@ class TestSpiTargetClient:
 
 
 class TestSpiTargetCli:
-    """Test the CLI subparsers and command dispatch for SPI target."""
+    """Test the 'pod bench device --bus spi' CLI dispatch for SPI target."""
 
     @pytest.fixture(autouse=True)
     def isolated_registry(self, tmp_path, monkeypatch):
@@ -136,21 +136,19 @@ class TestSpiTargetCli:
         capsys.readouterr()  # drain output
 
     def test_spi_target_functions_exist(self):
-        """Verify spi_target and spi_target_status command functions exist."""
-        assert hasattr(cli, "cmd_spi_target")
-        assert hasattr(cli, "cmd_spi_target_status")
-        assert callable(cli.cmd_spi_target)
-        assert callable(cli.cmd_spi_target_status)
+        """Verify cmd_bench_device (shared by i2c and spi) exists in cli."""
+        assert hasattr(cli, "cmd_bench_device")
+        assert callable(cli.cmd_bench_device)
 
     def test_spi_target_basic_dispatch(self, monkeypatch, capsys):
-        """spi-target dispatches to cmd_spi_target with correct args."""
+        """bench device --bus spi dispatches to cmd_bench_device with correct args."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target.return_value = {"ok": True, "size": 1024}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv",
-                           ["pod", "spi-target", "test-label"])
+                           ["pod", "bench", "device", "test-label", "--bus", "spi"])
         ret = cli.main()
         assert ret in (0, None)
         fake_pod.spi_target.assert_called_once()
@@ -165,14 +163,14 @@ class TestSpiTargetCli:
         assert call_kwargs["size"] == 1024
 
     def test_spi_target_custom_args(self, monkeypatch, capsys):
-        """spi-target passes custom args to the Pod method."""
+        """bench device --bus spi passes custom args to the Pod method."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "spi-target", "test-label",
+            "pod", "bench", "device", "test-label", "--bus", "spi",
             "--miso", "10", "--mosi", "11", "--sck", "12", "--cs", "13",
             "--size", "512", "--name", "alt_spi"
         ])
@@ -186,14 +184,14 @@ class TestSpiTargetCli:
         assert call_kwargs["name"] == "alt_spi"
 
     def test_spi_target_personality_and_table_size(self, monkeypatch, capsys):
-        """spi-target passes personality and table_size to the Pod method."""
+        """bench device --bus spi passes personality and table_size to the Pod method."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "spi-target", "test-label",
+            "pod", "bench", "device", "test-label", "--bus", "spi",
             "--personality", "regfile", "--table-size", "512"
         ])
         cli.main()
@@ -202,28 +200,28 @@ class TestSpiTargetCli:
         assert call_kwargs["table_size"] == 512
 
     def test_spi_target_mode_options(self, monkeypatch, capsys):
-        """spi-target passes SPI mode 0-3."""
+        """bench device --bus spi passes SPI mode 0-3."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "spi-target", "test-label", "--mode", "3"
+            "pod", "bench", "device", "test-label", "--bus", "spi", "--mode", "3"
         ])
         cli.main()
         call_kwargs = fake_pod.spi_target.call_args.kwargs
         assert call_kwargs["mode"] == 3
 
     def test_spi_target_status_dispatch(self, monkeypatch, capsys):
-        """spi-target-status dispatches to cmd_spi_target_status."""
+        """bench device status --bus spi dispatches to cmd_bench_device's status branch."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target_status.return_value = {"ok": True, "bytes_rx": 42}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv",
-                           ["pod", "spi-target-status", "test-label"])
+                           ["pod", "bench", "device", "test-label", "status", "--bus", "spi"])
         ret = cli.main()
         assert ret in (0, None)
         fake_pod.spi_target_status.assert_called_once()
@@ -231,14 +229,14 @@ class TestSpiTargetCli:
         assert call_kwargs["name"] == "spi_target"
 
     def test_spi_target_status_custom_name(self, monkeypatch, capsys):
-        """spi-target-status passes custom instance name."""
+        """bench device status --bus spi passes custom instance name."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target_status.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "spi-target-status", "test-label",
+            "pod", "bench", "device", "test-label", "status", "--bus", "spi",
             "--name", "alt_spi"
         ])
         cli.main()
@@ -246,24 +244,26 @@ class TestSpiTargetCli:
         assert call_kwargs["name"] == "alt_spi"
 
     def test_spi_target_failure_exit_code(self, monkeypatch, capsys):
-        """spi-target returns exit code 1 if Pod method returns ok=False."""
+        """bench device --bus spi returns exit code 1 if Pod method returns ok=False."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target.return_value = {"ok": False, "err": "invalid mode"}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
-        monkeypatch.setattr(sys, "argv", ["pod", "spi-target", "test-label"])
+        monkeypatch.setattr(sys, "argv",
+                           ["pod", "bench", "device", "test-label", "--bus", "spi"])
         ret = cli.main()
         assert ret == 1
 
     def test_spi_target_success_exit_code(self, monkeypatch, capsys):
-        """spi-target returns exit code 0 if Pod method returns ok=True."""
+        """bench device --bus spi returns exit code 0 if Pod method returns ok=True."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
-        monkeypatch.setattr(sys, "argv", ["pod", "spi-target", "test-label"])
+        monkeypatch.setattr(sys, "argv",
+                           ["pod", "bench", "device", "test-label", "--bus", "spi"])
         ret = cli.main()
         assert ret in (0, None)
 
@@ -272,7 +272,7 @@ class TestSpiTargetMcp:
     """Test the MCP server handlers for SPI target."""
 
     def test_handle_spi_target_basic(self, monkeypatch):
-        """handle_spi_target resolves label and calls Pod method."""
+        """_spi_device_up resolves label and calls Pod method."""
         monkeypatch.setattr(mcp_server, "get_pod",
                            lambda label: {"addr4": "192.168.0.100", "repl_port": 8266})
         calls = []
@@ -284,7 +284,7 @@ class TestSpiTargetMcp:
 
         with patch.object(mcp_server.Pod, "from_entry",
                          classmethod(lambda cls, e: FakePod())):
-            result = mcp_server.handle_spi_target("test-pod")
+            result = mcp_server._spi_device_up("test-pod")
             assert result["ok"] is True
             assert result["size"] == 1024
             assert len(calls) == 1
@@ -294,7 +294,7 @@ class TestSpiTargetMcp:
             assert calls[0]["miso"] == 16
 
     def test_handle_spi_target_custom_params(self, monkeypatch):
-        """handle_spi_target passes custom params to Pod.spi_target."""
+        """_spi_device_up passes custom params to Pod.spi_target."""
         monkeypatch.setattr(mcp_server, "get_pod",
                            lambda label: {"addr4": "192.168.0.100"})
         calls = []
@@ -306,7 +306,7 @@ class TestSpiTargetMcp:
 
         with patch.object(mcp_server.Pod, "from_entry",
                          classmethod(lambda cls, e: FakePod())):
-            mcp_server.handle_spi_target("test-pod", miso=12, mosi=13, sck=14,
+            mcp_server._spi_device_up("test-pod", miso=12, mosi=13, sck=14,
                                         cs=15, size=512, name="alt")
             assert calls[0]["miso"] == 12
             assert calls[0]["mosi"] == 13
@@ -316,7 +316,7 @@ class TestSpiTargetMcp:
             assert calls[0]["name"] == "alt"
 
     def test_handle_spi_target_personality_and_table_size(self, monkeypatch):
-        """handle_spi_target passes personality and table_size."""
+        """_spi_device_up passes personality and table_size."""
         monkeypatch.setattr(mcp_server, "get_pod",
                            lambda label: {"addr4": "192.168.0.100"})
         calls = []
@@ -328,13 +328,13 @@ class TestSpiTargetMcp:
 
         with patch.object(mcp_server.Pod, "from_entry",
                          classmethod(lambda cls, e: FakePod())):
-            mcp_server.handle_spi_target("test-pod", personality="regfile",
+            mcp_server._spi_device_up("test-pod", personality="regfile",
                                         table_size=512)
             assert calls[0]["personality"] == "regfile"
             assert calls[0]["table_size"] == 512
 
     def test_handle_spi_target_mode_values(self, monkeypatch):
-        """handle_spi_target accepts all SPI modes 0-3."""
+        """_spi_device_up accepts all SPI modes 0-3."""
         monkeypatch.setattr(mcp_server, "get_pod",
                            lambda label: {"addr4": "192.168.0.100"})
         calls = []
@@ -348,11 +348,11 @@ class TestSpiTargetMcp:
                          classmethod(lambda cls, e: FakePod())):
             for mode in [0, 1, 2, 3]:
                 calls.clear()
-                mcp_server.handle_spi_target("test-pod", mode=mode)
+                mcp_server._spi_device_up("test-pod", mode=mode)
                 assert calls[0]["mode"] == mode
 
     def test_handle_spi_target_status_basic(self, monkeypatch):
-        """handle_spi_target_status resolves label and calls Pod method."""
+        """_spi_device_status resolves label and calls Pod method."""
         monkeypatch.setattr(mcp_server, "get_pod",
                            lambda label: {"addr4": "192.168.0.100"})
         calls = []
@@ -364,14 +364,14 @@ class TestSpiTargetMcp:
 
         with patch.object(mcp_server.Pod, "from_entry",
                          classmethod(lambda cls, e: FakePod())):
-            result = mcp_server.handle_spi_target_status("test-pod")
+            result = mcp_server._spi_device_status("test-pod")
             assert result["ok"] is True
             assert result["bytes_rx"] == 42
             assert len(calls) == 1
             assert calls[0]["name"] == "spi_target"
 
     def test_handle_spi_target_status_custom_name(self, monkeypatch):
-        """handle_spi_target_status passes custom instance name."""
+        """_spi_device_status passes custom instance name."""
         monkeypatch.setattr(mcp_server, "get_pod",
                            lambda label: {"addr4": "192.168.0.100"})
         calls = []
@@ -383,26 +383,26 @@ class TestSpiTargetMcp:
 
         with patch.object(mcp_server.Pod, "from_entry",
                          classmethod(lambda cls, e: FakePod())):
-            mcp_server.handle_spi_target_status("test-pod", name="alt_spi")
+            mcp_server._spi_device_status("test-pod", name="alt_spi")
             assert calls[0]["name"] == "alt_spi"
 
     def test_spi_target_handler_exists(self):
-        """Verify handle_spi_target function exists in mcp_server."""
-        assert hasattr(mcp_server, "handle_spi_target")
-        assert callable(mcp_server.handle_spi_target)
+        """Verify _spi_device_up function exists in mcp_server."""
+        assert hasattr(mcp_server, "_spi_device_up")
+        assert callable(mcp_server._spi_device_up)
 
     def test_spi_target_status_handler_exists(self):
-        """Verify handle_spi_target_status function exists in mcp_server."""
-        assert hasattr(mcp_server, "handle_spi_target_status")
-        assert callable(mcp_server.handle_spi_target_status)
+        """Verify _spi_device_status function exists in mcp_server."""
+        assert hasattr(mcp_server, "_spi_device_status")
+        assert callable(mcp_server._spi_device_status)
 
     def test_handle_spi_target_regs_handler_exists(self):
-        """Verify handle_spi_target_regs function exists in mcp_server."""
-        assert hasattr(mcp_server, "handle_spi_target_regs")
-        assert callable(mcp_server.handle_spi_target_regs)
+        """Verify _spi_device_regs function exists in mcp_server."""
+        assert hasattr(mcp_server, "_spi_device_regs")
+        assert callable(mcp_server._spi_device_regs)
 
     def test_handle_spi_target_regs_basic(self, monkeypatch):
-        """handle_spi_target_regs resolves label and calls Pod method."""
+        """_spi_device_regs resolves label and calls Pod method."""
         monkeypatch.setattr(mcp_server, "get_pod",
                            lambda label: {"addr4": "192.168.0.100"})
         calls = []
@@ -414,7 +414,7 @@ class TestSpiTargetMcp:
 
         with patch.object(mcp_server.Pod, "from_entry",
                          classmethod(lambda cls, e: FakePod())):
-            result = mcp_server.handle_spi_target_regs("test-pod")
+            result = mcp_server._spi_device_regs("test-pod")
             assert result["ok"] is True
             assert result["table"] == "read"
             assert len(calls) == 1
@@ -422,7 +422,7 @@ class TestSpiTargetMcp:
             assert calls[0]["table"] == "read"
 
     def test_handle_spi_target_regs_custom_params(self, monkeypatch):
-        """handle_spi_target_regs passes custom params to Pod.spi_target_regs."""
+        """_spi_device_regs passes custom params to Pod.spi_target_regs."""
         monkeypatch.setattr(mcp_server, "get_pod",
                            lambda label: {"addr4": "192.168.0.100"})
         calls = []
@@ -434,7 +434,7 @@ class TestSpiTargetMcp:
 
         with patch.object(mcp_server.Pod, "from_entry",
                          classmethod(lambda cls, e: FakePod())):
-            mcp_server.handle_spi_target_regs(
+            mcp_server._spi_device_regs(
                 "test-pod", off=5, length=16, write=[0xAA, 0xBB],
                 table="write", name="alt")
             assert calls[0]["off"] == 5
@@ -506,7 +506,7 @@ class TestSpiTargetRegsClient:
 
 
 class TestSpiTargetRegsCli:
-    """Test the CLI spi-target-regs subcommand."""
+    """Test the 'pod bench device-regs --bus spi' CLI subcommand."""
 
     @pytest.fixture(autouse=True)
     def isolated_registry(self, tmp_path, monkeypatch):
@@ -526,12 +526,12 @@ class TestSpiTargetRegsCli:
         capsys.readouterr()
 
     def test_cmd_spi_regs_exists(self):
-        """Verify cmd_spi_regs exists in cli."""
-        assert hasattr(cli, "cmd_spi_regs")
-        assert callable(cli.cmd_spi_regs)
+        """Verify cmd_bench_device_regs exists in cli."""
+        assert hasattr(cli, "cmd_bench_device_regs")
+        assert callable(cli.cmd_bench_device_regs)
 
     def test_spi_target_regs_basic_dispatch(self, monkeypatch, capsys):
-        """spi-target-regs dispatches to cmd_spi_regs with correct args."""
+        """bench device-regs --bus spi dispatches to cmd_bench_device_regs with correct args."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target_regs.return_value = {"ok": True, "table": "read",
@@ -539,7 +539,7 @@ class TestSpiTargetRegsCli:
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv",
-                           ["pod", "spi-target-regs", "test-label"])
+                           ["pod", "bench", "device-regs", "test-label", "--bus", "spi"])
         ret = cli.main()
         assert ret in (0, None)
         fake_pod.spi_target_regs.assert_called_once()
@@ -549,14 +549,14 @@ class TestSpiTargetRegsCli:
         assert call_kwargs["name"] == "spi_target"
 
     def test_spi_target_regs_custom_off_and_length(self, monkeypatch, capsys):
-        """spi-target-regs with --off and --length."""
+        """bench device-regs --bus spi with --off and --length."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target_regs.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "spi-target-regs", "test-label",
+            "pod", "bench", "device-regs", "test-label", "--bus", "spi",
             "--off", "5", "--length", "10"
         ])
         cli.main()
@@ -565,14 +565,14 @@ class TestSpiTargetRegsCli:
         assert call_kwargs["length"] == 10
 
     def test_spi_target_regs_with_write(self, monkeypatch, capsys):
-        """spi-target-regs with --write payload."""
+        """bench device-regs --bus spi with --write payload."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target_regs.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "spi-target-regs", "test-label",
+            "pod", "bench", "device-regs", "test-label", "--bus", "spi",
             "--write", "0xAA", "0xBB", "0xCC"
         ])
         cli.main()
@@ -580,14 +580,14 @@ class TestSpiTargetRegsCli:
         assert call_kwargs["write"] == [0xAA, 0xBB, 0xCC]
 
     def test_spi_target_regs_write_table(self, monkeypatch, capsys):
-        """spi-target-regs with --table write."""
+        """bench device-regs --bus spi with --table write."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target_regs.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "spi-target-regs", "test-label",
+            "pod", "bench", "device-regs", "test-label", "--bus", "spi",
             "--table", "write"
         ])
         cli.main()
@@ -595,14 +595,14 @@ class TestSpiTargetRegsCli:
         assert call_kwargs["table"] == "write"
 
     def test_spi_target_regs_custom_name(self, monkeypatch, capsys):
-        """spi-target-regs with --name."""
+        """bench device-regs --bus spi with --name."""
         self._register_test_pod(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.spi_target_regs.return_value = {"ok": True}
         monkeypatch.setattr(cli, "Pod",
                            SimpleNamespace(from_entry=lambda e: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "spi-target-regs", "test-label",
+            "pod", "bench", "device-regs", "test-label", "--bus", "spi",
             "--name", "alt_spi"
         ])
         cli.main()

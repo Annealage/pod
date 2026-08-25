@@ -156,19 +156,19 @@ class TestFlashReset:
     # flash/reset are wired to the on-pod loader; with an unknown label they
     # resolve-then-fail (exit 1) rather than printing a stub message.
     def test_flash_unknown_label_errors(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["pod", "flash", "nope", "fw.bin"])
+        monkeypatch.setattr(sys, "argv", ["pod", "dut", "flash", "nope", "fw.bin"])
         with pytest.raises(SystemExit):
             main()
 
     def test_reset_unknown_label_errors(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["pod", "reset", "nope"])
+        monkeypatch.setattr(sys, "argv", ["pod", "dut", "reset", "nope"])
         with pytest.raises(SystemExit):
             main()
 
 
 class TestReprobe:
     def test_reprobe_unknown_label_errors(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["pod", "reprobe", "nope"])
+        monkeypatch.setattr(sys, "argv", ["pod", "dut", "link", "nope", "reprobe"])
         with pytest.raises(SystemExit):
             main()
 
@@ -178,7 +178,7 @@ class TestReprobe:
         fake_pod.reprobe_dut.return_value = {"ok": True, "mounted": 2}
         monkeypatch.setattr(cli, "Pod",
                             SimpleNamespace(from_entry=lambda entry: fake_pod))
-        monkeypatch.setattr(sys, "argv", ["pod", "reprobe", "rp"])
+        monkeypatch.setattr(sys, "argv", ["pod", "dut", "link", "rp", "reprobe"])
         assert main() == 0
         fake_pod.reprobe_dut.assert_called_once_with()
 
@@ -188,7 +188,7 @@ class TestReprobe:
         fake_pod.reprobe_dut.return_value = {"ok": False, "err": "no reprobe verb"}
         monkeypatch.setattr(cli, "Pod",
                             SimpleNamespace(from_entry=lambda entry: fake_pod))
-        monkeypatch.setattr(sys, "argv", ["pod", "reprobe", "rp"])
+        monkeypatch.setattr(sys, "argv", ["pod", "dut", "link", "rp", "reprobe"])
         assert main() == 1
 
 
@@ -229,7 +229,7 @@ class TestGdbCommand:
         capsys.readouterr()
 
     def test_gdb_unknown_label_errors(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["pod", "gdb", "nope"])
+        monkeypatch.setattr(sys, "argv", ["pod", "dut", "gdb", "nope"])
         with pytest.raises(SystemExit):
             main()
 
@@ -238,7 +238,7 @@ class TestGdbCommand:
         fake_pod = MagicMock()
         fake_pod.gdb_endpoint.return_value = ("127.0.0.1", 5005)
         monkeypatch.setattr(cli, "Pod", SimpleNamespace(from_entry=lambda entry: fake_pod))
-        monkeypatch.setattr(sys, "argv", ["pod", "gdb", "gdb-pod"])
+        monkeypatch.setattr(sys, "argv", ["pod", "dut", "gdb", "gdb-pod"])
         ret = main()
         assert ret in (0, None)
         fake_pod.gdb_endpoint.assert_called_once()
@@ -253,7 +253,7 @@ class TestGdbCommand:
         fake_pod = MagicMock()
         fake_pod.gdb_endpoint.return_value = ("127.0.0.1", 6006)
         monkeypatch.setattr(cli, "Pod", SimpleNamespace(from_entry=lambda entry: fake_pod))
-        monkeypatch.setattr(sys, "argv", ["pod", "gdb", "gdb-pod3"])
+        monkeypatch.setattr(sys, "argv", ["pod", "dut", "gdb", "gdb-pod3"])
         main()
         kwargs = fake_pod.gdb_endpoint.call_args.kwargs
         assert kwargs["gdb_port"] == 4321
@@ -264,7 +264,7 @@ class TestGdbCommand:
         fake_pod.gdb_endpoint.return_value = ("127.0.0.1", 7007)
         monkeypatch.setattr(cli, "Pod", SimpleNamespace(from_entry=lambda entry: fake_pod))
         monkeypatch.setattr(sys, "argv", [
-            "pod", "gdb", "gdb-pod4",
+            "pod", "dut", "gdb", "gdb-pod4",
             "--listen-port", "9999",
             "--gdb-port", "3336",
             "--no-reset-halt",
