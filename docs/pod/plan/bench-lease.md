@@ -8,6 +8,18 @@ expires.
 
 This is a plan, not the code. It supersedes nothing; it is a new capability.
 
+**Phase 8 of the agent-surface track (`overview.md`), and conditional: build it only if phases 1 to 7 leave a gap.** Sequenced after `conflict-legibility.md`, which builds its foundations. That
+plan establishes caller identity, a pod-side holder record, the 8267 control
+listener, and a host-side anti-bump gate, all on the weaker "holder by use"
+model with no TTL or token. Three sections below are superseded once it lands:
+§ Identity (defined there), § Transport and discovery (the listener is built
+there; the lease adds verbs to it rather than binding a second port), and
+Enforcement Layer 1 (the courteous gate exists there; the lease extends it from
+"is someone else using this" to "has someone else reserved this"). The guarded
+set, lease semantics, and steal protocol below are unaffected. Revisit this plan
+once conflict-legibility stage D is done, and only if holding the bench across
+gaps in activity turns out to be needed.
+
 ## Why
 
 The pod is a single shared DUT rig that several agents already reach at once
