@@ -1203,7 +1203,6 @@ class TestAmpremoteResolution:
         client._AMPREMOTE_EXE = None
         p = Pod(addr4="10.0.0.1")
         assert p._argv("exec", "x")[0] == str(exe)
-
 class TestFlmAlgoInstall:
     """Shipping a CMSIS algorithm to the pod for loader="flm".
 
