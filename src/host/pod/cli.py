@@ -620,7 +620,8 @@ def cmd_flash(args):
     addr = int(args.addr, 0) if isinstance(args.addr, str) else args.addr
     result = pod.flash_dut(args.image, target=args.target, addr=addr,
                            keep_attached=args.keep_attached,
-                           mass_erase=args.mass_erase)
+                           mass_erase=args.mass_erase,
+                           loader=getattr(args, "loader", None))
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -629,9 +630,40 @@ def cmd_erase(args):
     """Erase the entire DUT flash via the on-pod debug stack."""
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
-    result = pod.erase_dut()
+    result = pod.erase_dut(loader=getattr(args, "loader", None) or "native")
     print(result)
     return 0 if result.get("ok") else 1
+
+
+def cmd_flm(args):
+    """Report or install the DUT's generic CMSIS flash algorithm.
+
+    With no options, prints what the pod currently has installed. Given any of
+    --device / --pack / --download / --force, resolves the algorithm from the
+    target's CMSIS pack and installs it, then prints the result. Flashing with
+    --loader flm installs one automatically; this command is for pointing at a
+    specific pack, forcing a refresh, or checking what is loaded.
+    """
+    entry = _require_pod(args.label)
+    pod = Pod.from_entry(entry)
+
+    installing = any((args.device, args.pack, args.download, args.force))
+    if not installing:
+        print(pod.flm_algo_info())
+        return 0
+
+    kwargs = {}
+    if args.pack:
+        kwargs["pack"] = args.pack
+    if args.download:
+        kwargs["allow_download"] = True
+        if args.vendor:
+            kwargs["vendor"] = args.vendor
+        if args.pack_name:
+            kwargs["pack_name"] = args.pack_name
+    algo = pod.resolve_flm_algo(device=args.device, **kwargs)
+    print(pod.install_flm_algo(algo))
+    return 0
 
 
 def cmd_reset(args):
@@ -1164,10 +1196,31 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    help="Do not detach a live USB/IP session first (risks a wedge)")
     p.add_argument("--mass-erase", action="store_true", dest="mass_erase",
                    help="Erase the entire DUT flash before programming")
+    p.add_argument("--loader", default=None, choices=["native", "flm"],
+                   help="Flash backend: native (per-family NVM, default) or "
+                        "flm (the target's CMSIS-pack algorithm)")
 
     # erase
     p = sub.add_parser("erase", help="Erase the entire DUT flash via the pod")
     p.add_argument("label")
+    p.add_argument("--loader", default=None, choices=["native", "flm"],
+                   help="Flash backend: native (per-family NVM, default) or "
+                        "flm (the target's CMSIS-pack algorithm)")
+
+    # flm (generic CMSIS flash algorithm)
+    p = sub.add_parser("flm", help="Report or install the DUT's CMSIS flash algorithm")
+    p.add_argument("label")
+    p.add_argument("--device", default=None,
+                   help="CMSIS device name (default: the DUT's declared target_family)")
+    p.add_argument("--pack", default=None,
+                   help="Explicit .pack or .FLM path instead of the pack cache")
+    p.add_argument("--download", action="store_true",
+                   help="Allow fetching the pack from the vendor index")
+    p.add_argument("--vendor", default=None, help="Pack vendor, with --download")
+    p.add_argument("--pack-name", default=None, dest="pack_name",
+                   help="Pack name, with --download")
+    p.add_argument("--force", action="store_true",
+                   help="Reinstall even if the pod already has an algorithm")
 
     # reset
     p = sub.add_parser("reset", help="Reset the DUT via the pod")
@@ -1392,6 +1445,7 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "cp": cmd_cp,
         "flash": cmd_flash,
         "erase": cmd_erase,
+        "flm": cmd_flm,
         "reset": cmd_reset,
         "recover-dut": cmd_recover,
         "reprobe": cmd_reprobe,

@@ -127,11 +127,21 @@ and over the Wi-Fi socket REPL for the network proof.
   pod filesystem).
 - **Generic CMSIS-FLM loader (D2.2)**: runs a standard CMSIS flash algorithm on
   the target (load blob to SRAM, call Init/EraseSector/ProgramPage via core
-  registers + MEM-AP, resume with interrupts masked, BKPT-return). Validated on
-  the nRF52840 with a CMSIS-pack flash algorithm (FLM erase+program+verify, ~570 ms
-  / 1 KB), 3/3 deterministic. Generalises flashing to any CMSIS-pack target; the
-  host supplies the on-VFS algo data from the target's CMSIS pack. RP-native (bootrom) flash
-  remains, blocked on a wired RP DUT.
+  registers + MEM-AP, resume with interrupts masked, BKPT-return). Generalises
+  flashing to any CMSIS-pack target. RP-native (bootrom) flash remains, blocked
+  on a wired RP DUT.
+- **On-demand CMSIS pack -> FLM flashing (2026-08-25)**: validated end to end on
+  the nRF52840 with a vendor algorithm the host fetched itself. The host resolved
+  `nRF52840_xxAA` (the DUT's declared `target_family`) against the downloaded
+  `NordicSemiconductor.nRF_DeviceFamilyPack` 8.44.1, picked `Flash/nrf52xxx.flm`
+  by covered address, parsed it (1456-byte blob, 4 KB sectors, the vendor's
+  16 KB RAM window at 0x20000000) and installed it over the REPL in base64
+  chunks in 2.3 s. A single 4 KB sector erase took 218 ms and a 256-byte page
+  program 183 ms, byte-exact. Streaming 8 KB through the real host flash path
+  gave CRC32 `0xb7f1592b` for `loader="flm"` (1.38 KB/s) and for
+  `loader="native"` (2.59 KB/s), both matching the host's own CRC of the source
+  - so the generic path agrees byte for byte with the validated NVMC path, at
+  roughly half the speed. The pod holds no algorithms of its own.
 - **GDB debugging (Phase 3)**: hybrid GDB server, a stateless on-pod binary
   debug-command server (`dbgsrv`, port 3335) + host GDB RSP translator
   (`pod.gdbserver`), with FPB hardware breakpoints in `CortexM` and a framed,

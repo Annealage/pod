@@ -25,6 +25,15 @@ for _name in ("annealage_pod.debug.swd_dap", "annealage_pod.debug.flash_nrf52",
               "annealage_pod.debug.netutil", "annealage_pod._rp2_pinmap"):
     sys.modules.setdefault(_name, types.ModuleType(_name))
 
+# flm imports the DHCSR bit constants from swd_dap, so the stub carries them
+# (values mirror the real swd_dap); test_flm_pod shares this stub, and setting
+# them here as well keeps the two files independent of import order.
+_swd_dap_stub = sys.modules["annealage_pod.debug.swd_dap"]
+for _const, _val in (("DHCSR", 0xE000EDF0), ("DBGKEY", 0xA05F << 16),
+                     ("C_DEBUGEN", 1 << 0), ("C_HALT", 1 << 1),
+                     ("C_MASKINTS", 1 << 3), ("S_HALT", 1 << 17)):
+    setattr(_swd_dap_stub, _const, _val)
+
 # ops imports swd_pio directly for DEFAULT_CLKDIV (used in its entry-point
 # default args, evaluated at import), so the stub must carry that attribute; the
 # real swd_pio pulls in rp2. Value mirrors swd_pio.DEFAULT_CLKDIV.
@@ -221,3 +230,66 @@ class TestEnsureClkdiv:
         self._wire_fakes(monkeypatch)
         ops._ensure()                            # no arg -> module default
         assert _FakeDP.built[0].swd.clkdiv == ops.swd_pio.DEFAULT_CLKDIV
+
+
+class TestFlmAlgoInstall:
+    """The host-supplied CMSIS algorithm seam.
+
+    The pod carries no flash algorithms; the host extracts one from the target's
+    CMSIS pack and installs it. These cover the install/replace bookkeeping and
+    the refusal when nothing is installed - the failure a user hits by selecting
+    loader="flm" without the host having resolved a pack.
+    """
+
+    _ALGO = {
+        "name": "nRF52840xxAA",
+        "instructions": b"\x00\xbe\x00\xbe",
+        "load_address": 0x20000000,
+        "static_base": 0x20000400,
+        "begin_stack": 0x20001000,
+        "begin_data": 0x20002000,
+        "pc_init": 0x20000021,
+        "pc_erase_sector": 0x20000061,
+        "pc_program_page": 0x20000081,
+        "flash_base": 0x0,
+        "flash_size": 0x100000,
+        "page_size": 0x1000,
+    }
+
+    @pytest.fixture(autouse=True)
+    def _clean_algo(self):
+        saved = (ops._flm_algo, ops._flm)
+        ops._flm_algo, ops._flm = None, None
+        yield
+        ops._flm_algo, ops._flm = saved
+
+    def test_no_algo_installed_reports_not_installed(self):
+        assert ops.flm_algo_info() == {"installed": False}
+
+    def test_install_summarises_without_echoing_the_blob(self):
+        info = ops.set_flm_algo(dict(self._ALGO))
+        assert info["installed"] is True
+        assert info["name"] == "nRF52840xxAA"
+        assert info["blob_bytes"] == 4
+        assert info["page_size"] == 0x1000
+        assert info["erase_all"] is False        # no pc_eraseAll in this algo
+        assert "instructions" not in info
+
+    def test_install_reports_erase_all_when_algo_has_erasechip(self):
+        algo = dict(self._ALGO, pc_eraseAll=0x200000A1)
+        assert ops.set_flm_algo(algo)["erase_all"] is True
+
+    def test_reinstall_drops_the_flasher_cached_over_the_old_algo(self):
+        ops.set_flm_algo(dict(self._ALGO))
+        ops._flm = object()                      # stand in for a built flasher
+        ops.set_flm_algo(dict(self._ALGO, name="other"))
+        assert ops._flm is None
+        assert ops.flm_algo_info()["name"] == "other"
+
+    def test_select_flm_without_an_algo_refuses(self):
+        with pytest.raises(ValueError, match="no CMSIS flash algorithm installed"):
+            ops._select_loader("flm")
+
+    def test_select_unknown_loader_refuses(self):
+        with pytest.raises(ValueError, match="unknown loader"):
+            ops._select_loader("nope")

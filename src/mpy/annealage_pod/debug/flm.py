@@ -3,9 +3,9 @@
 # Runs a standard CMSIS flash algorithm on the target itself, the general path
 # that works for any chip with a CMSIS pack, as opposed to the per-family native
 # NVM path (flash_nrf52). The algorithm is a position-independent Thumb blob with
-# fixed entry points (Init / EraseSector / ProgramPage / EraseChip), the standard
-# CMSIS-FLM contract (as Keil and CMSIS-DAP tooling use); we drive it through the
-# MEM-AP + core registers:
+# fixed entry points (Init / UnInit / EraseSector / EraseChip / ProgramPage), the
+# standard CMSIS-FLM contract (ARM's FlashOS.H); we drive it through the MEM-AP +
+# core registers:
 #
 #   1. load the blob into target SRAM at load_address;
 #   2. per call: set R0..R3 = args, R9 = static_base (PIC data), SP = begin_stack,
@@ -13,10 +13,25 @@
 #      halts the core), PC = entry, xPSR = Thumb;
 #   3. resume, wait for the BKPT halt, read R0 = status (0 = ok).
 #
-# The algorithm dict carries the blob, entry points, begin_data / begin_stack /
-# static_base, flash_base/size and page_size. The host supplies it from the
-# target's CMSIS Device Family Pack, downloaded on demand; on-pod pack handling
-# and on-pod hardcoded algorithms are out of scope.
+# The algorithm dict is supplied by the host, which extracts it from the target's
+# CMSIS Device Family Pack on demand; no algorithms are carried on the pod. Keys:
+#
+#   instructions    the blob, as bytes (or a sequence of 32-bit words)
+#   load_address    target SRAM address the blob is loaded at
+#   static_base     R9 for the algorithm's PIC data
+#   begin_stack     SP for algorithm calls
+#   begin_data      target SRAM buffer ProgramPage reads its payload from
+#   pc_init, pc_unInit, pc_erase_sector, pc_program_page   entry addresses
+#   pc_eraseAll     optional; absent means erase_all() sweeps sectors instead
+#   flash_base, flash_size, page_size    device geometry (FlashDevice)
+#   sectors         optional erase-sector map, ascending
+#                   [(offset_from_flash_base, sector_size), ...]; each entry
+#                   applies until the next one's offset. Absent means uniform
+#                   sectors of page_size.
+#
+# page_size is the *program* granularity (FlashDevice.szPage) and the sector map
+# is the *erase* granularity; they differ on most parts outside the nRF52, so
+# erase addresses come from the sector map, never from page_size.
 
 import time
 
@@ -27,20 +42,84 @@ class FLMError(Exception):
     pass
 
 
+def _to_words(instructions):
+    # The blob arrives as bytes (the host ships it base64-encoded so it stays
+    # compact over the REPL); a sequence of 32-bit words is also accepted.
+    if isinstance(instructions, (bytes, bytearray)):
+        pad = -len(instructions) % 4
+        if pad:
+            instructions = bytes(instructions) + b"\x00" * pad
+        return [int.from_bytes(instructions[i:i + 4], "little")
+                for i in range(0, len(instructions), 4)]
+    return list(instructions)
+
+
 class FLMFlasher:
     def __init__(self, memap, cortexm, algo):
         self.ap = memap
         self.cm = cortexm
         self.algo = algo
         self.page_size = algo["page_size"]
+        # Normalise the erase-sector map once: ascending [(offset, size), ...].
+        sectors = algo.get("sectors")
+        if not sectors:
+            sectors = [(0, self.page_size)]
+        self.sectors = sorted((int(o), int(s)) for o, s in sectors)
         self._loaded = False
 
+    # ── blob loading ─────────────────────────────────────────────────────
+
     def load(self):
+        # Write the algorithm into target SRAM. Idempotent: the blob stays
+        # resident for the life of this flasher, so a multi-page program() does
+        # not re-upload it per page. reload() forces a fresh copy.
+        if self._loaded:
+            return
         a = self.algo
         if not self.cm.is_halted():
             self.cm.halt()
-        self.ap.write_block32(a["load_address"], list(a["instructions"]))
+        self.ap.write_block32(a["load_address"], _to_words(a["instructions"]))
         self._loaded = True
+
+    def reload(self):
+        # Re-write the blob, restoring the algorithm's initialised RW data. Only
+        # needed if the target's SRAM has been disturbed since load() (a reset,
+        # or the DUT running its own firmware over the load region).
+        self._loaded = False
+        self.load()
+
+    # ── sector geometry ──────────────────────────────────────────────────
+
+    def sector_size(self, addr):
+        # Erase-sector size covering addr, from the CMSIS sector map.
+        off = addr - self.algo["flash_base"]
+        if off < 0:
+            raise FLMError("addr 0x%08x below flash_base" % addr)
+        size = None
+        for s_off, s_size in self.sectors:
+            if off >= s_off:
+                size = s_size
+            else:
+                break
+        if not size:
+            raise FLMError("no sector covers 0x%08x" % addr)
+        return size
+
+    def sector_base(self, addr):
+        # Base address of the erase sector containing addr. Sector runs are
+        # uniform within a map entry, so align relative to that entry's start.
+        off = addr - self.algo["flash_base"]
+        entry_off, size = 0, None
+        for s_off, s_size in self.sectors:
+            if off >= s_off:
+                entry_off, size = s_off, s_size
+            else:
+                break
+        if not size:
+            raise FLMError("no sector covers 0x%08x" % addr)
+        return self.algo["flash_base"] + entry_off + ((off - entry_off) // size) * size
+
+    # ── algorithm calls ──────────────────────────────────────────────────
 
     def _call(self, pc, r0=0, r1=0, r2=0, r3=0, timeout_ms=8000):
         a = self.algo
@@ -71,8 +150,7 @@ class FLMFlasher:
 
     def init(self, fnc, addr=None, clk=0):
         a = self.algo
-        if not self._loaded:
-            self.load()
+        self.load()
         if "pc_init" in a:
             base = a["flash_base"] if addr is None else addr
             r = self._call(a["pc_init"], base, clk, fnc)
@@ -88,10 +166,19 @@ class FLMFlasher:
         if r:
             raise FLMError("EraseSector(0x%08x) returned %d" % (addr, r))
 
+    def erase_range(self, addr, length):
+        # Erase every sector covering [addr, addr+length), walking the sector
+        # map so non-uniform devices step by the right size. The caller supplies
+        # the Init(1)/UnInit(1) bracket.
+        p = self.sector_base(addr)
+        end = addr + length
+        while p < end:
+            self.erase_sector(p)
+            p += self.sector_size(p)
+
     def erase_all(self):
         # Erase the entire flash: load the blob, bracket with Init/UnInit(1),
-        # call EraseChip if the algo supplies it, otherwise fall back to a full
-        # sector-by-sector sweep. Mirrors program()'s load/init/uninit structure.
+        # call EraseChip if the algo supplies it, otherwise sweep every sector.
         a = self.algo
         self.load()
         self.init(1)                                  # operation 1 = erase
@@ -101,13 +188,7 @@ class FLMFlasher:
                 if r:
                     raise FLMError("EraseChip returned %d" % r)
             else:
-                # Generic fallback: sector sweep over the full flash region.
-                page = a["page_size"]
-                p = a["flash_base"] & ~(page - 1)   # page-align (cf _flm_erase_range)
-                end = a["flash_base"] + a["flash_size"]
-                while p < end:
-                    self.erase_sector(p)
-                    p += page
+                self.erase_range(a["flash_base"], a["flash_size"])
         finally:
             self.uninit(1)
 
@@ -127,12 +208,10 @@ class FLMFlasher:
         self.load()
         if erase:
             self.init(1)                       # operation 1 = erase
-            p = addr & ~(page - 1)
-            end = addr + len(data)
-            while p < end:
-                self.erase_sector(p)
-                p += page
-            self.uninit(1)
+            try:
+                self.erase_range(addr, len(data))
+            finally:
+                self.uninit(1)
         self.init(2)                           # operation 2 = program
         off = 0
         while off < len(data):

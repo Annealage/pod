@@ -22,26 +22,77 @@ _flash = None
 _fpb = None
 _dwt = None
 _flm = None
+_flm_algo = None
+_flm_stage = None
 
 
 # Selectable flash backend. "native" is the per-family NVM path
 # (flash_nrf52.NRF52Flash), driven directly through the NVMC and hardware-validated
 # on the nRF52840 (2026-07-09: program + full-chip erase). "flm" is the generic
 # CMSIS flash-algorithm runner (flm.FLMFlasher) that runs a standard algorithm on
-# the target and so generalises to any chip with a CMSIS pack; it needs the
-# algorithm supplied by the host from the target's on-demand CMSIS pack, so until
-# that host path lands "flm" has no algorithm source (see _flm_algo) and every
-# operation defaults to "native". _select_loader keeps the choice out of the hot
-# path.
-def _flm_algo():
-    # The CMSIS flash algorithm for the connected DUT. The host supplies this from
-    # the target's CMSIS Device Family Pack, downloaded on demand and keyed off the
-    # discovered part id; on-pod hardcoded algorithms are not carried. Until that
-    # host path lands the generic FLM loader has no algorithm source, so the native
-    # per-family path (flash_nrf52) is the default for every operation.
-    raise NotImplementedError(
-        "no on-pod CMSIS flash algorithm; use loader='native', or supply an "
-        "algorithm from the host's on-demand CMSIS pack (not yet implemented)")
+# the target and so generalises to any chip with a CMSIS pack. The pod carries no
+# algorithms of its own: the host extracts one from the target's CMSIS Device
+# Family Pack on demand and installs it with set_flm_algo() before selecting
+# loader="flm". "native" stays the default because it needs no such install.
+# _select_loader keeps the choice out of the hot path.
+def stage_flm_blob(b64=None):
+    # Accumulate an algorithm image in pod RAM across REPL round-trips. Vendor
+    # algorithms run to tens of KB, and a single exec carrying all of it would
+    # have to hold the source text, the decoded bytes and the compiled code at
+    # once; chunking keeps the peak down. Call with no argument to start a new
+    # image, then once per base64 chunk. Returns the running byte count so the
+    # host can check the transfer before installing.
+    global _flm_stage
+    if b64 is None:
+        _flm_stage = bytearray()
+    else:
+        import binascii
+        if _flm_stage is None:
+            _flm_stage = bytearray()
+        _flm_stage.extend(binascii.a2b_base64(b64))
+    return len(_flm_stage)
+
+
+def set_flm_algo(algo):
+    # Install the host-supplied CMSIS flash algorithm for subsequent loader="flm"
+    # operations, replacing any previous one. The algorithm stays installed for
+    # the VM lifetime (one DUT per pod), so the host ships it once per target
+    # rather than per flash. See flm.FLMFlasher for the dict's keys; its
+    # "instructions" image may be bytes, a base64 string, or omitted to take
+    # whatever stage_flm_blob() accumulated.
+    global _flm, _flm_algo, _flm_stage
+    image = algo.get("instructions")
+    if image is None:
+        if not _flm_stage:
+            raise ValueError(
+                "no algorithm image: stage one with stage_flm_blob() or pass "
+                "it as 'instructions'")
+        algo["instructions"] = bytes(_flm_stage)
+    elif isinstance(image, str):
+        import binascii
+        algo["instructions"] = binascii.a2b_base64(image)
+    _flm_stage = None    # release the staging buffer
+    _flm = None          # drop any flasher cached over the previous algorithm
+    _flm_algo = algo
+    return flm_algo_info()
+
+
+def flm_algo_info():
+    # Summarise the installed algorithm without echoing the blob back to the host.
+    if _flm_algo is None:
+        return {"installed": False}
+    a = _flm_algo
+    return {
+        "installed": True,
+        "name": a.get("name"),
+        "blob_bytes": len(a["instructions"]),
+        "load_address": a["load_address"],
+        "flash_base": a["flash_base"],
+        "flash_size": a["flash_size"],
+        "page_size": a["page_size"],
+        "sectors": a.get("sectors"),
+        "erase_all": "pc_eraseAll" in a,
+    }
 
 
 def _ensure(clkdiv=swd_pio.DEFAULT_CLKDIV):
@@ -84,27 +135,36 @@ def _select_loader(loader):
     if loader == "native":
         return _flash
     if loader == "flm":
-        from . import flm
+        if _flm_algo is None:
+            raise ValueError(
+                "no CMSIS flash algorithm installed; call set_flm_algo() first "
+                "(the host extracts one from the target's CMSIS pack), or use "
+                "loader='native'")
         if _flm is None:
-            _flm = flm.FLMFlasher(_ap, _cm, _flm_algo())
+            from . import flm
+            _flm = flm.FLMFlasher(_ap, _cm, _flm_algo)
         return _flm
     raise ValueError("unknown loader %r (use 'native' or 'flm')" % loader)
 
 
+def _flm_begin(flm_fl):
+    # Re-upload the algorithm into target SRAM at the start of an FLM operation.
+    # FLMFlasher.load() is idempotent so a multi-page program does not re-upload
+    # per page, but every operation ends by resuming the DUT, which then runs its
+    # own firmware over the load region - so each operation starts from a fresh
+    # copy rather than trusting the one the previous operation left behind.
+    flm_fl.reload()
+
+
 def _flm_erase_range(flm_fl, addr, length):
-    # Erase the page-aligned region covering [addr, addr+length) by sectors,
-    # using one Init(erase)/UnInit bracket. Mirrors NRF52Flash.erase_range so
-    # the FLM flash_file / flash_stream paths erase once up front and then
-    # program with erase=False, matching the native path's behaviour.
-    page = flm_fl.page_size
-    flm_fl.load()
+    # Erase the sectors covering [addr, addr+length) inside one Init(erase)/UnInit
+    # bracket. Mirrors NRF52Flash.erase_range so the FLM flash_file / flash_stream
+    # paths erase once up front and then program with erase=False, matching the
+    # native path's behaviour. Sector stepping comes from the algorithm's CMSIS
+    # sector map (FLMFlasher.erase_range), not from page_size.
     flm_fl.init(1)                                 # operation 1 = erase
     try:
-        p = addr & ~(page - 1)
-        end = addr + length
-        while p < end:
-            flm_fl.erase_sector(p)
-            p += page
+        flm_fl.erase_range(addr, length)
     finally:
         flm_fl.uninit(1)
 
@@ -121,6 +181,7 @@ def _flm_program_file(flm_fl, addr, fileobj, verify):
         fileobj.seek(0)
     except (OSError, AttributeError):
         raise ValueError("length required for non-seekable file")
+    _flm_begin(flm_fl)
     _flm_erase_range(flm_fl, addr, length)
     page = flm_fl.page_size
     n = 0
@@ -208,6 +269,8 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
     fl = _select_loader(loader)
     if loader == "native":
         fl.prepare()
+    else:
+        _flm_begin(fl)
     page = fl.page_size
     err = None
 
@@ -261,8 +324,9 @@ def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
     # Erase the entire DUT flash, returning timing and loader info. loader="native"
     # (default) uses NRF52Flash.mass_erase() directly through the NVMC; loader="flm"
     # runs the generic CMSIS FLMFlasher.erase_all() (halts core, runs the algorithm,
-    # resumes) once a host-supplied CMSIS-pack algorithm is available. The core is
-    # always resumed in the finally.
+    # resumes) against the algorithm installed by set_flm_algo(), using its EraseChip
+    # entry point if it has one and a sector sweep otherwise. The core is always
+    # resumed in the finally.
     dp, ap, cm, fl = _ensure(clkdiv)
     err = None
     t0 = time.ticks_ms()
@@ -274,6 +338,7 @@ def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
         else:
             if not cm.is_halted():
                 cm.halt()
+            _flm_begin(fl)
             fl.erase_all()
     except Exception as e:  # noqa: BLE001 - return as a result, not a raise
         err = repr(e)

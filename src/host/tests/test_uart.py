@@ -380,7 +380,11 @@ class TestPodUartStreamOutput:
             chunks.append(chunk)
 
         with patch("socket.create_connection", return_value=fake_sock):
-            result = pod.uart_stream(port=2000, on_output=on_output, duration=0.001)
+            # No duration: the fake socket's EOF ends the loop. A duration
+            # would race it - uart_stream checks the deadline after each chunk,
+            # so under load the first chunk can already exceed it and the
+            # second is never read.
+            result = pod.uart_stream(port=2000, on_output=on_output)
             assert result["bytes_received"] == 10
             assert chunks == [b"hello", b"world"]
 
@@ -409,7 +413,9 @@ class TestPodUartStreamOutput:
 
         with patch("socket.create_connection", return_value=fake_sock):
             with patch("builtins.open", return_value=mock_file_obj):
-                result = pod.uart_stream(port=2000, out_path="/tmp/uart.bin", duration=0.001)
+                # No duration: EOF ends the loop, so both chunks are always
+                # read (a deadline races the second one under load).
+                result = pod.uart_stream(port=2000, out_path="/tmp/uart.bin")
                 assert result["bytes_received"] == 10
                 assert mock_file_obj.write.call_count == 2
                 calls = [c[0][0] for c in mock_file_obj.write.call_args_list]

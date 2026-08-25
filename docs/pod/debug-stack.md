@@ -178,12 +178,49 @@ the bound; reads were the original bottleneck until `read_drw_block` was inlined
 The per-family native path (`flash_nrf52`) is fastest where it exists; the
 generic path runs a standard CMSIS flash algorithm on the target and works for
 any chip with a CMSIS pack. `flm.FLMFlasher` takes an `algo` dict (the blob,
-entry points, `begin_data`/`begin_stack`/`static_base`, flash geometry, and
-`page_size`) sourced from the target's CMSIS Device Family Pack. The host is
-meant to supply this on demand, keyed off the discovered part id; that pack
-lookup is not built yet, so `ops.erase_all`/`ops.flash_dut` default to
-`loader="native"` and `ops._flm_algo()` raises `NotImplementedError` until it
-lands.
+entry points, `begin_data`/`begin_stack`/`static_base`, flash geometry,
+`page_size`, and the erase-sector map) sourced from the target's CMSIS Device
+Family Pack.
+
+The pod carries no algorithms of its own. The host extracts one from the
+target's pack on demand and installs it with `ops.set_flm_algo(algo)`, which
+holds it for the VM lifetime; `ops.flm_algo_info()` reports what is installed
+without echoing the blob back. Selecting `loader="flm"` with nothing installed
+raises. `loader="native"` needs no install and stays the default for
+`ops.erase_all` / `ops.flash_file` / `ops.flash_stream`.
+
+The image is shipped in base64 chunks via `ops.stage_flm_blob()` rather than as
+one source literal, since a vendor algorithm runs to tens of KB and the pod
+would otherwise hold the source text, the decoded bytes and the compiled code
+at once.
+
+Host side, `pod.cmsis_pack` resolves the pack (explicit path, then the local
+cache, then an opt-in download from the vendor index) and `pod.flm` parses the
+`.FLM` - an ELF32 ARM image whose `PrgCode`/`PrgData` sections become the blob,
+whose symbols give the entry points, and whose `DevDscr` holds the
+`FlashDevice` struct with the geometry and sector map. From the CLI:
+
+```
+pod flm <label>                          # what the pod has installed
+pod flm <label> --device nRF52840_xxAA   # resolve from the pack cache + install
+pod flm <label> --pack /path/to/x.pack   # or from an explicit pack
+pod flash <label> fw.bin --loader flm    # installs automatically if needed
+```
+
+The device name defaults to the DUT's declared `target_family` in the registry.
+Packs are cached in `$ANNEALAGE_POD_PACK_CACHE` (default
+`~/.cache/annealage-pod/cmsis-packs`).
+
+`page_size` is the *program* granularity (`FlashDevice.szPage`); erase
+granularity comes from the `sectors` map, a list of `(offset_from_flash_base,
+sector_size)` entries where each applies until the next one's offset. Omitting
+it means uniform sectors of `page_size` (correct for the nRF52, wrong for parts
+like the STM32F4 whose sectors run 16K/64K/128K).
+
+Each operation re-uploads the algorithm once (`FLMFlasher.reload()`) because
+every operation ends by resuming the DUT, which then runs its own firmware over
+the load region. Within an operation `load()` is a no-op, so a multi-page
+program does not re-upload per page.
 
 Driving it directly once you have an `algo` dict for the target:
 
