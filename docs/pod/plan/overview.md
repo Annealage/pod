@@ -96,8 +96,16 @@ the risk register) rather than silent scope creep.
 Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
 - `bench-lease.md` - a time-boxed, named lease over the DUT so multiple agents
   sharing one pod do not collide on the SWD singleton / usbip / peripherals
-  (a host-tooling CLI/MCP gate over a small pod-side firmware authority;
-  buildable now, lands in the Phase 6/7 band).
+  (a host-tooling CLI/MCP gate over a small pod-side firmware authority).
+  Conditional: build only if the phases before it leave a gap.
+- `conflict-legibility.md` - naming the holder of each contended pod resource and
+  refusing the host-side operations that displace an incumbent (caller identity, a
+  pod-side holder record on a control port, an anti-bump gate, and an SWD
+  re-entrancy guard). The layer beneath `bench-lease.md`.
+- `mcp-surface.md` - reorganising the 40-tool MCP surface into three subject-first
+  namespaces (`pod_` / `dut_` / `bench_`) at 27 tools, with the persistent DUT
+  session as the default path and the one-shot named as such. A single pre-announcement
+  cutover with no aliases; the CLI nests onto the same taxonomy in the same pass.
 - `carrier-hardware.md` - the desirable-features spec for a future custom carrier
   PCB (power switching + remote power-cycle recovery, INA228 telemetry, DUT-USB
   power control/measurement, level translation, connectors). Draft, gated on the
@@ -108,6 +116,32 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   composed into micropython fork branches for upstream submission, with the
   draft PR descriptions and the reproduction. Also records the one thing it does
   not address: a busy device cannot be interrupted over the socket REPL.
+- `spi-la-concurrency.md` - making the SPI target and the logic analyser coexist on
+  PIO0 (per-SM arbiter claims + per-program PIO teardown), so an agent can watch the
+  bus the pod is driving. The risky premise (MicroPython selective `remove_program`)
+  is hardware-validated up front; phased A-E with a cross-check gate.
+
+### Agent-surface track (execution order)
+
+`mcp-surface.md`, `conflict-legibility.md`, and `bench-lease.md` are one programme of
+work on the agent-facing surface, executed in this order. The numbering is global to
+the track and independent of the numbered project phases above; each phase's detail
+and gate live in the doc named beside it.
+
+| # | phase | doc |
+| --- | --- | --- |
+| 1 | MCP + CLI surface cutover: `pod_`/`dut_`/`bench_` namespaces, merges, plumbing collapsed, no aliases | `mcp-surface.md` |
+| 2 | Session rework: session ids, concurrent pod + DUT sessions, `dut_open` absorption, `dut_exec` session reuse | `mcp-surface.md` |
+| 3 | Doc sweep for phases 1-2 | `mcp-surface.md` |
+| 4 | Caller identity + failure classification: busy is no longer indistinguishable from a dead pod | `conflict-legibility.md` |
+| 5 | Pod-side holder record on the 8267 control port, surfaced through `pod_info` | `conflict-legibility.md` |
+| 6 | Anti-bump gate: the host-side operations that displace an incumbent are refused, with `force` | `conflict-legibility.md` |
+| 7 | SWD re-entrancy guard + the sticky-holder window for one-shot sequences | `conflict-legibility.md` |
+| 8 | Bench lease (conditional): reservation ahead of use, only if 1-7 leave a gap | `bench-lease.md` |
+
+Phases 2 and 5-7 need the live pod; 1, 3, 4 and most of 6 are host-side. Phase 4 is
+name-independent and can move earlier if the busy-versus-dead confusion bites before
+the reorg lands.
 
 ## 5. Code-sharing strategy with the ESP32-S3 variant
 
