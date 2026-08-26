@@ -11,10 +11,21 @@ import sys
 from functools import lru_cache
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pod.mcp_server as m
 from pod.cli import main
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_sessions():
+    """The session store is a module global that the open handlers write to
+    directly, so a test that opens one would otherwise leave it visible to the
+    next test in the file."""
+    m._SESSIONS.clear()
+    yield
+    m._SESSIONS.clear()
 
 
 # ── shared extraction from mcp_server.py's build_server() ──────────────────
@@ -448,33 +459,71 @@ class TestMutuallyExclusiveArgsRefuse:
 # ── a session is never returned for the wrong subject ──────────────────────
 
 
-class TestSessionSubjectIsNotConfused:
-    """Sessions are keyed by pod label, so a pod session and a DUT session
-    contend for the same key. The open path must refuse the mismatch rather
-    than hand back whichever session happens to be held."""
+class TestSessionsAreKeyedBySubject:
+    """A session id is derived from what it is attached to, so a pod session and
+    any number of DUT sessions coexist, and re-opening a target hands back the
+    session already held instead of building a second one against it."""
 
     def _held(self, monkeypatch, device):
         session = MagicMock()
         session.running = True
+        session.target = device or "socket://pod:8266"
+        session.mounted = False
         monkeypatch.setitem(
-            m._REPL_SESSIONS, "lab",
-            {"session": session, "log_path": "/tmp/x.log", "device": device})
+            m._SESSIONS, m._session_id("lab", device),
+            {"session": session, "log_path": "/tmp/x.log", "device": device,
+             "label": "lab"})
         return session
 
-    def test_dut_open_refuses_when_a_pod_session_is_held(self, monkeypatch):
+    def test_ids_separate_the_pod_from_each_dut(self):
+        assert m._session_id("lab") == "lab:pod"
+        assert m._session_id("lab", "/dev/ttyACM0") == "lab:dut:ttyACM0"
+        assert m._session_id("lab", "/dev/ttyACM1") == "lab:dut:ttyACM1"
+        assert m._session_id("lab") != m._session_id("lab", "/dev/ttyACM0")
+
+    def test_a_pod_session_does_not_block_a_dut_session(self, monkeypatch):
         self._held(monkeypatch, None)
-        with pytest.raises(ValueError, match="already holds a session"):
-            m.handle_dut_open("lab", device="/dev/ttyACM0")
+        opened = {}
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock(
+            open_session=lambda **kw: (opened.update(kw), _fake_session())[1]))
+        info = m.handle_dut_open("lab", device="/dev/ttyACM0")
+        assert info["session"] == "lab:dut:ttyACM0"
+        # the pod session is untouched and still held
+        assert "lab:pod" in m._SESSIONS
 
-    def test_pod_open_refuses_when_a_dut_session_is_held(self, monkeypatch):
+    def test_a_dut_session_does_not_block_the_pod_session(self, monkeypatch):
         self._held(monkeypatch, "/dev/ttyACM0")
-        with pytest.raises(ValueError, match="already holds a session"):
-            m.handle_pod_open("lab")
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock(
+            open_session=lambda **kw: _fake_session()))
+        info = m.handle_pod_open("lab")
+        assert info["session"] == "lab:pod"
+        assert "lab:dut:ttyACM0" in m._SESSIONS
 
-    def test_dut_open_refuses_a_different_device(self, monkeypatch):
+    def test_two_duts_on_one_pod_coexist(self, monkeypatch):
         self._held(monkeypatch, "/dev/ttyACM0")
-        with pytest.raises(ValueError, match="already holds a session"):
-            m.handle_dut_open("lab", device="/dev/ttyACM1")
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock(
+            open_session=lambda **kw: _fake_session()))
+        info = m.handle_dut_open("lab", device="/dev/ttyACM1")
+        assert info["session"] == "lab:dut:ttyACM1"
+        assert "lab:dut:ttyACM0" in m._SESSIONS
+
+    def test_reopening_the_same_target_returns_the_held_session(self, monkeypatch):
+        self._held(monkeypatch, "/dev/ttyACM0")
+        info = m.handle_dut_open("lab", device="/dev/ttyACM0")
+        assert info["already_open"] is True
+        assert info["session"] == "lab:dut:ttyACM0"
+
+    def test_session_verbs_refuse_an_unknown_id(self):
+        with pytest.raises(KeyError, match="No open session"):
+            m.handle_session_read("lab:dut:nope")
+
+
+def _fake_session():
+    s = MagicMock()
+    s.running = True
+    s.target = "/dev/ttyACM9"
+    s.mounted = False
+    return s
 
 
 # ── the un-stick path stayed reachable through dut_open ────────────────────
@@ -559,3 +608,175 @@ class TestSchemaDeclarations:
         schema = self._schema("bench_device")
         assert '"minimum": 1, "maximum": 8192' in schema      # size
         assert '"minimum": 1, "maximum": 4096' in schema      # table_size
+
+
+# ── dut_exec takes the cheapest route to the DUT ───────────────────────────
+
+
+class TestDutExecRoute:
+    """dut_exec reports which route it took as `via`. The session route exists
+    to remove the attach/detach cycle from the inner loop, so the test asserts
+    the cycle is not run, not merely that the call succeeded."""
+
+    def _session(self, monkeypatch, device="/dev/ttyACM0", running=True):
+        sess = MagicMock()
+        sess.running = running
+        sess.target = device
+        sess.tell.return_value = 0
+        sess.send.return_value = 12
+        sess.read_since.return_value = {"text": "42\r\n", "cursor": 6,
+                                        "dropped": 0}
+        monkeypatch.setitem(
+            m._SESSIONS, m._session_id("lab", device),
+            {"session": sess, "log_path": "/tmp/x.log", "device": device,
+             "label": "lab"})
+        return sess
+
+    def test_open_session_is_reused_and_nothing_is_attached(self, monkeypatch):
+        self._session(monkeypatch)
+        fake_pod = MagicMock()
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake_pod)
+
+        result = m.handle_dut_exec("lab", "print(6*7)", wait=0)
+
+        assert result["via"] == "session"
+        assert result["session"] == "lab:dut:ttyACM0"
+        assert result["device"] == "/dev/ttyACM0"
+        # the whole point: no link work at all
+        fake_pod.dut_exec.assert_not_called()
+        fake_pod.usbip_attach.assert_not_called()
+        fake_pod.usbip_detach.assert_not_called()
+
+    def test_code_goes_down_the_session_as_one_exec_line(self, monkeypatch):
+        sess = self._session(monkeypatch)
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock())
+
+        m.handle_dut_exec("lab", "for i in range(2):\n    print(i)", wait=0)
+
+        sent = sess.send.call_args[0][0]
+        assert sent.startswith("exec(")
+        # one line, so line-by-line submission cannot break the indentation
+        assert "\n" not in sent
+        assert "for i in range(2):" in sent
+
+    def test_falls_back_to_attach_with_no_session(self, monkeypatch):
+        fake_pod = MagicMock()
+        fake_pod.dut_exec.return_value = {
+            "tty": "/dev/ttyACM0", "returncode": 0, "stdout": "42\n",
+            "stderr": "", "reattached": True}
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake_pod)
+
+        result = m.handle_dut_exec("lab", "print(6*7)")
+
+        assert result["via"] == "attach"
+        assert result["stdout"] == "42\n"
+        fake_pod.dut_exec.assert_called_once_with("print(6*7)")
+
+    def test_a_closed_session_is_not_reused(self, monkeypatch):
+        self._session(monkeypatch, running=False)
+        fake_pod = MagicMock()
+        fake_pod.dut_exec.return_value = {"tty": "/dev/ttyACM0",
+                                          "returncode": 0, "stdout": "",
+                                          "stderr": "", "reattached": True}
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake_pod)
+
+        assert m.handle_dut_exec("lab", "x")["via"] == "attach"
+
+    def test_two_dut_sessions_refuse_to_be_guessed_between(self, monkeypatch):
+        self._session(monkeypatch, device="/dev/ttyACM0")
+        self._session(monkeypatch, device="/dev/ttyACM1")
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock())
+
+        with pytest.raises(ValueError, match="holds 2 DUT sessions"):
+            m.handle_dut_exec("lab", "print(1)")
+
+    def test_a_pod_session_is_not_mistaken_for_a_dut_session(self, monkeypatch):
+        # a pod session must not be used to run DUT code
+        sess = MagicMock()
+        sess.running = True
+        monkeypatch.setitem(
+            m._SESSIONS, m._session_id("lab"),
+            {"session": sess, "log_path": "/tmp/x.log", "device": None,
+             "label": "lab"})
+        fake_pod = MagicMock()
+        fake_pod.dut_exec.return_value = {"tty": "/dev/ttyACM0",
+                                          "returncode": 0, "stdout": "",
+                                          "stderr": "", "reattached": True}
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake_pod)
+
+        assert m.handle_dut_exec("lab", "x")["via"] == "attach"
+        sess.send.assert_not_called()
+
+
+# ── dut_open reaches a DUT in one call ─────────────────────────────────────
+
+
+class TestDutOpenBringsTheLinkUp:
+    def test_device_omitted_brings_the_link_up_and_uses_its_tty(self, monkeypatch):
+        opened = {}
+        monkeypatch.setattr(m, "handle_dut_link",
+                            lambda label, action=None, **kw: {
+                                "busid": "1-1", "tty": "/dev/ttyACM3"})
+        fake = MagicMock()
+        fake.running = True
+        fake.target = "/dev/ttyACM3"
+        fake.mounted = False
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock(
+            open_session=lambda **kw: (opened.update(kw), fake)[1]))
+
+        info = m.handle_dut_open("lab")
+
+        assert opened["device"] == "/dev/ttyACM3"
+        assert info["session"] == "lab:dut:ttyACM3"
+        assert info["link"]["tty"] == "/dev/ttyACM3"
+
+    def test_device_given_does_not_touch_the_link(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(m, "handle_dut_link",
+                            lambda *a, **k: calls.append(a) or {})
+        fake = MagicMock()
+        fake.running = True
+        fake.target = "/dev/ttyACM0"
+        fake.mounted = False
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock(
+            open_session=lambda **kw: fake))
+
+        info = m.handle_dut_open("lab", device="/dev/ttyACM0")
+
+        assert calls == []
+        assert "link" not in info
+
+    def test_a_bring_up_with_no_tty_is_an_error_not_a_broken_session(self, monkeypatch):
+        monkeypatch.setattr(m, "handle_dut_link",
+                            lambda label, action=None, **kw: {"busid": "1-1",
+                                                              "tty": None})
+        with pytest.raises(RuntimeError, match="no CDC tty"):
+            m.handle_dut_open("lab")
+
+
+# ── the tty a caller already holds is not re-attached ──────────────────────
+
+
+class TestPodDutExecReusesAKnownTty:
+    def test_given_tty_skips_the_attach_cycle(self, monkeypatch):
+        from pod.client import Pod
+        runs = []
+
+        def runner(argv, **kw):
+            runs.append(argv)
+            return SimpleNamespace(returncode=0, stdout="42\n", stderr="")
+
+        pod = Pod(address="10.0.0.1", repl_port=8266, runner=runner)
+        slept = []
+        monkeypatch.setattr("pod.client.time.sleep", lambda s: slept.append(s))
+        monkeypatch.setattr(pod, "usbip_detach",
+                            lambda *a, **k: pytest.fail("detached"))
+        monkeypatch.setattr(pod, "usbip_attach",
+                            lambda *a, **k: pytest.fail("re-attached"))
+
+        result = pod.dut_exec("print(6*7)", tty="/dev/ttyACM0")
+
+        assert result["reattached"] is False
+        assert result["stdout"] == "42\n"
+        assert slept == []                      # no settle delays at all
+        assert runs[0][:4] == ["mpremote", "connect", "/dev/ttyACM0", "resume"]

@@ -666,14 +666,27 @@ def cmd_dut_open(args):
     --mount/--exec/--cp/--soft-reset. --recover sends Ctrl-C then Ctrl-B
     over the tty first, to un-stick a DUT latched in raw REPL mode, and
     prints the machine-readable result (ok, recovered, prompt_seen, was_raw).
+
+    With no device the USB/IP link is brought up and the tty it returns is
+    used, so one command is enough; that activates the pod USB host, which can
+    disturb the pod's Wi-Fi.
     """
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
+    device = args.device
+    if device is None:
+        dev = pod.usbip_attach(ensure=True)
+        device = dev.get("tty")
+        if not device:
+            print("dut open: attached the DUT but no CDC tty appeared",
+                  file=sys.stderr)
+            return 1
+        print("dut open: attached %s -> %s" % (dev.get("busid"), device))
     if args.recover:
-        rec = pod.recover_dut_repl(args.device, settle=args.settle,
+        rec = pod.recover_dut_repl(device, settle=args.settle,
                                    read_wait=args.read_wait)
         print(rec)
-    return _stream_session(pod, args, device=args.device)
+    return _stream_session(pod, args, device=device)
 
 
 def cmd_dut_exec(args):
@@ -1273,9 +1286,14 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                     "before connecting with --mount/--exec/--cp/--soft-reset. "
                     "Ctrl-C interrupts the DUT; Ctrl-D / EOF exits, leaving "
                     "it running. --recover un-sticks a DUT latched in raw "
-                    "REPL mode (Ctrl-C then Ctrl-B over the tty) first.")
+                    "REPL mode (Ctrl-C then Ctrl-B over the tty) first. With "
+                    "no device the USB/IP link is brought up and its tty used, "
+                    "which activates the pod USB host and can disturb the pod's "
+                    "Wi-Fi; pass a device to skip that.")
     p.add_argument("label")
-    p.add_argument("device", help="DUT CDC tty from `pod dut link up` (e.g. /dev/ttyACM0)")
+    p.add_argument("device", nargs="?",
+                   help="DUT CDC tty (e.g. /dev/ttyACM0). Omit to bring the "
+                        "USB/IP link up and use the tty it returns.")
     p.add_argument("--recover", action="store_true",
                    help="Un-stick a raw-REPL-latched DUT before connecting")
     p.add_argument("--settle", type=float, default=0.4,

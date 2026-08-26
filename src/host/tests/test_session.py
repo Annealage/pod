@@ -370,9 +370,9 @@ def mcp_repl(monkeypatch):
             return fake
 
     monkeypatch.setattr(m.Pod, "from_entry", classmethod(lambda cls, e: FakePod()))
-    m._REPL_SESSIONS.clear()
+    m._SESSIONS.clear()
     yield m, fake, opened
-    m._REPL_SESSIONS.clear()
+    m._SESSIONS.clear()
 
 
 class TestMcpRepl:
@@ -383,14 +383,14 @@ class TestMcpRepl:
         assert info["target"] == fake.target
         assert info["log_path"]                       # defaulted to a temp file
 
-        r = m._session_write("lab", "print(1)", wait=0)
+        r = m._session_write("lab:pod", "print(1)", wait=0)
         assert fake.sent == [("print(1)", True)]
         assert r["sent"] == len("print(1)")
 
-        assert m.handle_session_read("lab")["text"] == "out"
+        assert m.handle_session_read("lab:pod")["text"] == "out"
         assert m._open_sessions()[0]["label"] == "lab"
 
-        res = m.handle_session_close("lab")
+        res = m.handle_session_close("lab:pod")
         assert res["ok"] is True and fake.closed is True
         assert m._open_sessions() == []
 
@@ -423,7 +423,7 @@ class TestMcpRepl:
     def test_interrupt(self, mcp_repl):
         m, fake, _ = mcp_repl
         m._open_session("lab")
-        m._session_interrupt("lab", wait=0)
+        m._session_interrupt("lab:pod", wait=0)
         assert fake.interrupted is True
 
     def test_close_without_open_is_ok(self, mcp_repl):
@@ -434,7 +434,7 @@ class TestMcpRepl:
         """session_send with no `control` writes `data` to the session's stdin."""
         m, fake, _ = mcp_repl
         m._open_session("lab")
-        r = m.handle_session_send("lab", data="print(1)", wait=0)
+        r = m.handle_session_send("lab:pod", data="print(1)", wait=0)
         assert fake.sent == [("print(1)", True)]
         assert fake.interrupted is False
         assert r["sent"] == len("print(1)")
@@ -443,7 +443,7 @@ class TestMcpRepl:
         """control='c' interrupts, returning _session_interrupt's result (no `sent` key)."""
         m, fake, _ = mcp_repl
         m._open_session("lab")
-        r = m.handle_session_send("lab", control="c", wait=0)
+        r = m.handle_session_send("lab:pod", control="c", wait=0)
         assert fake.interrupted is True
         assert fake.sent == []
         assert "sent" not in r
@@ -452,27 +452,27 @@ class TestMcpRepl:
         """control='b' writes a raw Ctrl-B (0x02) with no trailing newline."""
         m, fake, _ = mcp_repl
         m._open_session("lab")
-        m.handle_session_send("lab", control="b", wait=0)
+        m.handle_session_send("lab:pod", control="b", wait=0)
         assert fake.sent == [("\x02", False)]
 
     def test_session_send_control_d_sends_ctrl_d(self, mcp_repl):
         """control='d' writes a raw Ctrl-D (0x04) with no trailing newline."""
         m, fake, _ = mcp_repl
         m._open_session("lab")
-        m.handle_session_send("lab", control="d", wait=0)
+        m.handle_session_send("lab:pod", control="d", wait=0)
         assert fake.sent == [("\x04", False)]
 
     def test_session_send_requires_data_when_no_control(self, mcp_repl):
         m, _, _ = mcp_repl
         m._open_session("lab")
         with pytest.raises(ValueError):
-            m.handle_session_send("lab")
+            m.handle_session_send("lab:pod")
 
     def test_session_send_rejects_unknown_control(self, mcp_repl):
         m, _, _ = mcp_repl
         m._open_session("lab")
         with pytest.raises(ValueError):
-            m.handle_session_send("lab", control="x")
+            m.handle_session_send("lab:pod", control="x")
 
     def test_pod_open_targets_pod_socket_repl(self, mcp_repl):
         """pod_open omits device, targeting the pod's own socket REPL."""
@@ -498,7 +498,7 @@ class TestMcpPodInfo:
         info = m.handle_pod_info("lab")
         assert info["label"] == "lab"
         assert info["addr4"] == "10.0.0.1"
-        assert info["sessions"] == m._open_sessions()
+        assert info["sessions"] == m._open_sessions("lab")
         assert info["sessions"][0]["label"] == "lab"
 
     def test_no_open_sessions_gives_empty_list(self, mcp_repl):
