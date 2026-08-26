@@ -133,8 +133,8 @@ small captures the REPL return path also works.
   names=...)` invokes `ops.la_stream` over the REPL, connects the data socket,
   receives the header + packed words, and decodes to VCD. The pod side captures
   on PIO0 and leaves any SWD session untouched.
-- CLI `pod la <label> --pins 16-23 --rate 1e6 --depth 20000 [--trigger 16:rise]
-  --out cap.vcd`; MCP tool `logic_analyse`.
+- CLI `pod bench la <label> --pins 16-23 --rate 1e6 --depth 20000 [--trigger 16:rise]
+  --out cap.vcd`; MCP tool `bench_la`.
 
 ## Using the logic analyser
 
@@ -185,7 +185,7 @@ them. `--names CLK,MOSI,MISO,CS` labels channels low-pin-first in the VCD.
 
 ```bash
 # CLI: capture an SPI bus on GP16-19, 2 MHz, start on CS falling
-pod la mypod --pins 16-19 --rate 2e6 --depth 8000 --trigger 19:fall \
+pod bench la mypod --pins 16-19 --rate 2e6 --depth 8000 --trigger 19:fall \
     --names CLK,MOSI,MISO,CS --out spi.vcd
 ```
 
@@ -199,7 +199,7 @@ r = pod.logic_analyse(base_pin=16, width=4, rate=2_000_000, depth=8000,
 # r: {ok, out_path, width, rate, clkdiv, words, complete, samples}
 ```
 
-The MCP tool `logic_analyse` takes the same fields (`base_pin`, `width`, `rate`,
+The MCP tool `bench_la` takes the same fields (`base_pin`, `width`, `rate`,
 `depth`, `trigger=[pin, cond]`, `out_path`, `names`). Open the `.vcd` with
 `gtkwave spi.vcd` or in PulseView.
 
@@ -235,7 +235,7 @@ When helping a user set up a capture, walk them through:
    edge), otherwise immediate.
 5. **Pick rate and depth:** rate >= ~4-10x the fastest edge; keep
    `ceil(depth*width/32) <= 20000` words.
-6. **Run** `pod la <label> --pins <base-last> --rate <Hz> --depth <n>
+6. **Run** `pod bench la <label> --pins <base-last> --rate <Hz> --depth <n>
    [--trigger <pin>:<cond>] --names <a,b,...> --out cap.vcd`, then open
    `cap.vcd` in GTKWave/PulseView. Map the names to the wired signals.
 

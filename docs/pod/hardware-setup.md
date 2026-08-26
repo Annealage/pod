@@ -326,7 +326,7 @@ SUGGESTED sections can be promoted to VERIFIED:
   GP13 on the RP2350 (GP14 only on the ESP32-S3 carrier), so it can no longer
   collide with SWDIO, and the unported `power` / `relays` / `carrier` / `compat`
   cluster now refuses to drive its ESP32-S3 GPIOs on the RP2350 rather than
-  seizing the wrong line. Still unexercised: validate `pod reset --mode nrst` on
+  seizing the wrong line. Still unexercised: validate `pod dut reset --mode nrst` on
   GP13 once `plan/phase-5` wires it up.
 - **DUT UART pins.** Assign UART1 (suggested GP4/GP5) or a PIO UART.
 - **DUT SPI pins.** Assign SPI0 (suggested GP16-GP19) or a PIO SPI.

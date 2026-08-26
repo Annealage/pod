@@ -58,22 +58,20 @@ the LA is on." They compose.
 Guarded set (refused when another agent holds the bench), from the current MCP
 tool surface (`src/host/pod/mcp_server.py`):
 
-- SWD / debug: `flash_dut`, `reset_dut`, `dut_halt`, `dut_resume`,
-  `dut_read_reg`, `dut_write_reg`, `dut_read_mem`, `dut_write_mem`, `read_dut`,
-  `gdb_dut`. All funnel through the one shared `DebugPort` singleton, so two
-  callers corrupt each other's transactions.
-- USB/IP: `attach_dut`, `detach_dut`, `ensure_dut_link`, `dut_exec`.
-- Peripherals: `i2c_target`, `i2c_target_regs`, `gpio`, `adc`, `logic_analyse`,
-  `peripheral_release`.
-- Pod REPL sessions: `repl_open`, `repl_send`, `repl_interrupt`, `repl_close`
-  (an open session is an exclusive pod resource; `repl_read`/`repl_list` are
-  read-only).
+- SWD / debug: `dut_flash`, `dut_erase`, `dut_reset`, `dut_halt`, `dut_resume`,
+  `dut_reg`, `dut_mem`, `dut_gdb`. All funnel through the one shared `DebugPort`
+  singleton, so two callers corrupt each other's transactions.
+- USB/IP: `dut_link` with `up` / `down` / `reprobe`, and `dut_exec`.
+- Bench instruments: `bench_device`, `bench_device_regs`, `bench_gpio`,
+  `bench_adc`, `bench_la`.
+- Sessions: `dut_open`, `pod_open`, `session_send`, `session_close` (an open
+  session is an exclusive pod resource; `session_read` is read-only).
 
-Unguarded (observability / management, always allowed): `discover_pods`,
-`pod_info`, `register_pod`, `dut_usb`, `mount_dir`, `tail_uart`, `repl_list`,
-`repl_read`, and the `lease_*` tools themselves.
+Unguarded (observability / management, always allowed): `pod_discover`,
+`pod_info`, `pod_register`, `pod_mount`, `bench_uart`, `session_read`,
+`dut_link(action="status")`, and the `lease_*` tools themselves.
 
-Gray - the read-only `dut` identity probe (`mcp_server.py` `handle_dut`). It does
+Gray - the read-only `dut_identify` probe (`mcp_server.py` `handle_dut_identify`). It does
 not halt, but it *does* drive the shared SWD transport (reads DPIDR / AP IDR /
 CPUID), so it races a lease-holder's in-flight SWD ops. Treat it as guarded when
 the bench is held by someone else - i.e. it is lease-aware, refused while another
@@ -235,7 +233,7 @@ release on clean shutdown; TTL is the crash backstop).
   parse the JSON reply. Short socket timeout + a poll loop so Ctrl-C stays
   responsive, matching the client's bounded-wait discipline.
 - **Host-side token persistence.** The CLI is one-shot per invocation, so
-  `pod checkout` and a later `pod flash` are separate processes; the token must
+  `pod checkout` and a later `pod dut flash` are separate processes; the token must
   persist between them. Store it per pod label in a small state file
   (`~/.config/pod/lease-<label>.json` holding `{token, holder, expires}`), read
   by the guarded verbs and by `lease_renew`/`lease_release`. The MCP server is
@@ -311,7 +309,7 @@ DUT," so a lease-holder still shares pod-management access.
 1. Two host processes (or two agent MCP sessions) with distinct `--as` names.
    Process A `pod checkout --as A --for 5m`; confirm `pod who` shows A and an
    `expires_in` counting down.
-2. Process B `pod flash ...` (a guarded verb) is refused with A's name +
+2. Process B `pod dut flash ...` (a guarded verb) is refused with A's name +
    `expires_in`, not executed. B `pod checkout --as B` is refused BUSY.
 3. A `pod release`; B `pod checkout --as B` now succeeds; the state file for the
    label reflects B.

@@ -200,41 +200,51 @@ should be replaced. An agent adds it with, for example:
 claude mcp add pod -- pod-mcp
 ```
 
-The server wraps the `pod` client and exposes **40 tools**. Grouped:
+The server wraps the `pod` client and exposes **27 tools** in three subject-first groups,
+named so that a tool and its CLI invocation are derivable from each other (`dut_flash` is
+`pod dut flash`, `bench_la` is `pod bench la`):
 
-- **Discovery / registry:** `discover_pods`, `pod_info`, `register_pod`, `dut` (probe and
-  reconcile the wired DUT's SWD identity).
-- **SWD debug (requires the DUT wired + powered for SWD):** `flash_dut`, `erase_dut`,
-  `reset_dut`, `read_dut`, `gdb_dut`, `dut_halt`, `dut_resume`, `dut_read_reg`,
-  `dut_write_reg`, `dut_read_mem`, `dut_write_mem`. The register tools additionally require a halted core.
-- **USB/IP:** `dut_usb`, `attach_dut`, `detach_dut`, `ensure_dut_link`, `dut_exec`
-  (run code on the DUT's own REPL over USB/IP), `reprobe_dut` (recover a DUT the pod
-  is not exporting - mounted-but-unexportable or a warm-reset edge-miss - without a
-  cold cycle; attach_dut tries it once automatically), `recover_dut_repl` (un-stick a
-  forwarded DUT REPL over its CDC tty - the first, non-destructive thing to try before
-  reset_dut).
-- **Pod-side exec / files:** `pod_exec`, `mount_dir`.
-- **Persistent REPL session:** `repl_open`, `repl_read`, `repl_send`, `repl_interrupt`,
-  `repl_close`, `repl_list`.
-- **Peripherals:** `i2c_target`, `i2c_target_regs`, `spi_target`, `spi_target_status`,
-  `spi_target_regs`, `gpio`, `adc`, `peripheral_release`, `logic_analyse` (the SPI target
-  and the logic analyser are mutually exclusive - both are PIO0 consumers).
-- **DUT UART (landing):** `tail_uart` (read-only tail of the DUT UART over TCP; the
-  bridge is on-device, the DUT byte-path pending a loopback).
+- **`pod_` - the pod as a managed device:** `pod_discover`, `pod_register`, `pod_info`,
+  `pod_exec` (run code on the pod's own interpreter), `pod_mount` (one-shot; unmounts on
+  return), `pod_open` (persistent session on the pod's socket REPL; holds the pod's single
+  REPL slot for its lifetime, excluding every other agent).
+- **`dut_` session - the DUT's own REPL:** `dut_open` (persistent, auto-reconnecting session
+  on the DUT's CDC tty; `recover=true` un-sticks a DUT latched in raw mode first), then
+  `session_send` (write stdin, or send Ctrl-C / Ctrl-B / Ctrl-D via `control=`),
+  `session_read` (tail by cursor), `session_close`. `dut_exec` is the named one-shot for a
+  single call.
+- **`dut_` debug over SWD (requires the DUT wired + powered):** `dut_identify` (probe and
+  reconcile the wired DUT's SWD identity), `dut_halt`, `dut_resume`, `dut_reg` (reads, or
+  writes when `value` is given), `dut_mem` (reads inline or to `out_path`, writes when `data`
+  is given), `dut_gdb`. The register tools additionally require a halted core.
+- **`dut_` flash and link:** `dut_flash`, `dut_erase`, `dut_reset`, and `dut_link` with
+  `action=status|up|down|reprobe`. `status` is a pure read and starts nothing;
+  `up` brings the pod USB host + usbip server up and attaches, and is the only action that
+  can activate the pod USB host, which has been observed to disturb the pod's Wi-Fi;
+  `reprobe` recovers a DUT the pod is not exporting (mounted-but-unexportable, or a
+  warm-reset edge-miss) without a cold cycle, and `up` tries it once automatically.
+- **`bench_` - the pod's instruments pointed at the DUT:** `bench_gpio`, `bench_adc`,
+  `bench_la`, `bench_device` (present the pod as an I2C or SPI device on the DUT's bus via
+  `bus=`, with `action=up|status|down`), `bench_device_regs` (that device's register file),
+  `bench_uart` (read-only tail of the DUT UART over TCP). The SPI device personality and the
+  logic analyser are mutually exclusive, both being PIO0 consumers.
 
-Read vs write: `discover_pods`, `pod_info`, `dut`, `dut_usb`, `read_dut`, `dut_read_reg`,
-`dut_read_mem`, `adc`, `spi_target_status`, `repl_read`, `repl_list`, `peripheral_release`,
-`tail_uart` are read/query; `flash_dut`, `erase_dut`, `reset_dut`, `attach_dut`,
-`dut_write_reg`, `dut_write_mem`, `gpio` (drive), `i2c_target*`, `spi_target`,
-`spi_target_regs`, `mount_dir` mutate state. The SWD group is meaningful only when a DUT is
+Read vs write: `pod_discover`, `pod_info`, `dut_identify`, `session_read`, `bench_adc`,
+`bench_uart`, and `dut_link(action="status")` are read/query. `dut_flash`, `dut_erase`,
+`dut_reset`, `pod_mount`, `bench_gpio` (drive), `bench_device`, `bench_device_regs`, and
+`dut_link` with `up`/`down`/`reprobe` mutate state. `dut_reg` and `dut_mem` read or write
+depending on whether a value is supplied. The SWD group is meaningful only when a DUT is
 attached for debug; the register tools need the core halted first.
+
+To un-stick a silent forwarded DUT REPL, `dut_open(recover=true)` is the first,
+non-destructive thing to try before `dut_reset`.
 
 ---
 
 ## Quickstart (real flow)
 
 The real command names and ports (the current page invents `annealage-pod flash`,
-`pod uart tail dut`, and an HTTP MCP URL; none of those exist):
+`pod bench uart tail dut`, and an HTTP MCP URL; none of those exist):
 
 1. **Flash the pod firmware** onto a Pico 2 W and set Wi-Fi credentials in `config.py`
    (template `config.example.py`). `make flash` programs it over an attached probe with
@@ -245,10 +255,10 @@ The real command names and ports (the current page invents `annealage-pod flash`
    `ampremote` fork from git). 
 4. **Find and register the pod:** `pod discover`, then `pod register <label>` (browses
    mDNS and stores the pod's handles + identity fingerprint).
-5. **Drive the DUT:** `pod flash <label> firmware.bin`, `pod reset <label>`,
-   `pod gdb <label>` (prints a `target extended-remote host:port` for your gdb),
-   `pod la <label> --pins 16-19 --out cap.vcd`, `pod repl <label>` (live streaming REPL).
-6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 40 tools above are
+5. **Drive the DUT:** `pod dut flash <label> firmware.bin`, `pod dut reset <label>`,
+   `pod dut gdb <label>` (prints a `target extended-remote host:port` for your gdb),
+   `pod bench la <label> --pins 16-19 --out cap.vcd`, `pod open <label>` (live streaming REPL).
+6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 27 tools above are
    available over Wi-Fi.
 
 Ports in use: socket REPL `8266`, USB/IP `3240`, GDB/DAP RPC `3335`, flash-in `3333`,
@@ -342,12 +352,13 @@ the older ESP32-S3 design. Specific fixes:
   nothing binds it yet). Remove from the present feature list; it is planned.
 - **MCP endpoint** - the page's `http://pod.local/mcp` does not exist. The MCP server is
   stdio via the `pod-mcp` console script.
-- **CLI names** - `annealage-pod flash` and `pod uart tail dut` are invented. The real CLI
-  is `pod <verb>` (`pod flash`, `pod reset`, `pod gdb`, `pod repl`, `pod la`, ...). There is
-  no UART tail command.
-- **No MCP action list** - the page has none; use the 40-tool list above.
+- **CLI names** - `annealage-pod flash` and `pod uart tail dut` are invented. The real CLI is
+  `pod <verb>` for the pod itself and `pod dut <verb>` / `pod bench <verb>` for the DUT and the
+  instruments (`pod dut flash`, `pod dut reset`, `pod dut gdb`, `pod open`, `pod bench la`, ...).
+  The DUT UART tap is `pod bench uart`.
+- **No MCP action list** - the page has none; use the 27-tool list above.
 - **Missing the actual differentiators** - the on-pod debugger, GDB-through-pod, the PIO
-  logic analyser, IPv6-first discovery, and the 40-tool MCP surface are the strongest,
+  logic analyser, IPv6-first discovery, and the 27-tool MCP surface are the strongest,
   validated capabilities and are absent from the page.
 
 Note on positioning: "shipping now" for Pod (alongside Canvas) is retained per the product

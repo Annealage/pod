@@ -23,7 +23,7 @@ Requirements:
   support). It is NOT on PyPI; `pip install -e .` pulls it straight from GitHub
   at the commit pinned in `pyproject.toml` (the source of truth for the exact
   revision), installing both the `ampremote` console script (the REPL transport)
-  and the `mpremote` import (used by the persistent `pod repl` session). This
+  and the `mpremote` import (used by the persistent `pod open` session). This
   build has no `resume` subcommand; `connect socket://HOST:PORT exec ...` does
   not soft-reset by default, which is what the client relies on.
 - `zeroconf` (optional) for mDNS discovery; without it, discovery shells out to
@@ -36,42 +36,75 @@ You can also run without installing: `cd src/host && python -m pod.cli ...`.
 
 ## CLI
 
+The tree mirrors the MCP surface: flat verbs address the pod itself, `pod dut <verb>`
+addresses the device under test, and `pod bench <verb>` drives the pod's instruments. MCP
+tool `dut_flash` is `pod dut flash`, `bench_la` is `pod bench la`.
+
+The pod itself:
+
 ```
 pod discover [--timeout S]            browse mDNS (_annealage-pod._tcp) for live pods
 pod register <label> --address IP [--repl-port 8266]
+pod unregister <label>                remove a pod from the registry
 pod list                              show registered pods
 pod info <label>                      show a registered pod's details
 pod mount <label> <dir>               mount a host directory on the pod
 pod exec <label> "<code>"             run MicroPython on the pod, print stdout
 pod cp <label> <src> <dst>            copy a file (':path' = pod side)
-pod flash <label> <image> [--addr 0xADDR] [--target T]
-pod reset <label> [--mode sysreset|halt]
-pod recover-dut <label> <tty>         un-stick a forwarded DUT REPL (Ctrl-C + Ctrl-B); try before reset
-pod install-udev [--vid f055] [--print]  host setup: make ModemManager ignore forwarded DUTs (needs sudo)
-pod gdb <label> [--listen-port N] [--gdb-port 3335] [--no-reset-halt] [--resume-window-ms 200]
-                                      (GDB path supports DWT data watchpoints: Z2/Z3/Z4 = write/read/access, plus FPB breakpoints)
-pod halt <label>                      halt the DUT core over SWD (hold; no auto-resume)
-pod resume <label>                    resume the DUT core over SWD
-pod read-reg <label> <reg>            read a core register over SWD (core halted; reg 0..18 or pc/sp/lr/..)
-pod write-reg <label> <reg> <value>   write a core register over SWD (core halted)
-pod read-mem <label> <addr> <len>     read DUT memory over SWD, print hex (<= 4096 bytes)
-pod write-mem <label> <addr> <hex>    write DUT memory over SWD (RAM/peripherals; flash refused)
-pod repl <label> [--raw] [--log FILE] [--device DEV] [--mount DIR] [--exec CODE] [--cp SRC DST] [--soft-reset] [--no-reconnect]
-                                      persistent REPL: stream stdout to console+file, type lines to stdin
-                                      (auto-reconnects across drops; --raw = full raw terminal;
-                                       --mount/--exec/--cp/--soft-reset chain setup first)
 pod pins <label> [--cached]           show the pod's own DUT-facing pin assignments
-pod dut <label> [--dut-* ...] [--adopt]   show / set / verify the wired DUT (identity, wiring, usb, repl)
-pod usb <label>                       list the DUT USB devices the pod exports (live VID:PID)
-pod attach <label> [--no-ensure]      attach the pod's DUT USB over USB/IP; prints the DUT tty
-pod detach <label> --port N           detach a USB/IP vhci port (N from `usbip port`)
-pod i2c-target <label> [--addr 0x42] [--regs 0xAB 0xCD ...] [--bus 1] [--scl 11] [--sda 10]
-pod i2c-regs <label> [--off 0] [--length N] [--write 0xAB ...]   read/write the target register file
-pod gpio <label> <pin> [--value 0|1] [--pull up|down]            read or drive a pod GPIO
-pod adc <label> <pin>                                            sample a pod ADC channel
-pod release <label> [--name '*']                                 release pod peripheral instance(s)
-pod la <label> [--pins 16-23] [--rate 1e6] [--depth N] [--trigger 16:rise] [--out cap.vcd]
+pod flm <label> [--force]             report or install the DUT's CMSIS flash algorithm
+pod install-udev [--vid f055] [--print]  host setup: make ModemManager ignore forwarded DUTs (needs sudo)
+pod open <label> [--log FILE] [--mount DIR] [--exec CODE] [--cp SRC DST] [--soft-reset] [--no-reconnect]
+                                      persistent session on the pod's socket REPL: stream stdout to
+                                      console+file, type lines to stdin (auto-reconnects across
+                                      drops; --mount/--exec/--cp/--soft-reset chain setup first)
+pod open-raw <label>                  full raw-terminal passthrough to the pod's socket REPL
 pod-mcp                               start the MCP stdio server (separate console script)
+```
+
+The device under test:
+
+```
+pod dut identify <label> [--dut-* ...] [--adopt]   show / set / verify the wired DUT
+pod dut open <label> <device> [--recover] [--log FILE] [--mount DIR] [--exec CODE] [--cp SRC DST]
+                                      persistent session on the DUT's CDC tty; --recover un-sticks a
+                                      DUT latched in raw mode (Ctrl-C + Ctrl-B) before connecting
+pod dut exec <label> "<code>"         run MicroPython on the DUT once
+pod dut flash <label> <image> [--addr 0xADDR] [--target T] [--loader native|flm]
+pod dut erase <label> [--loader native|flm]        erase the entire DUT flash
+pod dut reset <label> [--mode sysreset|halt]
+pod dut halt <label>                  halt the DUT core over SWD (hold; no auto-resume)
+pod dut resume <label>                resume the DUT core over SWD
+pod dut reg <label> <reg> [value]     read a core register over SWD, or write it when value is given
+                                      (core halted; reg 0..18 or pc/sp/lr/..)
+pod dut mem <label> <addr> [len] [--data HEX] [--out PATH]
+                                      read DUT memory over SWD as hex (<= 4096 bytes inline, or
+                                      unbounded to --out), or write it with --data (RAM/peripherals;
+                                      flash refused)
+pod dut gdb <label> [--listen-port N] [--gdb-port 3335] [--no-reset-halt] [--resume-window-ms 200]
+                                      (GDB path supports DWT data watchpoints: Z2/Z3/Z4 = write/read/access, plus FPB breakpoints)
+pod dut link <label> [status|up|down|reprobe] [--no-ensure] [--port N]
+                                      status (default) lists what the pod exports and which vhci
+                                      ports are attached, and starts nothing; up attaches and prints
+                                      the DUT tty; down detaches (--port N from `usbip port`, else
+                                      every port for this pod); reprobe re-seeds a stale export
+```
+
+The pod's instruments, pointed at the DUT:
+
+```
+pod bench gpio <label> <pin> [--value 0|1] [--pull up|down]   read or drive a pod GPIO
+pod bench adc <label> <pin>                                   sample a pod ADC channel
+pod bench la <label> [--pins 16-23] [--rate 1e6] [--depth N] [--trigger 16:rise] [--out cap.vcd]
+pod bench device <label> [up|status|down] --bus i2c|spi
+                          i2c: [--addr 0x42] [--regs 0xAB 0xCD ...] [--i2c-bus 1] [--scl 11] [--sda 10]
+                          spi: [--mode 0..3] [--miso 16] [--mosi 19] [--sck 18] [--cs 17]
+                               [--personality stream|regfile] [--table-size N]
+                          down with --name '*' releases every instance
+pod bench device-regs <label> --bus i2c|spi [--off 0] [--length N] [--write 0xAB ...] [--table read|write]
+                                      read/write that device's register file
+pod bench uart <label> [--port PORT] [--duration S] [--tx] [--out FILE]
+                                      stream the DUT's UART over TCP
 ```
 
 The registry lives at `~/.config/pod/pods.json` (override with `POD_CONFIG_DIR`).
@@ -82,8 +115,8 @@ The registry lives at `~/.config/pod/pods.json` (override with `POD_CONFIG_DIR`)
 pod discover                                  # find the pod on the network
 pod register lab1 --address 192.168.0.121     # label it
 pod info lab1
-pod flash lab1 firmware.bin --addr 0x0        # stream-flash the DUT over Wi-Fi
-pod reset lab1 --mode sysreset                # reset and run
+pod dut flash lab1 firmware.bin --addr 0x0        # stream-flash the DUT over Wi-Fi
+pod dut reset lab1 --mode sysreset                # reset and run
 pod exec lab1 "import machine; print(machine.freq())"
 ```
 
@@ -101,7 +134,8 @@ is thin passthrough plus a few curated helpers, not a heavy abstraction:
   print(Pin(25, Pin.OUT).value(1))"`. That is the universal escape hatch.
 - The lifecycle-bearing cases get a curated helper so they persist correctly.
   The I2C target services the bus autonomously and must outlive a single call,
-  so `pod i2c-target` brings it up and it stays up until `pod release`.
+  so `pod bench device --bus i2c` brings it up and it stays up until
+  `pod bench device ... down`.
 
 These map to `annealage_pod.peripherals` on the pod (see
 `../../docs/pod/peripherals.md`).
@@ -110,13 +144,13 @@ These map to `annealage_pod.peripherals` on the pod (see
 # Pod becomes an I2C device at 0x42 backing a register file [0xAB, 0xCD, ...].
 # The DUT controller reads it with readfrom_mem(0x42, off, n); each side sees
 # the other's writes. Bench wiring is I2C1, SCL=GP11, SDA=GP10.
-pod i2c-target lab1 --addr 0x42 --regs 0xAB 0xCD
-pod i2c-regs lab1 --off 0 --length 2            # inspect what the DUT wrote
-pod i2c-regs lab1 --off 0 --write 0x11 0x22     # seed registers from the host
-pod gpio lab1 25 --value 1                       # drive GP25 high
-pod gpio lab1 16 --pull up                       # read GP16 with a pull-up
-pod adc lab1 26                                  # -> {'u16': ..., 'volts': ...}
-pod release lab1                                 # tear down all pod peripherals
+pod bench device lab1 up --bus i2c --addr 0x42 --regs 0xAB 0xCD
+pod bench device-regs lab1 --bus i2c --off 0 --length 2   # inspect what the DUT wrote
+pod bench device-regs lab1 --bus i2c --off 0 --write 0x11 0x22   # seed from the host
+pod bench gpio lab1 25 --value 1                       # drive GP25 high
+pod bench gpio lab1 16 --pull up                       # read GP16 with a pull-up
+pod bench adc lab1 26                                  # -> {'u16': ..., 'volts': ...}
+pod bench device lab1 down --name '*'            # tear down all pod peripherals
 ```
 
 ## Python library
@@ -169,58 +203,73 @@ filesystem, and the prior DUT contents are only read by the explicit
 The `pod-mcp` console script starts an MCP stdio server over the same library, so
 an agent drives the hardware loop with the same verbs:
 
+27 tools in the same three groups as the CLI.
+
 | Tool | Action |
 |---|---|
-| `discover_pods` | browse mDNS for live pods |
-| `pod_info` | registry info for a label |
-| `dut_exec` | run MicroPython on a pod |
-| `mount_dir` | mount a host directory on a pod |
-| `flash_dut` | flash a DUT image (streamed into pod RAM, no pod FS) |
-| `reset_dut` | reset the DUT (`sysreset` / `halt`) |
-| `read_dut` | read DUT memory to a host file (streamed) |
-| `gdb_dut` | start a local GDB RSP server to the DUT and return its endpoint (supports DWT data watchpoints via gdb Z2/Z3/Z4 = write/read/access, plus FPB hardware breakpoints) |
+| `pod_discover` | browse mDNS for live pods |
+| `pod_register` | register a pod under a label |
+| `pod_info` | registry info for a label, plus this process's open sessions |
+| `pod_exec` | run MicroPython on the pod's own interpreter |
+| `pod_mount` | mount a host directory on a pod (one-shot; unmounts on return) |
+| `pod_open` | persistent session on the pod's socket REPL |
+| `dut_open` | persistent, auto-reconnecting session on the DUT's CDC tty (`recover` un-sticks a raw-latched DUT first; chain mount/exec/cp/soft_reset) |
+| `session_send` | write to the session's stdin and read back its output, or send Ctrl-C / Ctrl-B / Ctrl-D via `control` |
+| `session_read` | tail the session's buffered stdout by cursor |
+| `session_close` | close the session, leaving the target running |
+| `dut_exec` | run MicroPython on the DUT once |
+| `dut_identify` | show, set, or verify the wired DUT (declared vs live IDs) |
 | `dut_halt` / `dut_resume` | halt/resume the DUT core over SWD (no auto-resume; halt freezes the DUT) |
-| `dut_read_reg` / `dut_write_reg` | read/write a core register over SWD (core must be halted) |
-| `dut_read_mem` / `dut_write_mem` | read/write DUT memory over SWD, inline hex (live MEM-AP; flash refused) |
-| `repl_open` / `repl_close` | open/close a persistent, auto-reconnecting streaming REPL session (stdout -> log + tail buffer; chain mount/exec/cp/soft_reset first) |
-| `repl_read` | tail the session's buffered stdout by cursor |
-| `repl_send` | inject a REPL command line to stdin and read back its output |
-| `repl_interrupt` | send Ctrl-C to the session |
-| `repl_list` | list open REPL sessions |
-| `i2c_target` | pod acts as a hardware I2C target backing a register file |
-| `i2c_target_regs` | read/write that register file from the host |
-| `gpio` | read or drive a pod GPIO |
-| `adc` | sample a pod ADC channel |
-| `peripheral_release` | release a named pod peripheral instance, or all |
-| `logic_analyse` | PIO-capture DUT pins on PIO0 (coexists with a live SWD session) and write a VCD file |
+| `dut_reg` | read a core register over SWD, or write it when `value` is given (core must be halted) |
+| `dut_mem` | read DUT memory over SWD inline as hex or streamed to `out_path`, or write it when `data` is given (live MEM-AP; flash refused) |
+| `dut_gdb` | start a local GDB RSP server to the DUT and return its endpoint (supports DWT data watchpoints via gdb Z2/Z3/Z4 = write/read/access, plus FPB hardware breakpoints) |
+| `dut_flash` | flash a DUT image (streamed into pod RAM, no pod FS) |
+| `dut_erase` | erase the entire DUT flash |
+| `dut_reset` | reset the DUT (`sysreset` / `halt`) |
+| `dut_link` | `status` (pure read) lists exports and attached vhci ports; `up` attaches and returns the DUT tty; `down` detaches; `reprobe` re-seeds a stale export |
+| `bench_gpio` | read or drive a pod GPIO |
+| `bench_adc` | sample a pod ADC channel |
+| `bench_la` | PIO-capture DUT pins on PIO0 (coexists with a live SWD session) and write a VCD file |
+| `bench_device` | present the pod as an I2C or SPI device on the DUT's bus (`bus`), with `action` `up` / `status` / `down` |
+| `bench_device_regs` | read/write that device's register file from the host |
+| `bench_uart` | stream the DUT's UART over TCP |
 
-The loop an agent runs: edit DUT firmware -> `flash_dut` -> `reset_dut` ->
-observe (`dut_exec`, or have the pod present an `i2c_target` / `gpio` the DUT
-exercises) -> repeat.
+The loop an agent runs: edit DUT firmware -> `dut_flash` -> `dut_reset` ->
+observe (`dut_open` + `session_send`, or have the pod present a `bench_device` /
+`bench_gpio` the DUT exercises) -> repeat.
+
+Only `dut_link(action="up")` can activate the pod's USB host, which has been
+observed to disturb the pod's Wi-Fi link, its only management channel. The
+`status` default starts nothing on the pod.
 
 ### Persistent REPL session
 
-`pod repl` / the `repl_*` tools hold a long-lived connection to the pod's socket
-REPL (built on ampremote's transport), where its asyncio app + aiorepl run. The
+`pod open` / `pod_open` holds a long-lived connection to the pod's socket REPL
+(built on ampremote's transport), where its asyncio app + aiorepl run. The
 target's stdout streams to a log file (the lossless record) and an in-memory
 tail buffer; injected lines go to its stdin, so you watch output and run REPL
-commands on the same live session. `--device` (CLI) / `device` (MCP) points the
-same session at any mpremote device instead, e.g. a DUT CDC tty. A session holds
-the pod's single socket-REPL slot for its lifetime, so while it is open use
-`repl_send` (not `pod_exec`, which would contend for the slot) to run code.
+commands on the same live session. `pod dut open` / `dut_open` points the same
+machinery at a DUT CDC tty instead. Either way the session is then driven by the
+same verbs: `session_send`, `session_read`, `session_close`.
+
+A pod session holds the pod's single socket-REPL slot for its lifetime, so while
+it is open use `session_send` rather than `pod_exec`, which would contend for the
+slot. One label carries one session, so opening a DUT session against a label
+that already holds a pod session is refused rather than silently returning the
+pod's.
 
 Chain mpremote-style setup before the connect (like `mpremote mount ./fw exec
 "..." repl`): `--mount DIR` / `--exec CODE` / `--cp SRC DST` / `--soft-reset`
 (MCP: `mount`/`exec`/`cp`/`soft_reset`). The stateless steps run as ordinary
 one-shot verbs first (so `--exec` code must RETURN - a bare loop hangs that
-one-shot; start long-running work via `repl_send` after connecting); `mount` is
+one-shot; start long-running work via `session_send` after connecting); `mount` is
 kept on the session's own connection (the fs hook RPCs back over it, so it
-cannot live in a throwaway process), and is the reason to use `repl_open` over
-the one-shot `mount_dir`. Mounting briefly enters the raw REPL to install the
+cannot live in a throwaway process), and is the reason to use `pod_open` /
+`dut_open` over the one-shot `pod_mount`. Mounting briefly enters the raw REPL to install the
 hook (like `mpremote mount`), which interrupts a running app's foreground - and
 it is re-applied once per reconnect, so on a flapping link with `--mount` expect
 one interrupt per restored connection (a reconnect that cannot re-mount keeps
-streaming unmounted rather than retrying). `repl_open` reports the real
+streaming unmounted rather than retrying). The open call reports the real
 `mounted` state.
 
 The session is stateful and **auto-reconnects** (like ampremote): the reader
@@ -229,22 +278,22 @@ nothing) and re-establishes the connection with backoff, re-applying the mount,
 so long-running logging survives Wi-Fi blips and target reboots. Reconnect
 boundaries are marked inline in the stream/log (`[pod-repl: connection dropped
 ...]` / `[pod-repl: reconnected ...]`), the cursor/log are continuous across
-them, and `repl_send` mid-reconnect waits briefly then reports if still down.
+them, and `session_send` mid-reconnect waits briefly then reports if still down.
 `--no-reconnect` (CLI) / `reconnect: false` (MCP) opts out.
 
-`pod repl` is line-oriented (Ctrl-C interrupts the target, Ctrl-D exits, leaving
+`pod open` is line-oriented (Ctrl-C interrupts the target, Ctrl-D exits, leaving
 it running); add `--raw` for a full raw terminal (arrow keys, history, paste) -
 which is a one-shot passthrough and cannot chain setup.
 
-**DUT REPL silent or won't enter raw repl?** First try `recover_dut_repl`
-(`pod recover-dut <label> <tty>`): it sends Ctrl-C then Ctrl-B over the DUT tty to
+**DUT REPL silent or won't enter raw repl?** First try `dut_open(recover=true)`
+(`pod dut open <label> <tty> --recover`): it sends Ctrl-C then Ctrl-B over the DUT tty to
 break a running program and leave a stuck RAW repl for the friendly one -
 non-destructive, no reset. If the REPL is silent rather than mode-stuck, it is
 usually ModemManager on the host probing the DUT tty and toggling its DTR off
 (MicroPython gates stdout on DTR); install the ignore rule once with `sudo pod
 install-udev` and re-attach so it applies at enumeration.
 
-**DUT unresponsive / suspected wedged?** Then `reset_dut` (`pod reset <label>`):
+**DUT unresponsive / suspected wedged?** Then `reset_dut` (`pod dut reset <label>`):
 a SWD system reset re-inits the target's core *and* peripherals (including USB),
 so a DUT whose USB/serial hung (e.g. after a `soft_reset`) re-enumerates cleanly
 with no physical replug or power-cycle. Use `--mode halt` to catch the reset
@@ -270,30 +319,30 @@ enumeration, attach, and the forwarded DUT REPL are validated, and stay reliable
 under sustained attach/detach churn (the earlier Wi-Fi churn wedge is fixed). One
 caveat: if the DUT re-enumerates (reset / replug / re-flash) the export slot can
 go stale - a fresh attach then floods `0xff`-then-quiet, or the host logs
-`string descriptor 0 read error: -19`. Run `pod reprobe <label>` (or
+`string descriptor 0 read error: -19`. Run `pod dut link <label> reprobe` (or
 `usbip.stop()/start()` on the pod) to refresh it; see
 `docs/pod/troubleshooting.md`.
 
 ```bash
-pod usb lab1                 # list exported devices (live VID:PID + busid)
-pod attach lab1              # bring the pod USB host + usbip server up, attach, print the DUT tty
+pod dut link lab1 status     # list exported devices (live VID:PID + busid); starts nothing
+pod dut link lab1 up         # bring the pod USB host + usbip server up, attach, print the DUT tty
 mpremote connect <tty>       # the printed /dev/serial/by-id path -> the DUT REPL
-pod detach lab1 --port N     # release (N from `usbip port`)
+pod dut link lab1 down --port N   # release (N from `usbip port`)
 ```
 
-`pod attach` returns `{busid, vid, pid, tty}`; the MCP equivalents are `dut_usb`
-(list) and `attach_dut`. If the DUT USB instead goes straight to this host
+`pod dut link <label> up` returns `{busid, vid, pid, tty}`; the MCP equivalent is
+`dut_link` with `action="status"` to list and `action="up"` to attach. If the DUT USB instead goes straight to this host
 (declared `agent-direct` in the DUT block, `pod dut --dut-usb VID:PID/agent-direct`),
 skip USB/IP and connect the by-id tty directly.
 
-> Activating the pod USB host (`pod attach` does this unless `--no-ensure`) drives
+> Activating the pod USB host (`pod dut link <label> up` does this unless `--no-ensure`) drives
 > the native USB controller into host mode. It coexists with the Wi-Fi REPL on the
 > current firmware, but it is a deliberate action - the REPL is the pod's only
 > management channel.
 
 ### Host prerequisites
 
-`pod attach`/`detach` use the standard `usbip` client (usbip-utils) and the
+`pod dut link up`/`down` use the standard `usbip` client (usbip-utils) and the
 `vhci_hcd` kernel module:
 
 ```bash
@@ -305,7 +354,7 @@ echo vhci-hcd | sudo tee /etc/modules-load.d/vhci-hcd.conf   # and at every boot
 ### Running attach/detach without sudo
 
 `usbip attach`/`detach` need root only to write the vhci sysfs
-(`/sys/devices/platform/vhci_hcd.0/attach`). `pod attach` calls them as
+(`/sys/devices/platform/vhci_hcd.0/attach`). `pod dut link up` calls them as
 `sudo -n usbip ...`, so it runs unattended once one of these once-off configs is
 in place. Pick one:
 
@@ -318,7 +367,7 @@ sudo chmod 0440 /etc/sudoers.d/pod-usbip
 sudo visudo -c                                               # validate syntax
 ```
 
-This matches what `pod attach` already does; leave `POD_USBIP_SUDO` unset.
+This matches what `pod dut link up` already does; leave `POD_USBIP_SUDO` unset.
 
 **Option B - no sudo at all, via a udev rule.** The rule ships in this repo at
 `src/host/udev/99-usbip.rules`; it makes the vhci attach/detach sysfs attributes
@@ -336,26 +385,27 @@ ls -l /sys/devices/platform/vhci_hcd.0/attach                # expect group 'usb
 
 Then tell the pod tooling to skip the sudo prefix by exporting `POD_USBIP_SUDO=0`
 in its environment (shell profile, or the MCP server's env). With that set,
-`pod attach`/`detach` call the bare `usbip`. If a hardened kernel still rejects
+`pod dut link up`/`down` call the bare `usbip`. If a hardened kernel still rejects
 the unprivileged attach, fall back to Option A.
 
 ## Status
 
-`discover` / `list` / `register` / `info` / `repl` / `mount` / `exec` / `cp`,
+`discover` / `list` / `register` / `info` / `open` / `mount` / `exec` / `cp`,
 `flash_dut` / `reset_dut` / `read_dut`, and `gdb` / `gdb_endpoint` (Phase 3) are
 implemented and validated on an nRF52840 DUT. The DUT-facing peripherals
-(`i2c_target` / `i2c_target_regs` / `gpio` / `adc` / `release`, Phase 5) are
+(`i2c_target` / `i2c_target_regs` / `gpio` / `adc` / `peripheral_release`,
+Phase 5) are
 implemented, host-unit-tested, and hardware-validated end-to-end on the pod + an
 nRF52840 controller: the pod presents the register file via the helper, the DUT
 reads it (`readfrom_mem`) and writes it (`writeto_mem`), and the host reads back
 what the DUT wrote.
-The PIO logic analyser (`logic_analyse` / `pod la`, Track 2) is implemented and
+The PIO logic analyser (`logic_analyse` / `pod bench la`, Track 2) is implemented and
 hardware-validated end-to-end, including the live Wi-Fi capture round-trip
 (capture -> stream -> VCD, reliable on PIO0; the earlier hang was the LA running
 on PIO2, the CYW43 Wi-Fi block, now fixed). For DUT wiring and usage, see
 "Using the logic analyser" in `../../docs/pod/logic-analyser.md`.
-USB/IP DUT access (`pod usb` / `pod attach` / `pod detach`, MCP `dut_usb` /
-`attach_dut`) is driven by the standard `usbip` client against the pod's existing
+USB/IP DUT access (`pod dut link` with `status` / `up` / `down`, MCP `dut_link`)
+is driven by the standard `usbip` client against the pod's existing
 server (see "USB/IP DUT access" above). Device enumeration and attach are
 validated, including the forwarded DUT REPL. One caveat: sustained USB-host
 attach/detach churn can wedge the pod's Wi-Fi (a separate known issue) and needs a

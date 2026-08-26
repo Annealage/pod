@@ -1,5 +1,13 @@
 # MCP surface: subject-first namespaces, sessions by default
 
+**Status: phase 1 has landed.** The 27-tool surface and the nested CLI are
+implemented; `src/host/README.md` and `docs/website-features.md` document the
+result, and `src/host/tests/test_mcp_surface.py` holds the contract as tests.
+Phase 2 (session ids, concurrent pod and DUT sessions, `dut_exec` session reuse)
+is not built. The pre-cutover names below are retained deliberately: this
+document is the mapping from the old surface to the new one, and it stops being
+readable if they are edited out.
+
 A reorganisation of the pod's MCP tool surface. Today it is 40 flat tools whose names encode no grouping, whose DUT-versus-pod distinction is inconsistent, and whose most capable path (a persistent connection into the DUT) is reachable only by composing three tools nobody would guess at. The target is a smaller surface split into three clearly-named namespaces by *subject*, with the persistent DUT session as the default way to work and the one-shot as an explicit, named fallback.
 
 This is a plan, not the code. It is independent of `conflict-legibility.md`, which changes what the tools *report*; this changes what they are *called* and how many there are. Both edit the same dispatcher, so they are sequenced rather than interleaved, and **this one goes first**: conflict-legibility's anti-bump gate attaches per-tool, and writing it against names that are about to change is wasted work. Together the two make phases 1 to 7 of one track, indexed in `overview.md`.
