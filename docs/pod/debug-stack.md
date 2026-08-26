@@ -141,7 +141,7 @@ these never auto-resume, so a `halt()` holds across calls until `resume()`:
 When the DUT is unresponsive or suspected wedged - hung firmware, a stuck
 peripheral, or a `soft_reset` that left its USB/serial enumerated-but-dead - the
 first thing to try is a **SWD system reset through the pod**: `ops.reset()` /
-`pod reset <label>` / the `reset_dut` MCP tool. SYSRESETREQ re-inits the core
+`pod dut reset <label>` / the `dut_reset` MCP tool. SYSRESETREQ re-inits the core
 *and* peripherals (including the USB controller), so a target whose USB-CDC/REPL
 wedged re-enumerates cleanly with no physical replug or power-cycle. Use
 `mode="halt"` if you want to catch it at the reset vector instead of running.
@@ -217,7 +217,7 @@ whose symbols give the entry points, and whose `DevDscr` holds the
 pod flm <label>                          # what the pod has installed
 pod flm <label> --device nRF52840_xxAA   # resolve from the pack cache + install
 pod flm <label> --pack /path/to/x.pack   # or from an explicit pack
-pod flash <label> fw.bin --loader flm    # installs automatically if needed
+pod dut flash <label> fw.bin --loader flm    # installs automatically if needed
 ```
 
 The device name defaults to the DUT's declared `target_family` in the registry.
@@ -285,14 +285,14 @@ teardown alongside the FPB. Validated on the nRF52840.
 Usage:
 
 ```bash
-pod gdb lab1 --listen-port 5005      # starts the pod dbgsrv + a local RSP listener
+pod dut gdb lab1 --listen-port 5005      # starts the pod dbgsrv + a local RSP listener
 # then, in another shell:
 arm-none-eabi-gdb -q firmware.elf \
     -ex 'target extended-remote 127.0.0.1:5005' \
     -ex 'hbreak main' -ex 'continue'
 ```
 
-`pod gdb` reset-halts the DUT by default (`--no-reset-halt` to attach to a
+`pod dut gdb` reset-halts the DUT by default (`--no-reset-halt` to attach to a
 running target). The session leaves the DUT in a defined state on exit (FPB
 cleared) on every path including disconnect. There is also a `gdb` MCP tool.
 

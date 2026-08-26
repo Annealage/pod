@@ -251,7 +251,7 @@ group.
 The pod drives the line open-drain: it pulls low to assert reset and releases to
 high-Z, so **the DUT must provide its own reset pull-up** - the pod never drives
 the line high and cannot deassert a reset on a line nothing pulls up. Reset it
-with `pod reset --mode nrst <pod>`, which reports `level`, the line after
+with `pod dut reset --mode nrst <pod>`, which reports `level`, the line after
 release; a `level` of 0 means the line stayed low, i.e. no DUT pull-up or the DUT
 is holding its own reset.
 
@@ -359,7 +359,7 @@ full guide and need a hardware decision plus a firmware change before the
 SUGGESTED sections can be promoted to VERIFIED:
 
 - **DUT nRST pin.** Done in code (needs a hardware test). `_rp2_pinmap.NRST` is
-  GP13, so it can't collide with SWDIO. Still unexercised: validate `pod reset --mode nrst` on
+  GP13, so it can't collide with SWDIO. Still unexercised: validate `pod dut reset --mode nrst` on
   GP13 once `plan/phase-5` wires it up.
 - **DUT UART pins.** Assign UART1 (suggested GP4/GP5) or a PIO UART.
 - **DUT SPI pins.** Assign SPI0 (suggested GP16-GP19) or a PIO SPI.

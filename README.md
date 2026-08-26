@@ -66,7 +66,9 @@ The whole rig sits behind an MCP server (`pod-mcp`, stdio transport) so an agent
 claude mcp add pod -- pod-mcp
 ```
 
-40 tools, grouped: discovery/registry (`discover_pods`, `pod_info`, `register_pod`, `dut`); SWD debug (`flash_dut`, `erase_dut`, `reset_dut`, `read_dut`, `gdb_dut`, `dut_halt`, `dut_resume`, `dut_read_reg`/`dut_write_reg`, `dut_read_mem`/`dut_write_mem`); USB/IP (`dut_usb`, `attach_dut`, `detach_dut`, `ensure_dut_link`, `dut_exec`, `reprobe_dut`, `recover_dut_repl`); pod-side exec/files (`pod_exec`, `mount_dir`); persistent REPL (`repl_open`/`read`/`send`/`interrupt`/`close`/`list`); peripherals (`i2c_target`, `spi_target`, `gpio`, `adc`, `logic_analyse`, ...); DUT UART (`tail_uart`).
+27 tools in three subject-first groups. `pod_` is the pod as a managed device (`pod_discover`, `pod_register`, `pod_info`, `pod_exec`, `pod_mount`, `pod_open`). `dut_` is the device under test by every route: its REPL as a persistent session (`dut_open`, then `session_send`/`session_read`/`session_close`) or as a one-shot (`dut_exec`); its debug port (`dut_identify`, `dut_halt`, `dut_resume`, `dut_reg`, `dut_mem`, `dut_gdb`); its flash (`dut_flash`, `dut_erase`, `dut_reset`); and the USB/IP link that carries its USB (`dut_link`). `bench_` is the pod's instruments pointed at the DUT (`bench_gpio`, `bench_adc`, `bench_la`, `bench_device`, `bench_device_regs`, `bench_uart`).
+
+A CLI invocation is derivable from a tool name and back: MCP `dut_flash` is `pod dut flash`, MCP `bench_la` is `pod bench la`.
 
 That is the "reach into hardware" made concrete: an agent flashes, halts, inspects, and re-flashes a real board without a human in the wire.
 
@@ -76,7 +78,7 @@ That is the "reach into hardware" made concrete: an agent flashes, halts, inspec
 2. **Wire the DUT** to the pod, at minimum SWD: pod `GP14` -> SWDIO, `GP15` -> SWCLK, and a common ground.
 3. **Install the host tooling**: `cd src/host && pip install -e .` (console scripts `pod` and `pod-mcp`; pulls the `ampremote` fork from git).
 4. **Find and register the pod**: `pod discover`, then `pod register <label>` (browses mDNS, stores the pod's handles and identity fingerprint).
-5. **Drive the DUT**: `pod flash <label> firmware.bin`, `pod reset <label>`, `pod gdb <label>` (prints a `target extended-remote host:port` for your gdb), `pod la <label> --pins 16-19 --out cap.vcd`, `pod repl <label>`.
+5. **Drive the DUT**: `pod dut flash <label> firmware.bin`, `pod dut reset <label>`, `pod dut gdb <label>` (prints a `target extended-remote host:port` for your gdb), `pod bench la <label> --pins 16-19 --out cap.vcd`, `pod dut open <label>`.
 6. **For an agent**: `claude mcp add pod -- pod-mcp`, then the tools above are available over Wi-Fi.
 
 Ports: socket REPL `8266`, USB/IP `3240`, GDB/DAP RPC `3335`, flash-in `3333`, memory-out `3334`, logic-analyser-out `3336`.

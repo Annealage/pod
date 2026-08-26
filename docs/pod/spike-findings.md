@@ -148,7 +148,7 @@ and over the Wi-Fi socket REPL for the network proof.
   interruptible `RESUME_WAIT` for Ctrl-C. Validated with real `arm-none-eabi-gdb`
   through the pod to an nRF52840: reset-halt, read registers/memory, an FPB
   hardware breakpoint that hit, backtrace, single-step, continue + re-hit (global
-  observed incrementing), clean detach. `pod gdb <label>` and a `gdb` MCP tool.
+  observed incrementing), clean detach. `pod dut gdb <label>` and a `gdb` MCP tool.
 - **PIO SWD clock (D1.1 partial)**: the spike ran `clkdiv=8` = 9.375 MHz write
   and read 100/100 DPIDR clean, but that clock is over the nRF52840's 8 MHz
   SWDCLK max - the clean run was rig margin, not spec, and it later showed

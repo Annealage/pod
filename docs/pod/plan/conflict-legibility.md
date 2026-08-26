@@ -29,8 +29,8 @@ The gaps are elsewhere, and they are of two kinds: refusals that name no one and
 All host-side, all in `src/host/pod/client.py`, all working by detaching the incumbent so the pod's own refusal never fires:
 
 1. **`dut_exec` detaches unconditionally.** `self.usbip_detach()` at `client.py:828`, commented as clearing a stale attachment, detaches *every* host vhci port bound to that DUT, including another agent's live one. Agent B running one `dut_exec` rips away agent A's session, and the pod cooperates because from its side the import was closed normally.
-2. **`flash_dut` detaches a live session by default.** `keep_attached=False` (`mcp_server.py:178`, `handle_flash_dut`) is correct for a single user and silently destructive for two.
-3. **`detach_dut` and `peripheral_release("*")` are unscoped.** `detach_dut` detaches every port for the DUT; `peripherals.release("*")` (`src/mpy/annealage_pod/peripherals.py:40-47`) deinits every named instance including another agent's live I2C or SPI target.
+2. **`dut_flash` detaches a live session by default.** `keep_attached=False` (`handle_dut_flash`, `mcp_server.py:475`) is correct for a single user and silently destructive for two.
+3. **`dut_link(action="down")` and `bench_device(action="down", name="*")` are unscoped.** The down action detaches every port for the DUT; `peripherals.release("*")` (`src/mpy/annealage_pod/peripherals.py:40-47`) deinits every named instance including another agent's live I2C or SPI target.
 
 Two adjacent problems in the same family:
 
@@ -82,8 +82,8 @@ Advertise as an mDNS TXT key `control-port`, gated on the bind actually succeedi
 The pod is authority; the host declines to act without checking. Each of the three vectors becomes conditional:
 
 - `dut_exec` asks `who("usbip")` before detaching. If the holder is another caller, refuse with the holder and a suggested action. If it is us or nobody, proceed as today. This also removes a real inefficiency: the current unconditional detach/`sleep(1.5)`/re-attach cycle costs ~2.5s on every call (`client.py:822-843`), and is unnecessary when we already hold the import.
-- `flash_dut`, `erase_dut`, `reset_dut`, `reprobe_dut` refuse when another caller holds `usbip` or `swd`, since all of them displace or corrupt a live session.
-- `detach_dut` and `peripheral_release` scope to the calling caller's own resources by default; `"*"` means "all of mine".
+- `dut_flash`, `dut_erase`, `dut_reset`, and `dut_link(action="reprobe")` refuse when another caller holds `usbip` or `swd`, since all of them displace or corrupt a live session.
+- `dut_link(action="down")` and `bench_device(action="down")` scope to the calling caller's own resources by default; `"*"` means "all of mine".
 
 Each gets `force=true`, which bumps, logs the eviction on the pod with both caller names, and returns `stole_from` in the result so the acting agent sees in its own transcript that it displaced someone. The evicted agent finds out when its next operation fails against a holder record that no longer names it.
 
@@ -94,7 +94,7 @@ Each agent runs its own `pod-mcp` under stdio transport, so the MCP server proce
 - **`_classify_exec_failure` gains a busy branch.** Today the pod's BUSY line falls through to `raw-REPL entry / connection failed` (`client.py:89-92`), which reads as a transport fault. It must classify as busy and carry the holder. This is the single highest-value item in the plan: a collision currently presents as evidence of a broken pod, and the documented response to a broken pod is reset and power-cycle, which is precisely the destructive recovery `CLAUDE.local.md` forbids.
 - **The pod's BUSY line names the holder.** `netboot._repl_accept` has the incumbent's address in hand and should include it plus the caller label.
 - **`pod_info` returns the `who` record** for every resource, alongside the registry handles it already carries.
-- **Per-process session state stops reading as global truth.** Under stdio transport `_REPL_SESSIONS` (`mcp_server.py:366`) is per-process, so `repl_list` reads as a global view of open sessions while showing empty during another agent's session. Phase 1 folds it into `pod_info`; this phase makes that view carry the pod's holder record beside this process's own sessions.
+- **Per-process session state stops reading as global truth.** Under stdio transport `_REPL_SESSIONS` (`mcp_server.py:129`) is per-process, so the session list `pod_info` returns is this process's own, and reads as a global view while showing empty during another agent's session. This phase makes that view carry the pod's holder record beside this process's sessions.
 - **Structured results.** `call_tool` returns `str(result)` (`mcp_server.py:1617`), a Python dict repr, and returns errors through the same success path with no `isError`, so a failure is indistinguishable from a success whose text begins with `Error:`. Emit JSON and set `isError`. Without this a gate refusal is just more prose for the agent to guess at.
 
 ### 5. SWD re-entrancy guard
@@ -103,7 +103,7 @@ The only item here that refuses rather than reports, because there is no failure
 
 A flag at the `ops` entry points: enter records `(caller, op, since)` in `holders`, exit clears it, a second caller entering while held is refused naming the holder. This is a mutex, not a lease: no expiry, no ownership across calls, no override protocol, released on exit including the exception path.
 
-Note that SWD ops arrive over the socket REPL, which is already single-holder, so a caller holding a `repl_open` session is implicitly serialised. The exposure is one-shot `pod_exec` sequences, which release the REPL slot between calls and let a second caller interleave mid-sequence. A short sticky window on the `repl` holder record (the record survives disconnect for N seconds, refreshed by the same caller reconnecting, bounced for a different one) closes that without any checkout protocol. This is the one place the design admits a timer, and it should be seconds, not minutes.
+Note that SWD ops arrive over the socket REPL, which is already single-holder, so a caller holding a `pod_open` or `dut_open` session is implicitly serialised. The exposure is one-shot `pod_exec` sequences, which release the REPL slot between calls and let a second caller interleave mid-sequence. A short sticky window on the `repl` holder record (the record survives disconnect for N seconds, refreshed by the same caller reconnecting, bounced for a different one) closes that without any checkout protocol. This is the one place the design admits a timer, and it should be seconds, not minutes.
 
 ## Non-goals
 
@@ -121,8 +121,8 @@ Note that SWD ops arrive over the socket REPL, which is already single-holder, s
 Phases 4 to 7 of the agent-surface track (`overview.md`). Each is independently useful and hardware-validatable.
 
 - **4. Identity + failure classification.** Caller label on the `Pod` client, busy branch in `_classify_exec_failure`, holder name in netboot's BUSY line, JSON + `isError` from `call_tool`. No new listener. Turns a collision from "pod looks dead" into "pod busy, held by X". Gate: two agents collide on the REPL and both transcripts name the other.
-- **5. Holder record + control port.** `annealage_pod.holders`, the 8267 listener, `control-port` TXT, `pod_info` carrying the holder record, `repl_list` already gone in phase 1. Gate: `who` answers correctly while the REPL is held and while usbip has an import open.
-- **6. Anti-bump gate.** The three vectors made conditional, `force` with eviction logging. Gate: agent B's `dut_exec` and `flash_dut` are refused against agent A's live attachment, and succeed with `force`.
+- **5. Holder record + control port.** `annealage_pod.holders`, the 8267 listener, `control-port` TXT, and `pod_info` carrying the holder record. Gate: `who` answers correctly while the REPL is held and while usbip has an import open.
+- **6. Anti-bump gate.** The three vectors made conditional, `force` with eviction logging. Gate: agent B's `dut_exec` and `dut_flash` are refused against agent A's live attachment, and succeed with `force`.
 - **7. SWD guard + sticky window.** Gate: two interleaved `pod_exec` SWD sequences produce a refusal rather than corrupt reads.
 
 Only after phase 7 does `bench-lease.md` (phase 8, conditional) become worth revisiting, and by then its identity, transport, and enforcement-layer sections are already built.

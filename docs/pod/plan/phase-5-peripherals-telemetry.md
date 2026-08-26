@@ -333,7 +333,7 @@ forward + REPL held together, confirming Wi-Fi RX does not wedge).
 - Status (2026-09-02): `nrst` is **landed and hardware-validated** on the
   second-DUT-family bring-up (RP2350B pod, i.MX RT1052 Arch Mix), as scheduled.
   It is implemented in `annealage_pod.debug.nrst` and reached through
-  `ops.reset(mode="nrst")` / `pod reset --mode nrst` / the `reset_dut` MCP tool,
+  `ops.reset(mode="nrst")` / `pod dut reset --mode nrst` / the `dut_reset` MCP tool,
   driving the GPIO directly rather than through `annealage_pod.dut` - that module
   is the ESP32-S3 carrier's four-path API and depends on carrier hardware a bare
   pod does not have. A pulse was confirmed to set the target's
@@ -350,7 +350,7 @@ forward + REPL held together, confirming Wi-Fi RX does not wedge).
   reports the gap and returns False there. That module now lives at
   `annealage_pod.esp32.dut` behind the ESP32-S3 quarantine, and the unified
   reset surface on the RP2350 is `ops.reset(mode="sysreset"|"halt"|"nrst")`,
-  which the host `pod reset --mode` and the `reset_dut` MCP tool drive.
+  which the host `pod dut reset --mode` and the `dut_reset` MCP tool drive.
 
 ### F5.5 RP_INFRA API mimicry
 - Provide the RP_INFRA-equivalent surface (S3 spec §7.1, appendix B) so

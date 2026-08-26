@@ -9,8 +9,8 @@ surface see [src/host/README.md](../../src/host/README.md).
 ## Flash a DUT image
 
 ```bash
-pod flash lab1 firmware.bin --addr 0x0    # stream into pod RAM, program over SWD
-pod reset lab1 --mode sysreset            # reset and run
+pod dut flash lab1 firmware.bin --addr 0x0    # stream into pod RAM, program over SWD
+pod dut reset lab1 --mode sysreset            # reset and run
 ```
 
 The image streams straight into pod RAM and is programmed over SWD; nothing is
@@ -22,8 +22,8 @@ deployed). See [debug-stack.md](debug-stack.md).
 ## Recover a hung DUT
 
 ```bash
-pod reset lab1 --mode sysreset    # re-init core + peripherals (incl. USB), run
-pod reset lab1 --mode halt        # same, but catch the reset vector
+pod dut reset lab1 --mode sysreset    # re-init core + peripherals (incl. USB), run
+pod dut reset lab1 --mode halt        # same, but catch the reset vector
 ```
 
 A SWD system reset re-cycles the DUT core and its peripherals, so a target whose
@@ -34,7 +34,7 @@ power-cycle. Only power-cycle if the reset itself errors (SWD not connected). Se
 ## Debug over GDB
 
 ```bash
-pod gdb lab1 --listen-port 5005   # starts pod dbgsrv + a local RSP listener
+pod dut gdb lab1 --listen-port 5005   # starts pod dbgsrv + a local RSP listener
 # in another shell:
 arm-none-eabi-gdb -q firmware.elf \
     -ex 'target extended-remote 127.0.0.1:5005' \
@@ -48,7 +48,7 @@ DWT via the gdb `Z2`/`Z3`/`Z4` packets - write / read / access respectively
 ## Capture DUT signals
 
 ```bash
-pod la lab1 --pins 16-23 --rate 1e6 --trigger 16:rise --out cap.vcd
+pod bench la lab1 --pins 16-23 --rate 1e6 --trigger 16:rise --out cap.vcd
 ```
 
 PIO logic analyser on PIO0; coexists with a live SWD session. Writes a VCD you
@@ -58,23 +58,23 @@ open in a waveform viewer. For DUT wiring and options see
 ## Use the pod as an I2C target
 
 ```bash
-pod i2c-target lab1 --addr 0x42 --regs 0xAB 0xCD   # pod backs a register file
-pod i2c-regs lab1 --off 0 --length 2               # read what the DUT wrote
-pod i2c-regs lab1 --off 0 --write 0x11 0x22        # seed registers from the host
-pod release lab1                                   # tear down
+pod bench device lab1 up --bus i2c --addr 0x42 --regs 0xAB 0xCD   # pod backs a register file
+pod bench device-regs lab1 --bus i2c --off 0 --length 2   # read what the DUT wrote
+pod bench device-regs lab1 --bus i2c --off 0 --write 0x11 0x22   # seed from the host
+pod bench device lab1 down --name '*'              # tear down
 ```
 
 The DUT controller reads/writes the pod at `0x42` (`readfrom_mem` /
-`writeto_mem`); the target stays up until `pod release`. See
+`writeto_mem`); the device stays up until `pod bench device ... down`. See
 [peripherals.md](peripherals.md).
 
 ## Talk to the DUT over USB/IP
 
 ```bash
-pod usb lab1                 # list exported devices (live VID:PID + busid)
-pod attach lab1              # bring up pod USB host + usbip, attach, print DUT tty
+pod dut link lab1 status     # list exported devices; a pure read, starts nothing
+pod dut link lab1 up         # bring up pod USB host + usbip, attach, print DUT tty
 mpremote connect <tty>       # the printed by-id path -> the DUT REPL
-pod detach lab1 --port N     # release (N from `usbip port`)
+pod dut link lab1 down --port N   # release (N from `usbip port`)
 ```
 
 Enumerate, attach, and the forwarded DUT REPL are all validated, including under
@@ -124,7 +124,7 @@ leaves `pod-mcp` failing at startup with `AttributeError: 'Server' object has no
 attribute 'list_tools'`.
 
 **USB/IP (Linux host, for the USB/IP recipe):** the standard `usbip` client and
-the `vhci_hcd` kernel module, and passwordless `sudo` for `usbip` so `pod attach`
+the `vhci_hcd` kernel module, and passwordless `sudo` for `usbip` so `pod dut link up`
 runs unattended:
 
 ```bash

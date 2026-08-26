@@ -26,18 +26,18 @@ Match the exact symptom to the cause, then jump to its fix:
 - **`0xff` flood then goes quiet** on a fresh attach, after prior attach/detach
   churn, OR a host attach that fails with `string descriptor 0 read error: -19`
   in `dmesg` after a DUT reset/replug -> Cause 4 (a stale usbip export slot);
-  clears with `pod reprobe` or `usbip.stop/start`.
+  clears with `pod dut link <label> reprobe` or `usbip.stop/start`.
 - Input **drains from stdin but never executes** (no echo, no result) -> Cause 1
   (RAW-mode latch).
 
-The short version: run `recover_dut_repl` first (Cause 1); if it floods `0xff`,
+The short version: run `dut_open(recover=true)` first (Cause 1); if it floods `0xff`,
 suspect an incomplete flash (Cause 3) or a stale slot (Cause 4); if it is silent,
 install the ModemManager udev rule (Cause 2); escalate to reset / power-cycle only
 if those do not fix it.
 
 ## Symptom: forwarded DUT REPL is silent, floods 0xff, or won't enter raw REPL
 
-You attached the DUT (`attach_dut` -> a `/dev/ttyACM*`), but:
+You attached the DUT (`dut_link(action="up")` -> a `/dev/ttyACM*`), but:
 - opening the tty and sending commands gets no response, no echo, no `>>>`; or
 - `mpremote` / a raw-REPL client reports "could not enter raw repl"; or
 - a fresh attach floods `0xff` (sustained, or then goes quiet).
@@ -50,7 +50,7 @@ so ordinary CR-terminated lines never run and nothing echoes - it looks dead.
 
 Fix (non-destructive, build-agnostic):
 
-    pod recover-dut <label> /dev/ttyACM0        # or the recover_dut_repl MCP tool
+    pod dut open <label> /dev/ttyACM0 --recover   # or dut_open(recover=true)
 
 It sends Ctrl-C (break any running program) then Ctrl-B (leave RAW for the
 friendly REPL) over the tty, holds DTR asserted so the reply isn't gated, and
@@ -97,9 +97,9 @@ banner), `strlen` runs over the `0xff` and emits a long `0xff` run.
 
 Fix: re-flash a complete image and verify it.
 
-    pod flash <label> firmware.bin --addr 0 --mass-erase   # or flash_dut MCP tool
+    pod dut flash <label> firmware.bin --addr 0 --mass-erase   # or the dut_flash MCP tool
 
-`flash_dut` now does an end-to-end read-back verify (CRC of each flashed region
+Flashing does an end-to-end read-back verify (CRC of each flashed region
 vs the source) and fails loudly on a hole, so a fresh flash cannot leave a silent
 gap. An image flashed *before* that verify existed can still carry one - re-flash
 with `mass_erase`. To confirm a suspected hole directly, CRC-map the region over
@@ -128,16 +128,16 @@ USB state has moved on. Two presentations of the same stale slot:
 
 Both clear the same way - refresh the slot, then re-attach. Either works:
 
-    pod reprobe <label>                                          # re-seed from the live mount
+    pod dut link <label> reprobe                                 # re-seed from the live mount
     pod exec <label> "import usbip; usbip.stop(); usbip.start()"  # or rebuild the server
 
-Note the host-side auto-reprobe (`attach_dut` / `pod dut-exec`) only fires on an
+Note the host-side auto-reprobe (`dut_link(action="up")` / `pod dut exec`) only fires on an
 EMPTY export, not a stale-but-present one, so this case needs an explicit
 `reprobe` or server restart. See the `pod-usbip-stale-slot-reenum` auto-memory.
 
 ## Symptom: the pod exports no DUT (`attach` / `dut_exec` says "exports no USB device")
 
-Distinct from a silent REPL above: here the DUT is not forwarded at all - `pod usb`
+Distinct from a silent REPL above: here the DUT is not forwarded at all - `pod dut link <label> status`
 lists nothing and `usbip list -r` is empty, though the DUT is wired and powered.
 The usual cause is that the pod host enumerated the DUT but never populated the
 USB/IP export slot: the DUT mounted just after the pod's start-up rescan (or a warm
@@ -146,30 +146,30 @@ nothing re-ran the rescan. It is NOT a dead DUT and does NOT need a power cycle.
 
 Recover it with `reprobe` - non-destructive, no cold cycle:
 
-    pod reprobe <label>        # or the reprobe_dut MCP tool
+    pod dut link <label> reprobe   # or dut_link(action="reprobe")
 
-`attach_dut` / `pod dut-exec` already call it once automatically when the first
+`dut_link(action="up")` / `pod dut exec` already call it once automatically when the first
 export list is empty, so a consumer usually recovers without a manual step; run it
 explicitly for a DUT that dropped off mid-session. If reprobe does not bring the DUT
-back, escalate to `reset_dut` (a clean SWD reset re-enumerates from scratch) then a
+back, escalate to `dut_reset` (a clean SWD reset re-enumerates from scratch) then a
 physical power-cycle.
 
 ## Recovery escalation ladder
 
 Try these in order; stop at the first that works.
 
-1. `recover_dut_repl` (`pod recover-dut`) - Ctrl-C + Ctrl-B over the tty. Clears a
+1. `dut_open(recover=true)` (`pod dut open <label> <tty> --recover`) - Ctrl-C + Ctrl-B over the tty. Clears a
    stuck RAW mode and a running/looping program. Non-destructive. (If the pod
-   exports NO DUT at all, use `pod reprobe` first - see the symptom above.)
+   exports NO DUT at all, use `pod dut link <label> reprobe` first - see the symptom above.)
 2. Install the ModemManager udev rule (`pod install-udev`) + re-attach, if the
    REPL is silent rather than mode-stuck (output produced but gated by DTR=0).
    If instead it floods `0xff`: `usbip.stop/start` for a stale slot (Cause 4),
    or re-flash with `mass_erase` for an incomplete flash (Cause 3).
-3. `reset_dut` (`pod reset`) - a SWD system reset re-inits the DUT core AND its
+3. `dut_reset` (`pod dut reset`) - a SWD system reset re-inits the DUT core AND its
    peripherals (incl. USB), so it comes back with a fresh FRIENDLY REPL and
    re-enumerates cleanly. No physical replug needed. Use when 1+2 don't recover it
    or the firmware itself is wedged.
-4. Physical power-cycle - only if `reset_dut` reports an error (e.g. SWD not
+4. Physical power-cycle - only if `dut_reset` reports an error (e.g. SWD not
    connected) or the flash is XIP-wedged. On this bench a host-side cold boot is
    `mpy-dev cycle pico-probe` (cycles the pod's hub port, which power-cycles the
    pod-powered DUT too).

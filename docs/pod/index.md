@@ -40,8 +40,8 @@ Wi-Fi), [hardware-setup.md](hardware-setup.md) (DUT wiring + pinout), and
 
 Notes on the debug row: [debug-stack.md](debug-stack.md) covers flashing (both the
 native and generic CMSIS-FLM loader backends), the GDB path, and GDB data watchpoints
-(write/read/access). The host verbs that exercise it (`pod flash`, `pod gdb`,
-`pod halt`/`resume`, `pod read-reg`/`write-reg`, `pod read-mem`/`write-mem`) are
+(write/read/access). The host verbs that exercise it (`pod dut flash`, `pod dut gdb`,
+`pod dut halt`/`resume`, `pod dut reg`/`write-reg`, `pod dut mem`/`write-mem`) are
 documented in [src/host/README.md](../../src/host/README.md).
 
 ## For developers

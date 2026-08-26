@@ -181,17 +181,17 @@ Layering:
   (tail/bridge), `usbip` (attach helper), `gdb` (proxy to the on-pod GDB server),
   `exec`, `cp`. (`telemetry` and `--mode power` need custom carrier hardware.)
 - **`pod` MCP server**: the `pod-mcp` console script starts an MCP (stdio) server
-  over the same core library. Tools map to the CLI verbs: `discover_pods`,
-  `pod_info`, `flash_dut`,
-  `reset_dut`, `read_telemetry`, `dut_exec`, `mount_dir`,
-  `tail_uart`, `attach_usbip`, `gdb_*`. Leverages `ampremote` for all transport.
+  over the same core library. Tool names and CLI verbs are derivable from each
+  other: `pod_discover`, `pod_info`, `pod_mount`, `dut_flash`, `dut_reset`,
+  `dut_exec`, `dut_link`, `dut_gdb`, `bench_uart`, `read_telemetry`. Leverages
+  `ampremote` for all transport. The full surface is in `mcp-surface.md`.
 
 Design constraints:
 - discovery-first: never require a hardcoded IP; resolve pods by mDNS service +
   registry label.
 - the MCP server is the contract by which an agent iterates on DUT firmware: edit
-  -> `flash_dut` -> `reset_dut` -> observe (`tail_uart`, `read_telemetry`,
-  `dut_exec`) -> repeat.
+  -> `dut_flash` -> `dut_reset` -> observe (`bench_uart`, `read_telemetry`,
+  `dut_open` + `session_send`) -> repeat.
 - host tooling never reimplements transport; `ampremote` is the single transport
   dependency.
 

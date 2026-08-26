@@ -80,8 +80,8 @@ power/ground) and the Pico pinout:
 ## 6. Flash and reset the DUT
 
 ```bash
-pod flash lab1 fw.bin           # stream the image into Pod RAM, program over SWD
-pod reset lab1                  # reset and run (add --mode halt to catch the reset vector)
+pod dut flash lab1 fw.bin           # stream the image into Pod RAM, program over SWD
+pod dut reset lab1                  # reset and run (add --mode halt to catch the reset vector)
 ```
 
 `flash` never stages the image on the Pod filesystem. The on-pod debug stack,
@@ -94,11 +94,11 @@ deployment of the `annealage_pod` package are in
 Attach a debugger, or peek-poke the halted core:
 
 ```bash
-pod gdb lab1                    # GDB RSP server to the DUT; supports DWT watchpoints (Z2/Z3/Z4) + FPB breakpoints
+pod dut gdb lab1                    # GDB RSP server to the DUT; supports DWT watchpoints (Z2/Z3/Z4) + FPB breakpoints
 # or single-shot SWD:
-pod halt lab1                   # hold the core
-pod read-reg lab1 pc            # read a register (reg 0..18 or pc/sp/lr/..)
-pod resume lab1                 # release the core
+pod dut halt lab1                   # hold the core
+pod dut reg lab1 pc            # read a register (reg 0..18 or pc/sp/lr/..)
+pod dut resume lab1                 # release the core
 ```
 
 Register/memory peek-poke and the GDB path (including data watchpoints) are
@@ -126,7 +126,7 @@ Linux, macOS, or Windows. Development and hardware validation happen on Linux;
 the other platforms have no OS-specific component in these paths but are not
 routinely exercised.
 
-The one Linux-bound path is USB/IP DUT attach (`pod attach`): it needs a
+The one Linux-bound path is USB/IP DUT attach (`pod dut link <label> up`): it needs a
 kernel-side USB/IP client, in practice Linux with the `vhci_hcd` module (see
 the prerequisites in [howto.md](howto.md)). Windows has a best-effort
 third-party client (usbip-win, untested with the pod); macOS has no USB/IP
