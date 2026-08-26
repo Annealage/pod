@@ -84,22 +84,26 @@ def handle_pod_register(label: str, match: str = None,
     return {"label": label, **entry}
 
 
-def _open_sessions() -> list:
-    """List open sessions in this process (label, target, log_path, running)."""
-    return [{"label": label, "target": s["session"].target,
-             "log_path": s["log_path"], "running": s["session"].running}
-            for label, s in _REPL_SESSIONS.items()]
+def _open_sessions(label: str = None) -> list:
+    """Open sessions in this process, optionally only those for one pod."""
+    return [{"session": sid, "label": rec["label"], "device": rec["device"],
+             "target": rec["session"].target, "log_path": rec["log_path"],
+             "running": rec["session"].running}
+            for sid, rec in _SESSIONS.items()
+            if label is None or rec["label"] == label]
 
 
 def handle_pod_info(label: str) -> dict:
-    """Return registry info for a pod label plus this process's open sessions.
+    """Return registry info for a pod label plus this process's sessions on it.
 
-    Raises KeyError if the label is not registered. `sessions` lists every
-    session open in this process, not only sessions opened against `label` -
-    a session can be held against any pod this process has touched.
+    Raises KeyError if the label is not registered. `sessions` lists the
+    sessions THIS process holds against `label`, each with the id to pass to
+    session_send / session_read / session_close. It is not a view of the pod:
+    another agent runs its own server process, so its sessions do not appear
+    here and an empty list does not mean the pod is free.
     """
     entry = _entry_for(label)
-    return {"label": label, **entry, "sessions": _open_sessions()}
+    return {"label": label, **entry, "sessions": _open_sessions(label)}
 
 
 def handle_pod_exec(label: str, code: str) -> str:
@@ -116,21 +120,34 @@ def handle_pod_mount(label: str, directory: str) -> str:
 
 
 # ── dut: the device under test, over its own CDC REPL ─────────────────────
-# _REPL_SESSIONS holds every persistent streaming session open in this
-# (long-running) process, keyed by pod label, so an agent opens a session,
+# _SESSIONS holds every persistent streaming session open in this
+# (long-running) process, keyed by session id, so an agent opens a session,
 # tails the target's stdout, injects REPL commands, and closes it across
 # separate tool calls. The session streams to a log file (the lossless
-# record) plus an in-memory tail the agent reads by cursor. pod_open and
-# dut_open share this store: only one session can be held per label at a
-# time, whichever target (pod socket REPL or DUT tty) it was opened
-# against - each entry records its `device` (None for a pod_open session,
-# the tty string for a dut_open one) so a request naming a different
-# target is refused rather than silently handed the wrong session.
-_REPL_SESSIONS: dict = {}
+# record) plus an in-memory tail the agent reads by cursor.
+#
+# The id is derived from what the session is attached to, not from a counter,
+# so it is stable across calls and encodes the one contention rule that is
+# real: a pod carries at most one session on its own socket REPL (the pod
+# serves a single REPL client), and one per distinct DUT tty. A pod session
+# and any number of DUT sessions therefore coexist, and re-opening the same
+# target returns the session already held rather than building a second one.
+_SESSIONS: dict = {}
 
 
-def _default_repl_log(label: str) -> str:
-    return os.path.join(tempfile.gettempdir(), "pod-repl-%s.log" % label)
+def _session_id(label: str, device: str = None) -> str:
+    """The session id for a target: `<label>:pod`, or `<label>:dut:<tty>`."""
+    if device is None:
+        return "%s:pod" % label
+    return "%s:dut:%s" % (label, device.rsplit("/", 1)[-1])
+
+
+def _default_repl_log(label: str, device: str = None) -> str:
+    # One log per session, so a pod session and a DUT session on the same pod
+    # do not interleave into one file.
+    leaf = "pod" if device is None else "dut-%s" % device.rsplit("/", 1)[-1]
+    return os.path.join(tempfile.gettempdir(),
+                        "pod-repl-%s-%s.log" % (label, leaf))
 
 
 def _open_session(label: str, log_path: str = None, device: str = None,
@@ -151,25 +168,16 @@ def _open_session(label: str, log_path: str = None, device: str = None,
     mounted for the session's lifetime (the reason to use pod_open/dut_open
     over pod_mount, which is a one-shot that unmounts on return).
 
-    Refuses if `label` already holds a running session opened against a
-    different target (a pod_open session when `device` is given, a
-    dut_open session on a different device, or a dut_open session when
-    `device` is omitted) - it never returns a session for the wrong
-    subject.
+    Returns the session id to pass to session_send / session_read /
+    session_close. Re-opening a target already held returns that session with
+    already_open set, rather than building a second one against the same device.
     """
-    sess = _REPL_SESSIONS.get(label)
-    if sess is not None and sess["session"].running:
-        if sess.get("device") != device:
-            held = ("the pod's own socket REPL" if sess.get("device") is None
-                     else "DUT tty %s" % sess["device"])
-            wanted = ("the pod's own socket REPL" if device is None
-                      else "DUT tty %s" % device)
-            raise ValueError(
-                "'%s' already holds a session on %s; requested %s - "
-                "session_close it first to switch targets"
-                % (label, held, wanted))
-        s = sess["session"]
-        return {"label": label, "target": s.target, "log_path": sess["log_path"],
+    sid = _session_id(label, device)
+    held = _SESSIONS.get(sid)
+    if held is not None and held["session"].running:
+        s = held["session"]
+        return {"session": sid, "label": label, "device": device,
+                "target": s.target, "log_path": held["log_path"],
                 "running": True, "mounted": s.mounted, "already_open": True,
                 "note": "session already open; mount/exec/cp/soft_reset args "
                         "were ignored - session_close first to change them"}
@@ -179,12 +187,14 @@ def _open_session(label: str, log_path: str = None, device: str = None,
         pre_cp = [tuple(cp)] if cp and not isinstance(cp[0], (list, tuple)) \
             else [tuple(p) for p in cp]
     pod = _pod_for(label)
-    log_path = log_path or _default_repl_log(label)
+    log_path = log_path or _default_repl_log(label, device)
     s = pod.open_session(log_path=log_path, device=device, mount=mount,
                          pre_exec=pre_exec, pre_cp=pre_cp, soft_reset=soft_reset,
                          unsafe_links=unsafe_links, reconnect=reconnect)
-    _REPL_SESSIONS[label] = {"session": s, "log_path": log_path, "device": device}
-    return {"label": label, "target": s.target, "log_path": log_path,
+    _SESSIONS[sid] = {"session": s, "log_path": log_path, "device": device,
+                      "label": label}
+    return {"session": sid, "label": label, "device": device,
+            "target": s.target, "log_path": log_path,
             "running": s.running, "mounted": s.mounted}
 
 
@@ -192,32 +202,46 @@ def handle_pod_open(label: str, log_path: str = None, mount: str = None,
                     exec: str = None, cp=None, soft_reset: bool = False,
                     unsafe_links: bool = False, reconnect: bool = True) -> dict:
     """Open (or return the existing) persistent session on the pod's own
-    socket REPL. Holds the pod's single REPL slot for the session's
-    lifetime, excluding every other agent from pod_exec and from opening
-    their own pod_open/dut_open session against this pod, until
-    session_close - use session_send (not pod_exec) to run code while open.
-    See _open_session for the setup chain and the already-open behaviour.
+    socket REPL, and return its session id.
+
+    Holds the pod's single REPL slot for the session's lifetime, excluding
+    every other agent from pod_exec and from their own pod_open against this
+    pod, until session_close - use session_send (not pod_exec) to run code
+    while it is open. A DUT session rides the DUT's own tty and is unaffected,
+    so the two coexist. See _open_session for the setup chain.
     """
     return _open_session(label, log_path=log_path, device=None, mount=mount,
                             exec=exec, cp=cp, soft_reset=soft_reset,
                             unsafe_links=unsafe_links, reconnect=reconnect)
 
 
-def handle_dut_open(label: str, device: str, log_path: str = None,
+def handle_dut_open(label: str, device: str = None, log_path: str = None,
                     mount: str = None, exec: str = None, cp=None,
                     soft_reset: bool = False, unsafe_links: bool = False,
                     reconnect: bool = True, recover: bool = False) -> dict:
     """Open (or return the existing) persistent session on the DUT's own CDC
-    tty. `device` is the tty from dut_link(action="up") - the USB/IP link
-    must already be attached; dut_open does not bring it up itself.
+    tty, and return its session id.
 
-    recover=True runs Pod.recover_dut_repl on `device` before connecting
+    With `device` omitted the USB/IP link is brought up first and the tty it
+    returns is used, so a DUT session is reachable in one call. That bring-up
+    activates the pod USB host, which has been observed to disturb the pod's
+    Wi-Fi link; pass the `device` from a prior dut_link(action="up") to skip it.
+
+    recover=True runs Pod.recover_dut_repl on the tty before connecting
     (Ctrl-C then Ctrl-B, to leave a DUT latched in raw REPL mode for the
     friendly one) and folds its {ok, device, recovered, prompt_seen,
     was_raw, output} verdict into the returned dict under `recover`. See
     _open_session for the setup chain and the already-open behaviour.
     """
     result = {}
+    if device is None:
+        link = handle_dut_link(label, action="up")
+        device = link.get("tty")
+        if not device:
+            raise RuntimeError(
+                "dut_link(action=\"up\") attached the DUT but no CDC tty "
+                "appeared; pass device= explicitly once one does")
+        result["link"] = link
     if recover:
         result["recover"] = _pod_for(label).recover_dut_repl(device)
     result.update(_open_session(
@@ -227,22 +251,41 @@ def handle_dut_open(label: str, device: str, log_path: str = None,
     return result
 
 
-def _require_repl(label: str):
-    sess = _REPL_SESSIONS.get(label)
-    if sess is None:
+def _require_session(session: str):
+    held = _SESSIONS.get(session)
+    if held is None:
+        known = ", ".join(sorted(_SESSIONS)) or "none"
         raise KeyError(
-            "No open session for '%s' - call pod_open or dut_open first."
-            % label)
-    return sess["session"]
+            "No open session '%s' - call pod_open or dut_open first. "
+            "Open in this process: %s" % (session, known))
+    return held["session"]
 
 
-def handle_session_read(label: str, since: int = None) -> dict:
+def _dut_session_for(label: str):
+    """The running DUT session held for `label`, or None.
+
+    Refuses rather than guessing when the label holds more than one, since
+    picking a DUT for the caller would silently run their code on the wrong one.
+    """
+    prefix = "%s:dut:" % label
+    live = [(sid, rec) for sid, rec in _SESSIONS.items()
+            if sid.startswith(prefix) and rec["session"].running]
+    if not live:
+        return None
+    if len(live) > 1:
+        raise ValueError(
+            "'%s' holds %d DUT sessions (%s); name one with session_send "
+            "instead" % (label, len(live), ", ".join(sid for sid, _ in live)))
+    return live[0]
+
+
+def handle_session_read(session: str, since: int = None) -> dict:
     """Tail the session's buffered stdout after `since` (cursor from a prior read)."""
-    return _require_repl(label).read_since(since)
+    return _require_session(session).read_since(since)
 
 
-def _session_write(label: str, data: str, newline: bool = True,
-                     wait: float = 0.3) -> dict:
+def _session_write(session: str, data: str, newline: bool = True,
+                   wait: float = 0.3) -> dict:
     """Inject a command into the target's stdin; return output captured in `wait`.
 
     Marks the stream cursor, writes `data` (a trailing newline submits a REPL
@@ -250,7 +293,7 @@ def _session_write(label: str, data: str, newline: bool = True,
     produced since - so a single call runs a command and reads its reply. Set
     wait=0 to send without reading (poll later with session_read).
     """
-    s = _require_repl(label)
+    s = _require_session(session)
     cursor = s.tell()
     try:
         sent = s.send(data, newline=newline)
@@ -263,9 +306,9 @@ def _session_write(label: str, data: str, newline: bool = True,
     return out
 
 
-def _session_interrupt(label: str, wait: float = 0.3) -> dict:
+def _session_interrupt(session: str, wait: float = 0.3) -> dict:
     """Send Ctrl-C to the target and return output captured in `wait` seconds."""
-    s = _require_repl(label)
+    s = _require_session(session)
     cursor = s.tell()
     try:
         s.interrupt()
@@ -276,7 +319,7 @@ def _session_interrupt(label: str, wait: float = 0.3) -> dict:
     return s.read_since(cursor)
 
 
-def handle_session_send(label: str, data: str = None, newline: bool = True,
+def handle_session_send(session: str, data: str = None, newline: bool = True,
                         wait: float = 0.3, control: str = None) -> dict:
     """Write to the session's stdin, or send a control character, and return
     the output captured within `wait` seconds.
@@ -294,31 +337,62 @@ def handle_session_send(label: str, data: str = None, newline: bool = True,
             "session_send: pass data or control, not both - control sends "
             "a control character in place of data")
     if control == "c":
-        return _session_interrupt(label, wait=wait)
+        return _session_interrupt(session, wait=wait)
     if control in ("b", "d"):
-        return _session_write(label, "\x02" if control == "b" else "\x04",
-                                newline=False, wait=wait)
+        return _session_write(session, "\x02" if control == "b" else "\x04",
+                              newline=False, wait=wait)
     if control is not None:
         raise ValueError("control must be 'c', 'b', or 'd'")
     if data is None:
         raise ValueError("data is required when control is not set")
-    return _session_write(label, data, newline=newline, wait=wait)
+    return _session_write(session, data, newline=newline, wait=wait)
 
 
-def handle_session_close(label: str) -> dict:
-    """Close the session (the target keeps running) and drop it from the registry."""
-    sess = _REPL_SESSIONS.pop(label, None)
-    if sess is None:
-        return {"ok": True, "note": "no open session"}
-    result = sess["session"].close()
-    result["label"] = label
+def handle_session_close(session: str) -> dict:
+    """Close the session (the target keeps running) and drop it from the store."""
+    held = _SESSIONS.pop(session, None)
+    if held is None:
+        return {"ok": True, "session": session, "note": "no open session"}
+    result = held["session"].close()
+    result["session"] = session
+    result["label"] = held["label"]
+    result["device"] = held["device"]
     return result
 
 
-def handle_dut_exec(label: str, code: str) -> dict:
-    """Run MicroPython on the DUT (turnkey): ensure the USB/IP link, attach, and
-    exec over the DUT's own CDC REPL. Returns {tty, returncode, stdout, stderr}."""
-    return _pod_for(label).dut_exec(code)
+def handle_dut_exec(label: str, code: str, wait: float = 1.0) -> dict:
+    """Run MicroPython on the DUT once. Prefer dut_open + session_send for more
+    than a single call.
+
+    Takes the cheapest route to the DUT that is available, reported as `via`:
+
+    - `via="session"` when this process already holds a DUT session for `label`.
+      The code goes down that connection, so nothing is attached, detached or
+      settled. `code` is submitted as a single `exec()` line so a multi-line
+      body needs no raw-REPL paste, which means expression values are not
+      echoed the way a bare REPL line would echo them: print what you want
+      back. Output is whatever the DUT wrote within `wait`.
+    - `via="attach"` with no session open: bring the link up, attach, then exec
+      over mpremote's raw REPL. This is the slow path, several seconds, because
+      the pod's usbip server is single-import and the fresh CDC tty has to
+      settle. Open a session first if you are going to call more than once.
+
+    Returns {via, ...}: the session routes add `session` and `stdout`, the
+    attach route adds {tty, returncode, stdout, stderr, reattached}.
+    """
+    found = _dut_session_for(label)
+    if found is not None:
+        sid, rec = found
+        # A single `exec()` line carries an arbitrary multi-line body through the
+        # friendly REPL without depending on indentation surviving line-by-line
+        # submission, and without entering the raw REPL, which would contend
+        # with the session's own reader thread for the stream.
+        out = _session_write(sid, "exec(%r)" % code, wait=wait)
+        out["via"] = "session"
+        out["session"] = sid
+        out["device"] = rec["device"]
+        return out
+    return dict(_pod_for(label).dut_exec(code), via="attach")
 
 
 # ── dut: identity + SWD debug port ─────────────────────────────────────────
@@ -822,14 +896,16 @@ def build_server():
                     "buffer; inject commands with session_send and tail with "
                     "session_read. Holds the pod's SINGLE REPL slot for the "
                     "session's lifetime, EXCLUDING every other agent from "
-                    "pod_exec and from opening their own session against this "
-                    "pod, until session_close - use session_send (not "
-                    "pod_exec) to run code while open. Chain setup before "
+                    "pod_exec and from opening their own pod session against "
+                    "this pod, until session_close - use session_send (not "
+                    "pod_exec) to run code while open. A dut_open session rides "
+                    "the DUT's own tty, so the two coexist. Chain setup before "
                     "connecting (mpremote-style): `soft_reset`, `cp`, `exec`, "
                     "then `mount` (kept for the session lifetime - the reason "
                     "to use pod_open over pod_mount, which is one-shot and "
-                    "unmounts on return). Returns {label, target, log_path, "
-                    "running, mounted}."),
+                    "unmounts on return). Returns {session, label, device, "
+                    "target, log_path, running, mounted}; pass `session` to "
+                    "session_send / session_read / session_close."),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -880,28 +956,31 @@ def build_server():
                 name="dut_open",
                 description=(
                     "Open a persistent streaming REPL session on the DUT's own "
-                    "CDC tty. `device` is the tty from dut_link(action=\"up\") "
-                    "- the USB/IP link must already be attached; dut_open does "
-                    "not bring it up itself. recover=true runs the Ctrl-C / "
-                    "Ctrl-B un-stick over `device` first, for a DUT latched in "
-                    "raw REPL mode, and folds its verdict into the result under "
-                    "`recover`. Streams stdout to a log file AND an in-memory "
-                    "tail buffer; inject commands with session_send and tail "
-                    "with session_read. Chain setup before connecting "
+                    "CDC tty and return its session id. THE NORMAL WAY TO WORK "
+                    "WITH A DUT: hold this open and drive it with session_send "
+                    "/ session_read rather than calling dut_exec repeatedly. "
+                    "With `device` omitted the USB/IP link is brought up first "
+                    "and its tty used, so one call is enough; that bring-up "
+                    "activates the pod USB host, which can disturb the pod's "
+                    "Wi-Fi, so pass the `device` from a prior "
+                    "dut_link(action=\"up\") to skip it. recover=true runs the "
+                    "Ctrl-C / Ctrl-B un-stick over the tty first, for a DUT "
+                    "latched in raw REPL mode, and folds its verdict into the "
+                    "result under `recover`. Streams stdout to a log file AND "
+                    "an in-memory tail buffer. Chain setup before connecting "
                     "(mpremote-style): `soft_reset`, `cp`, `exec`, then `mount` "
-                    "(kept for the session lifetime). Refuses if `label` "
-                    "already holds a session on a different target (e.g. a "
-                    "pod_open session) - session_close it first. Returns "
-                    "{label, target, log_path, running, mounted}."),
+                    "(kept for the session lifetime). Coexists with a pod_open "
+                    "session on the same pod. Returns {session, label, device, "
+                    "target, log_path, running, mounted}."),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "device": {
                             "type": "string",
-                            "description": "DUT CDC tty from "
-                                           "dut_link(action=\"up\") (e.g. "
-                                           "/dev/ttyACM0).",
+                            "description": "DUT CDC tty (e.g. /dev/ttyACM0). "
+                                           "Omit to bring the USB/IP link up "
+                                           "and use the tty it returns.",
                         },
                         "recover": {
                             "type": "boolean",
@@ -948,7 +1027,7 @@ def build_server():
                             "default": True,
                         },
                     },
-                    "required": ["label", "device"],
+                    "required": ["label"],
                 },
             ),
             Tool(
@@ -966,7 +1045,10 @@ def build_server():
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "label": {"type": "string", "description": "Pod label."},
+                        "session": {
+                            "type": "string",
+                            "description": "Session id from pod_open / dut_open.",
+                        },
                         "data": {
                             "type": "string",
                             "description": "Text to send (a REPL command "
@@ -990,7 +1072,7 @@ def build_server():
                                            "instead of `data`.",
                         },
                     },
-                    "required": ["label"],
+                    "required": ["session"],
                 },
             ),
             Tool(
@@ -1005,37 +1087,50 @@ def build_server():
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "label": {"type": "string", "description": "Pod label."},
+                        "session": {
+                            "type": "string",
+                            "description": "Session id from pod_open / dut_open.",
+                        },
                         "since": {
                             "type": "integer",
                             "description": "Cursor from a prior session_read.",
                         },
                     },
-                    "required": ["label"],
+                    "required": ["session"],
                 },
             ),
             Tool(
                 name="session_close",
                 description=(
-                    "Close an open session (the target keeps running) and "
-                    "free the pod's REPL slot. Returns {ok, received, label}."),
+                    "Close an open session (the target keeps running). A pod "
+                    "session frees the pod's single REPL slot; a DUT session "
+                    "leaves the USB/IP link attached, so dut_link(action="
+                    "\"down\") is a separate step. Returns {ok, received, "
+                    "session, label, device}."),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "label": {"type": "string", "description": "Pod label."},
+                        "session": {
+                            "type": "string",
+                            "description": "Session id from pod_open / dut_open.",
+                        },
                     },
-                    "required": ["label"],
+                    "required": ["session"],
                 },
             ),
             Tool(
                 name="dut_exec",
                 description=(
-                    "Run MicroPython on the DUT (turnkey): ensure the pod "
-                    "USB/IP link, attach the DUT, and exec the code over its "
-                    "own CDC REPL. Returns {tty, returncode, stdout, stderr}. "
-                    "Each call detaches, re-attaches, and retries the "
-                    "connection, carrying a multi-second floor; prefer "
-                    "dut_open + session_send over repeated dut_exec calls. "
+                    "Run MicroPython on the DUT once. THE NAMED ONE-SHOT: "
+                    "for more than a single call open a session with dut_open "
+                    "and use session_send. Takes the cheapest available route "
+                    "and reports it as `via`: \"session\" reuses a DUT session "
+                    "this process already holds, attaching nothing (the code is "
+                    "submitted as one exec() line, so print what you want back "
+                    "- expression values are not echoed); \"attach\" brings the "
+                    "link up and attaches, which carries a multi-second floor "
+                    "because the pod's usbip server is single-import and a "
+                    "fresh CDC tty must settle. "
                     "For pod-side code use pod_exec instead. The forwarded "
                     "REPL is reliable when the DUT is correctly flashed and "
                     "is not DTR-gated by host ModemManager (run `pod "
@@ -1049,6 +1144,13 @@ def build_server():
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "code": {"type": "string", "description": "MicroPython code to run ON THE DUT."},
+                        "wait": {
+                            "type": "number",
+                            "description": "via=session only: seconds to wait "
+                                           "for the DUT's output before "
+                                           "returning.",
+                            "default": 1.0,
+                        },
                     },
                     "required": ["label", "code"],
                 },
@@ -1513,7 +1615,7 @@ def build_server():
                     arguments.get("reconnect", True))
             elif name == "dut_open":
                 result = await asyncio.to_thread(
-                    handle_dut_open, arguments["label"], arguments["device"],
+                    handle_dut_open, arguments["label"], arguments.get("device"),
                     arguments.get("log_path"), arguments.get("mount"),
                     arguments.get("exec"), arguments.get("cp"),
                     arguments.get("soft_reset", False),
@@ -1522,19 +1624,20 @@ def build_server():
                     arguments.get("recover", False))
             elif name == "session_send":
                 result = await asyncio.to_thread(
-                    handle_session_send, arguments["label"],
+                    handle_session_send, arguments["session"],
                     arguments.get("data"), arguments.get("newline", True),
                     arguments.get("wait", 0.3), arguments.get("control"))
             elif name == "session_read":
                 result = await asyncio.to_thread(
-                    handle_session_read, arguments["label"],
+                    handle_session_read, arguments["session"],
                     arguments.get("since"))
             elif name == "session_close":
                 result = await asyncio.to_thread(
-                    handle_session_close, arguments["label"])
+                    handle_session_close, arguments["session"])
             elif name == "dut_exec":
                 result = await asyncio.to_thread(
-                    handle_dut_exec, arguments["label"], arguments["code"])
+                    handle_dut_exec, arguments["label"], arguments["code"],
+                    arguments.get("wait", 1.0))
             elif name == "dut_identify":
                 result = await asyncio.to_thread(
                     handle_dut_identify, arguments["label"], arguments.get("adopt", False))
