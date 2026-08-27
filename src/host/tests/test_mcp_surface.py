@@ -1026,3 +1026,96 @@ class TestDeadSessionIsClosedBeforeItsIdIsReused:
 
         dead.close.assert_called_once()     # log handle released, not orphaned
         assert m._SESSIONS["lab:pod"]["session"] is fresh
+
+
+# ── a failure is returned as a failure, not as prose ───────────────────────
+
+
+class TestToolResultsAreMachineReadable:
+    """call_tool used to return every outcome as plain text through one path, so
+    a refusal was indistinguishable from a success whose text began with
+    "Error:". An agent branching on contention needs isError and a kind."""
+
+    def _call(self, name, arguments):
+        import asyncio
+        import mcp.types as t
+        srv = m.build_server()
+        handler = srv.request_handlers[t.CallToolRequest]
+        req = t.CallToolRequest(
+            method="tools/call",
+            params=t.CallToolRequestParams(name=name, arguments=arguments))
+        return asyncio.run(handler(req)).root
+
+    def _body(self, res):
+        import json
+        return json.loads(res.content[0].text)
+
+    def test_a_success_is_json_and_not_an_error(self, monkeypatch):
+        monkeypatch.setattr(m, "handle_pod_info",
+                            lambda label: {"label": label, "sessions": []})
+        res = self._call("pod_info", {"label": "lab"})
+        assert not getattr(res, "isError", False)
+        assert self._body(res)["label"] == "lab"
+
+    def test_an_unknown_label_is_marked_as_an_error(self):
+        res = self._call("pod_info", {"label": "__no_such_pod__"})
+        assert res.isError is True
+        assert self._body(res)["kind"] == "not_found"
+
+    def test_a_bad_argument_is_marked_and_named(self, monkeypatch):
+        """Schema-valid but refused at runtime. An out-of-enum value never
+        reaches the handler: the SDK validates against inputSchema first and
+        returns its own error, which is why this uses a pair the schema cannot
+        express as mutually exclusive."""
+        monkeypatch.setattr(m, "get_pod", lambda label: {"addr4": "10.0.0.1"})
+        monkeypatch.setattr(m.Pod, "from_entry",
+                            classmethod(lambda cls, e: MagicMock()))
+        res = self._call("dut_mem", {"label": "lab", "addr": 0x20000000,
+                                     "data": "ff00", "out_path": "/tmp/x.bin"})
+        assert res.isError is True
+        body = self._body(res)
+        assert body["kind"] == "invalid_argument"
+        assert body["tool"] == "dut_mem"
+        assert "mutually exclusive" in body["error"]
+
+    def test_schema_validation_still_rejects_an_out_of_enum_value(self):
+        """The SDK rejects it before the handler, so it is an error either way."""
+        res = self._call("dut_link", {"label": "lab", "action": "bogus"})
+        assert res.isError is True
+
+    def test_contention_is_kind_busy_and_retryable(self, monkeypatch):
+        from pod.client import PodExecError
+
+        def busy(*a, **k):
+            raise PodExecError("exec", 1, "",
+                               "annealage-pod: BUSY - REPL in use by another client",
+                               caller="agent-a:corona@carbon")
+
+        monkeypatch.setattr(m, "handle_pod_exec", busy)
+        res = self._call("pod_exec", {"label": "lab", "code": "print(1)"})
+        assert res.isError is True
+        body = self._body(res)
+        assert body["kind"] == "busy"
+        assert body["retryable"] is True
+        assert body["caller"] == "agent-a:corona@carbon"
+
+    def test_a_real_pod_fault_is_not_marked_retryable(self, monkeypatch):
+        from pod.client import PodExecError
+
+        def broken(*a, **k):
+            raise PodExecError("exec", 1, "", "could not enter raw repl")
+
+        monkeypatch.setattr(m, "handle_pod_exec", broken)
+        body = self._body(self._call("pod_exec", {"label": "lab", "code": "x"}))
+        assert body["kind"] == "pod_exec_failed"
+        assert body["retryable"] is False
+
+    def test_an_unexpected_exception_is_still_an_error_not_a_result(self, monkeypatch):
+        """Anything uncaught used to escape as a success-shaped response."""
+        def boom(*a, **k):
+            raise RuntimeError("something unforeseen")
+
+        monkeypatch.setattr(m, "handle_pod_info", boom)
+        res = self._call("pod_info", {"label": "lab"})
+        assert res.isError is True
+        assert "unforeseen" in self._body(res)["error"]

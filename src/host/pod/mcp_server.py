@@ -21,6 +21,7 @@ the mcp package is absent. build_server() is only called from main().
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -38,13 +39,40 @@ try:
     import mcp.server.stdio
     import mcp.server
     from mcp.server import Server
-    from mcp.types import Tool, TextContent
+    from mcp.types import Tool, TextContent, CallToolResult
     _MCP_AVAILABLE = True
 except ImportError:
     _MCP_AVAILABLE = False
     Server = None
     Tool = None
     TextContent = None
+    CallToolResult = None
+
+
+def _json(value) -> str:
+    """Serialise a tool result as JSON, falling back to str for odd values."""
+    try:
+        return json.dumps(value, default=str, sort_keys=True)
+    except Exception:  # noqa: BLE001 - a result is never worth failing the call
+        return json.dumps({"result": str(value)})
+
+
+def _ok(result):
+    """A successful tool result, as JSON text."""
+    return [TextContent(type="text", text=_json(result))]
+
+
+def _fail(kind, message, **fields):
+    """A failed tool result, marked as an error rather than returned as prose.
+
+    Without isError an agent cannot tell a failure from a success whose text
+    happens to begin with "Error:", so a refusal reads as a result. The body is
+    JSON for the same reason: `error` and `kind` are machine-readable, and `kind`
+    is what lets an agent branch on contention rather than parsing English.
+    """
+    body = dict(fields, error=message, kind=kind)
+    return CallToolResult(
+        content=[TextContent(type="text", text=_json(body))], isError=True)
 
 
 # ── tool handler functions (pure logic, testable without mcp) ─────────────
@@ -1871,31 +1899,34 @@ def build_server():
                     handle_bench_uart, arguments["label"],
                     arguments.get("port"), arguments.get("duration", 30.0))
             else:
-                return [TextContent(type="text", text=f"Unknown tool: {name}")]
-            return [TextContent(type="text", text=str(result))]
+                return _fail("unknown_tool", f"Unknown tool: {name}", tool=name)
+            return _ok(result)
 
         except NotImplementedError as exc:
-            return [TextContent(type="text", text=f"Not implemented: {exc}")]
+            return _fail("not_implemented", str(exc), tool=name)
         except PodExecError as exc:
-            # Classified pod-exec failure: surface the reason + the ampremote
-            # stderr so the agent sees why, not a bare non-zero exit.
-            text = str(exc)
-            if exc.stderr:
-                text += "\n--- pod stderr ---\n" + exc.stderr
-            return [TextContent(type="text", text=text)]
+            # Classified pod-exec failure. `busy` is the one an agent must not
+            # treat as a broken pod: the documented response to an unreachable
+            # pod is reset and power-cycle, which against a pod that is merely
+            # in use destroys someone else's session.
+            return _fail("busy" if exc.busy else "pod_exec_failed", str(exc),
+                         tool=name, reason=exc.reason, retryable=exc.busy,
+                         pod_stderr=exc.stderr or None, caller=exc.caller)
         except PodUnreachable as exc:
             # No tier yielded an identity-confirmed target - unreachable, or a
             # DHCP-moved IPv4 whose fingerprint did not match. Distinct from a
             # generic failure so the agent does not retry blindly.
-            return [TextContent(
-                type="text",
-                text=f"Pod unreachable or identity mismatch: {exc}")]
+            return _fail("unreachable",
+                         f"Pod unreachable or identity mismatch: {exc}",
+                         tool=name, retryable=False)
         except (LookupError, KeyError) as exc:
-            return [TextContent(type="text", text=f"Error: {exc}")]
+            return _fail("not_found", str(exc), tool=name)
         except ValueError as exc:
             # Bad argument surfaced locally (e.g. an out-of-range regsel/length)
             # before any pod round-trip.
-            return [TextContent(type="text", text=f"Invalid argument: {exc}")]
+            return _fail("invalid_argument", str(exc), tool=name)
+        except Exception as exc:  # noqa: BLE001 - never return a failure as prose
+            return _fail("error", "%s: %s" % (type(exc).__name__, exc), tool=name)
 
     return server
 

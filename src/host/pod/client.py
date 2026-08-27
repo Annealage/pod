@@ -13,6 +13,7 @@ Stubbed methods raise NotImplementedError with the phase they're pending:
 
 import ast
 import base64 as _b64
+import getpass
 import ipaddress
 import os
 import socket
@@ -81,9 +82,32 @@ def _last_int(stdout: str, default: int = 0) -> int:
     return default
 
 
+# What the pod says when its single REPL slot is already taken, and what the
+# host sees when the pod drops the connection for the same reason. Checked
+# before the transport signatures, because a busy pod IS a refused connection
+# and would otherwise be labelled a fault: the documented response to a broken
+# pod is reset and power-cycle, which is exactly the wrong move against a pod
+# that is merely in use, and destroys another agent's session.
+BUSY_MARKERS = ("busy - repl in use", "repl in use by another client",
+                "annealage-pod: busy")
+REFUSED_MARKERS = ("connection reset by peer", "connection refused")
+
+
 def _classify_exec_failure(stderr, stdout):
-    """Best-effort label for why a pod exec failed, from ampremote output."""
+    """Best-effort label for why a pod exec failed, from ampremote output.
+
+    Distinguishes a pod whose REPL is held by someone else from a pod that
+    cannot be reached at all. Those need opposite responses, and only one of
+    them is a fault.
+    """
     blob = ((stderr or "") + "\n" + (stdout or "")).lower()
+    if any(s in blob for s in BUSY_MARKERS):
+        return "pod REPL busy (held by another client)"
+    if any(s in blob for s in REFUSED_MARKERS):
+        # The pod closes the connection on a second REPL client, so this is
+        # most often contention rather than a dead pod. Hedged deliberately:
+        # the host cannot tell this apart from a genuine network drop.
+        return "pod closed the connection (usually its REPL is already in use)"
     if "timed out" in blob or "timeout" in blob:
         return "timeout reaching the pod"
     if any(s in blob for s in ("could not enter raw repl", "failed to access",
@@ -95,6 +119,26 @@ def _classify_exec_failure(stderr, stdout):
     if "traceback" in blob or "error:" in blob:
         return "exception on the pod"
     return "exec error"
+
+
+def resolve_caller():
+    """A name for whoever is driving this client, for refusals to quote.
+
+    A label, not a credential: nothing checks it and it grants nothing. Its only
+    job is to let a collision say who the other party is instead of presenting as
+    a broken pod. Resolution order, first hit wins: the claude-net agent name
+    (agents already carry session:user@host), the POD_CALLER environment
+    variable, then user@host/pid.
+    """
+    for var in ("CLAUDE_NET_AGENT", "POD_CALLER"):
+        value = os.environ.get(var)
+        if value and value.strip():
+            return value.strip()
+    try:
+        user = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no passwd entry in some containers
+        user = os.environ.get("USER") or "unknown"
+    return "%s@%s/%d" % (user, socket.gethostname().split(".")[0], os.getpid())
 
 
 # Core register selector names -> regsel, mirroring swd_dap.CortexM numbering
@@ -138,16 +182,28 @@ class PodExecError(RuntimeError):
     stdout/stderr, so callers see WHY (raw-REPL entry vs device exception vs
     timeout) rather than a bare non-zero exit."""
 
-    def __init__(self, verb, returncode, stdout, stderr):
+    def __init__(self, verb, returncode, stdout, stderr, caller=None):
         self.returncode = returncode
         self.stdout = (stdout or "").strip()
         self.stderr = (stderr or "").strip()
         self.reason = _classify_exec_failure(self.stderr, self.stdout)
+        self.caller = caller
+        self.busy = self.reason.startswith("pod REPL busy") or \
+            self.reason.startswith("pod closed the connection")
         detail = self.stderr or self.stdout
         last = detail.splitlines()[-1] if detail else ""
+        hint = ""
+        if self.busy:
+            # Say what to do instead, because the reflex for an unreachable pod
+            # is a reset, and that would take another agent's session with it.
+            hint = (" - this is contention, not a fault: wait and retry, or "
+                    "check who holds it. Do NOT reset or power-cycle the pod")
+            if caller:
+                hint += " (this client is %s)" % caller
         super().__init__(
-            "pod %s failed: %s (exit %s)%s"
-            % (verb, self.reason, returncode, (": " + last) if last else ""))
+            "pod %s failed: %s (exit %s)%s%s"
+            % (verb, self.reason, returncode,
+               (": " + last) if last else "", hint))
 
 
 class Pod:
@@ -185,6 +241,10 @@ class Pod:
         """
         self.repl_port = repl_port
         self._runner = runner if runner is not None else _subprocess.run
+        # A label for whoever is driving this client, resolved once. It grants
+        # nothing and nothing checks it; its job is to let a refusal name a
+        # party instead of reading as a broken pod.
+        self.caller = resolve_caller()
         self._seed_address = address
         if resolver is not None:
             self._resolver = resolver
@@ -272,7 +332,7 @@ class Pod:
         result = self._runner(argv, capture_output=True, text=True)
         if getattr(result, "returncode", 0):
             raise PodExecError("exec", result.returncode, result.stdout,
-                               getattr(result, "stderr", ""))
+                               getattr(result, "stderr", ""), caller=self.caller)
         return result.stdout
 
     def eval(self, expr: str) -> str:
@@ -1212,7 +1272,8 @@ class Pod:
             if kw.get("check") and getattr(out, "returncode", 0) != 0:
                 raise PodExecError(argv[0], out.returncode,
                                    getattr(out, "stdout", ""),
-                                   getattr(out, "stderr", ""))
+                                   getattr(out, "stderr", ""),
+                                   caller=self.caller)
             return out
 
         if soft_reset:
