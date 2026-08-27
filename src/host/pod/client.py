@@ -878,15 +878,38 @@ class Pod:
         time.sleep(1.5)
         return self.usbip_attach(ensure=False).get("tty")
 
+    # Stderr signatures that mean mpremote could not TALK to the device, as
+    # opposed to the device running the code and raising. Only the former says
+    # the tty is stale and worth rebuilding the link for.
+    _TRANSPORT_ERRORS = ("could not enter raw repl", "failed to access",
+                         "no such file or directory", "could not open port",
+                         "device reports readiness", "permission denied")
+
+    @classmethod
+    def _is_transport_error(cls, stderr: str) -> bool:
+        """True when stderr says the link failed rather than the DUT's code did.
+
+        A DUT-side exception comes back as a traceback, which is a successful
+        conversation with a working device, so it must never be mistaken for a
+        dead tty: acting on that would re-run the caller's code.
+        """
+        low = (stderr or "").lower()
+        if "traceback" in low:
+            return False
+        return any(sig in low for sig in cls._TRANSPORT_ERRORS)
+
     def _dut_exec_on(self, tty: str, code: str, settle: bool) -> dict:
-        """Run `code` over mpremote on `tty`. Returns {returncode, stdout, stderr}.
+        """Run `code` over mpremote on `tty`.
+
+        Returns {returncode, stdout, stderr, transport_error}, the last saying
+        whether the failure was in reaching the device rather than in the code.
 
         settle=True waits before the first attempt, which a freshly-enumerated CDC
         tty needs before it answers the raw-REPL handshake; a tty already up does
         not. Either way the transient "could not enter raw repl" that occurs when
         mpremote races the cdc_acm bind is retried.
         """
-        last_err = ""
+        last = None
         for attempt in range(3):
             if settle or attempt:
                 time.sleep(1.0)
@@ -895,15 +918,19 @@ class Pod:
                     ["mpremote", "connect", tty, "resume", "exec", code],
                     capture_output=True, text=True, timeout=20)
             except _subprocess.TimeoutExpired:
-                last_err = "mpremote timed out talking to %s" % tty
+                last = {"returncode": 1, "stdout": "",
+                        "stderr": "mpremote timed out talking to %s" % tty,
+                        "transport_error": True}
                 continue
-            if getattr(out, "returncode", 0) == 0 or \
-                    "raw repl" not in (getattr(out, "stderr", "") or "").lower():
-                return {"returncode": getattr(out, "returncode", 0),
-                        "stdout": getattr(out, "stdout", ""),
-                        "stderr": getattr(out, "stderr", "")}
-        return {"returncode": 1, "stdout": "", "stderr": last_err or
-                "mpremote could not enter the raw REPL on %s" % tty}
+            rc = getattr(out, "returncode", 0)
+            stderr = getattr(out, "stderr", "") or ""
+            last = {"returncode": rc, "stdout": getattr(out, "stdout", ""),
+                    "stderr": stderr,
+                    "transport_error": rc != 0 and self._is_transport_error(stderr)}
+            # Retry only the raw-REPL race; anything else is the device's answer.
+            if rc == 0 or "raw repl" not in stderr.lower():
+                return last
+        return last
 
     def dut_exec(self, code: str, tty: Optional[str] = None) -> dict:
         """Run MicroPython on the DUT (turnkey) and return its stdout.
@@ -935,13 +962,16 @@ class Pod:
             raise RuntimeError("DUT attached but no CDC tty appeared")
 
         res = self._dut_exec_on(tty, code, settle=reattached)
-        if res["returncode"] != 0 and reused:
-            # The reused node did not answer: rebuild and try once more, so a
-            # stale export is recovered rather than reported as the DUT's error.
+        if res.get("transport_error") and reused:
+            # The reused node could not be reached, which is the stale-export
+            # case: rebuild and try once. Gated on the transport flag rather than
+            # on returncode, because a DUT-side exception is a working link
+            # running failing code and re-running it would repeat its effects.
             fresh = self._rebuild_dut_link()
             if fresh:
                 tty, reattached = fresh, True
                 res = self._dut_exec_on(tty, code, settle=True)
+        res.pop("transport_error", None)
         return dict(res, tty=tty, reattached=reattached)
 
     def pinmap(self) -> dict:
@@ -1206,16 +1236,23 @@ class Pod:
         # The setup chain runs against the SESSION'S target, so a DUT session
         # sets up the DUT. Routing it through self.exec()/self.cp() would send
         # it to the pod regardless of which target the session then connects to.
-        def _setup(*argv):
-            return self._runner(["ampremote", "connect", target] + list(argv),
-                                capture_output=True, text=True)
+        def _setup(*argv, **kw):
+            out = self._runner([_ampremote_exe(), "connect", target] + list(argv),
+                               capture_output=True, text=True)
+            if kw.get("check") and getattr(out, "returncode", 0) != 0:
+                raise PodExecError(argv[0], out.returncode,
+                                   getattr(out, "stdout", ""),
+                                   getattr(out, "stderr", ""))
+            return out
 
         if soft_reset:
             _setup("soft-reset")            # best-effort, own connection
+        # cp and exec are checked: a setup step that failed silently would leave
+        # the session connected to a target that is not in the state asked for.
         for src, dst in (pre_cp or []):
-            _setup("fs", "cp", src, dst)
+            _setup("fs", "cp", src, dst, check=True)
         for code in (pre_exec or []):
-            _setup("exec", code)
+            _setup("exec", code, check=True)
         kwargs = {"log_path": log_path, "on_output": on_output,
                   "unsafe_links": unsafe_links, "reconnect": reconnect}
         if mount is not None:
@@ -1502,15 +1539,10 @@ class Pod:
                 busid = next((p["busid"] for p in _u.ports()
                               if p["port"] in held), None)
                 # Same keys as the attach path below, so a caller never has to
-                # ask which route produced the result before reading it.
-                vid = pid = None
-                try:
-                    for d in _u.list_remote(self._usbip_host()):
-                        if busid is None or d.get("busid") == busid:
-                            vid, pid = d.get("vid"), d.get("pid")
-                            break
-                except Exception:  # noqa: BLE001 - ids are informational here
-                    pass
+                # ask which route produced the result before reading it. Read
+                # locally from sysfs: querying the pod would put a round trip on
+                # the one route whose purpose is to touch nothing.
+                vid, pid = _u.tty_usb_ids(tty)
                 return {"busid": busid, "vid": vid, "pid": pid, "tty": tty,
                         "port": held[0], "already_attached": True}
         if ensure:

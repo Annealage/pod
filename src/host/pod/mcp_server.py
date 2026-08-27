@@ -79,10 +79,14 @@ def handle_pod_register(label: str, match: str = None,
 
 def _open_sessions(label: str = None) -> list:
     """Open sessions in this process, optionally only those for one pod."""
+    # Snapshot the store: another handler thread can insert or pop while this
+    # comprehension runs, and `running` is a property, so iterating the live dict
+    # can raise "dictionary changed size during iteration".
     return [{"session": sid, "label": rec["label"], "device": rec["device"],
              "target": rec["session"].target, "log_path": rec["log_path"],
-             "running": rec["session"].running}
-            for sid, rec in _SESSIONS.items()
+             "running": rec["session"].running,
+             "connected": rec["session"].connected}
+            for sid, rec in list(_SESSIONS.items())
             if label is None or rec["label"] == label]
 
 
@@ -131,22 +135,40 @@ _SESSIONS: dict = {}
 _ID_LEAF_MAX = 24
 
 
+def _device_or_none(device):
+    """The device as the caller spelled it, or None when they gave none.
+
+    Blank is absent, not a device: the session layer falls back to the pod's
+    socket REPL when no device is given, so letting an empty string through would
+    open a pod session wearing a DUT identity.
+    """
+    if device is None:
+        return None
+    device = device.strip()
+    return device or None
+
+
 def _canonical_device(device):
-    """One spelling per physical device, or None for the pod's own REPL.
+    """One spelling per physical device, for KEYING only, or None for the pod.
 
     The two places a DUT tty comes from spell the same device differently: an
     attach resolves the by-id link to its real node, while looking up an
     attachment this host already holds returns the link itself. Keying a session
     on the raw string would give one DUT two ids, and the second open would build
-    a second reader on the same tty. An empty or whitespace device is treated as
-    absent, because passing it through would silently target the pod: the session
-    layer falls back to the pod's socket REPL when no device is given.
+    a second reader on the same tty.
+
+    Only used to derive the id. The session still CONNECTS to the name the caller
+    gave, because a /dev/serial/by-id path carries the device's serial and so
+    survives a re-enumeration that renumbers the raw node.
     """
+    device = _device_or_none(device)
     if device is None:
         return None
-    device = device.strip().rstrip("/")
-    if not device:
-        return None
+    device = device.rstrip("/") or device
+    # Only a filesystem path can be resolved; an mpremote target like
+    # socket://host:port would be rewritten into a cwd-relative path.
+    if not device.startswith("/"):
+        return device
     try:
         return os.path.realpath(device)
     except OSError:
@@ -204,14 +226,15 @@ def _open_session(label: str, log_path: str = None, device: str = None,
     session_close. Re-opening a target already held returns that session with
     already_open set, rather than building a second one against the same device.
     """
-    device = _canonical_device(device)
+    device = _device_or_none(device)
     sid = _session_id(label, device)
     held = _SESSIONS.get(sid)
     if held is not None and held["session"].running:
         s = held["session"]
         return {"session": sid, "label": label, "device": device,
                 "target": s.target, "log_path": held["log_path"],
-                "running": True, "mounted": s.mounted, "already_open": True,
+                "running": True, "connected": s.connected,
+                "mounted": s.mounted, "already_open": True,
                 "note": "session already open; mount/exec/cp/soft_reset args "
                         "were ignored - session_close first to change them"}
     if held is not None:
@@ -275,7 +298,7 @@ def handle_dut_open(label: str, device: str = None, log_path: str = None,
     _open_session for the setup chain and the already-open behaviour.
     """
     result = {}
-    device = _canonical_device(device)
+    device = _device_or_none(device)
     if device is None:
         # Bringing the link up runs code on the pod, which needs the pod's single
         # REPL slot; reusing a link this host already holds does not. So only
@@ -327,12 +350,20 @@ def _dut_session_for(label: str):
     picking a DUT for the caller would silently run their code on the wrong one.
     """
     prefix = "%s:dut:" % label
+    held = [(sid, rec) for sid, rec in list(_SESSIONS.items())
+            if sid.startswith(prefix) and rec["session"].running]
     # `connected` as well as `running`: the reader thread stays alive across a
     # dropped link (that is what reconnect=True means), so `running` alone would
     # route code into a session whose transport has gone away.
-    live = [(sid, rec) for sid, rec in list(_SESSIONS.items())
-            if sid.startswith(prefix) and rec["session"].running
-            and rec["session"].connected]
+    live = [(sid, rec) for sid, rec in held if rec["session"].connected]
+    if not live and held:
+        # The session still owns the tty even while its link is down, so the
+        # attach route is not a fallback: it would race the reconnect, and its
+        # rebuild would detach the link this session is waiting to come back.
+        raise ValueError(
+            "'%s' holds a DUT session (%s) whose link is down; it is "
+            "reconnecting and still owns the tty. Wait, or session_close it "
+            "before running one-shot code." % (label, held[0][0]))
     if not live:
         return None
     if len(live) > 1:
@@ -438,11 +469,15 @@ def _session_exec_line(code: str) -> str:
     reader thread for the stream. The try/except lives inside that string too,
     since a bare one-liner cannot express one.
     """
+    # The leading newline guarantees the sentinel starts a line even when the
+    # body's last print left the cursor mid-line; it is only matched at line
+    # start, because the REPL echoes this whole line back and the echo contains
+    # the sentinel text too.
     body = ("try:\n"
             "    exec(%r)\n"
             "    print(%r)\n"
             "except Exception as _e:\n"
-            "    print(%r, repr(_e))" % (code, _OK, _ERR))
+            "    print(%r, repr(_e))" % (code, "\n" + _OK, "\n" + _ERR))
     return "exec(%r)" % body
 
 

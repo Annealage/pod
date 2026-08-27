@@ -931,6 +931,16 @@ class TestDutExecRouteShape:
         assert "ZeroDivisionError" in r["stderr"]
         assert r["stdout"] == ""
 
+    def test_output_without_a_trailing_newline_still_parses(self, monkeypatch):
+        """The sentinel is only matched at line start, so it has to be printed
+        onto a line of its own even when the body left the cursor mid-line."""
+        code = "print('x', end='')"
+        self._session(monkeypatch,
+                      "%s\r\nx\r\n%s\r\n>>> " % (self._echo(code), m._OK))
+        r = m.handle_dut_exec("lab", code, wait=0)
+        assert r["returncode"] == 0
+        assert r["stdout"] == "x"
+
     def test_silence_is_reported_as_unknown_not_success(self, monkeypatch):
         """No sentinel means the DUT said nothing in time. That is not success:
         reporting 0 here would make a hung DUT look like a clean run."""
@@ -964,23 +974,39 @@ class TestDutExecRouteShape:
 
 
 class TestDutSessionLiveness:
-    def test_a_disconnected_session_is_not_routed_into(self, monkeypatch):
-        """running only says the reader thread is alive, and with reconnect=True it
-        stays alive retrying a tty that has gone away."""
+    def _held(self, monkeypatch, connected):
         sess = MagicMock()
         sess.running = True
-        sess.connected = False              # transport gone
+        sess.connected = connected
         monkeypatch.setitem(
             m._SESSIONS, m._session_id("lab", "/dev/ttyACM0"),
             {"session": sess, "log_path": "/tmp/x.log",
              "device": "/dev/ttyACM0", "label": "lab"})
+        return sess
+
+    def test_a_reconnecting_session_is_neither_used_nor_bypassed(self, monkeypatch):
+        """running only says the reader thread is alive, and with reconnect=True
+        it stays alive retrying a tty that has gone away, so the session must not
+        be written to. Nor is the attach route a fallback: the session still owns
+        the tty, and the attach route's rebuild would detach the link it is
+        waiting on."""
+        sess = self._held(monkeypatch, connected=False)
+        fake = MagicMock()
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake)
+
+        with pytest.raises(ValueError, match="link is down"):
+            m.handle_dut_exec("lab", "print(1)")
+
+        sess.send.assert_not_called()
+        fake.dut_exec.assert_not_called()
+
+    def test_no_session_at_all_still_takes_the_attach_route(self, monkeypatch):
         fake = MagicMock()
         fake.dut_exec.return_value = {"tty": "/dev/ttyACM0", "returncode": 0,
                                       "stdout": "", "stderr": "",
                                       "reattached": True}
         monkeypatch.setattr(m, "_pod_for", lambda label: fake)
         assert m.handle_dut_exec("lab", "print(1)")["via"] == "attach"
-        sess.send.assert_not_called()
 
 
 class TestDeadSessionIsClosedBeforeItsIdIsReused:

@@ -154,6 +154,7 @@ class _FakeSession:
     def __init__(self, target="socket://x:8266"):
         self.target = target
         self.running = True
+        self.connected = True
         self.mounted = False
         self._cursor = 0
         self.sent = []
