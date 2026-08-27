@@ -209,10 +209,13 @@ named so that a tool and its CLI invocation are derivable from each other (`dut_
   return), `pod_open` (persistent session on the pod's socket REPL; holds the pod's single
   REPL slot for its lifetime, excluding every other agent).
 - **`dut_` session - the DUT's own REPL:** `dut_open` (persistent, auto-reconnecting session
-  on the DUT's CDC tty; `recover=true` un-sticks a DUT latched in raw mode first), then
+  on the DUT's CDC tty; brings the USB/IP link up itself when given no device; `recover=true`
+  un-sticks a DUT latched in raw mode first) returns a session id, which
   `session_send` (write stdin, or send Ctrl-C / Ctrl-B / Ctrl-D via `control=`),
-  `session_read` (tail by cursor), `session_close`. `dut_exec` is the named one-shot for a
-  single call.
+  `session_read` (tail by cursor) and `session_close` then take. A pod session and any number
+  of DUT sessions are held at once, each identified by what it is attached to. `dut_exec` is
+  the named one-shot: it runs over an open session when there is one, and otherwise over a
+  fresh attach, reporting which route as `via`.
 - **`dut_` debug over SWD (requires the DUT wired + powered):** `dut_identify` (probe and
   reconcile the wired DUT's SWD identity), `dut_halt`, `dut_resume`, `dut_reg` (reads, or
   writes when `value` is given), `dut_mem` (reads inline or to `out_path`, writes when `data`
