@@ -116,6 +116,12 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   PIO0 (per-SM arbiter claims + per-program PIO teardown), so an agent can watch the
   bus the pod is driving. The risky premise (MicroPython selective `remove_program`)
   is hardware-validated up front; phased A-E with a cross-check gate.
+- `cmsis-flash-completion.md` - finishing the generic CMSIS-FLM flash path and
+  deleting the hand-written native nRF52 driver it was a stand-in for. Covers the
+  FLM resume bug that leaves the DUT parked on the algorithm's breakpoint, the
+  unvalidated host pack-to-algo layer, the dropped FlashDevice timeouts, and the
+  pack-versus-registry geometry question. Native is retained only as the revert
+  tool through the validation steps, then removed.
 
 ### Agent-surface track (execution order)
 
