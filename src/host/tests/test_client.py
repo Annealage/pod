@@ -1543,3 +1543,83 @@ class TestStaleForwardedTtyIsRebuilt:
                             lambda: pytest.fail("rebuilt an explicit tty"))
         res = p.dut_exec("print(1)", tty="/dev/ttyACM0")
         assert res["returncode"] == 1
+
+
+# ── a busy pod is not a broken pod ─────────────────────────────────────────
+
+
+class TestBusyIsNotAFault:
+    """The documented response to an unreachable pod is reset and power-cycle.
+    Against a pod that is merely in use, that destroys another agent's session,
+    so contention has to be classified apart from a transport fault."""
+
+    def test_the_pods_own_busy_line_is_recognised(self):
+        from pod.client import _classify_exec_failure as c
+        reason = c("annealage-pod: BUSY - REPL in use by another client", "")
+        assert "busy" in reason.lower()
+
+    def test_a_dropped_connection_reads_as_contention_not_a_fault(self):
+        """The pod closes the socket on a second REPL client, which is what an
+        agent actually sees when it collides."""
+        from pod.client import _classify_exec_failure as c
+        reason = c("read failed: [Errno 104] Connection reset by peer", "")
+        assert "already in use" in reason
+        assert "raw-REPL entry" not in reason
+
+    def test_genuine_transport_faults_are_still_transport_faults(self):
+        from pod.client import _classify_exec_failure as c
+        assert c("could not enter raw repl", "") == \
+            "raw-REPL entry / connection failed"
+        assert c("operation timed out", "") == "timeout reaching the pod"
+        assert c("Traceback ... ZeroDivisionError", "") == "exception on the pod"
+
+    def test_the_busy_message_warns_against_resetting(self):
+        from pod.client import PodExecError
+        exc = PodExecError("exec", 1, "",
+                           "annealage-pod: BUSY - REPL in use by another client",
+                           caller="agent-b:corona@carbon")
+        assert exc.busy is True
+        text = str(exc)
+        assert "do not reset" in text.lower()
+        assert "agent-b:corona@carbon" in text
+
+    def test_a_real_fault_carries_no_such_hint(self):
+        from pod.client import PodExecError
+        exc = PodExecError("exec", 1, "", "could not enter raw repl")
+        assert exc.busy is False
+        assert "do not reset" not in str(exc).lower()
+
+
+class TestCallerIdentity:
+    """A label, not a credential: nothing checks it and it grants nothing. Its
+    only job is to let a refusal name a party."""
+
+    def test_pod_caller_env_wins(self, monkeypatch):
+        from pod.client import resolve_caller
+        monkeypatch.setenv("POD_CALLER", "agent-a:corona@carbon")
+        monkeypatch.delenv("CLAUDE_NET_AGENT", raising=False)
+        assert resolve_caller() == "agent-a:corona@carbon"
+
+    def test_the_agent_name_wins_over_the_env(self, monkeypatch):
+        from pod.client import resolve_caller
+        monkeypatch.setenv("CLAUDE_NET_AGENT", "usbhost:corona@carbon")
+        monkeypatch.setenv("POD_CALLER", "ignored")
+        assert resolve_caller() == "usbhost:corona@carbon"
+
+    def test_falls_back_to_user_host_pid(self, monkeypatch):
+        from pod.client import resolve_caller
+        monkeypatch.delenv("CLAUDE_NET_AGENT", raising=False)
+        monkeypatch.delenv("POD_CALLER", raising=False)
+        name = resolve_caller()
+        assert "@" in name and "/" in name
+
+    def test_blank_env_does_not_win(self, monkeypatch):
+        from pod.client import resolve_caller
+        monkeypatch.setenv("POD_CALLER", "   ")
+        monkeypatch.delenv("CLAUDE_NET_AGENT", raising=False)
+        assert resolve_caller().strip() != ""
+        assert resolve_caller() != "   "
+
+    def test_a_client_carries_one(self):
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        assert p.caller and isinstance(p.caller, str)
