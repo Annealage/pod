@@ -131,16 +131,39 @@ _SESSIONS: dict = {}
 _ID_LEAF_MAX = 24
 
 
+def _canonical_device(device):
+    """One spelling per physical device, or None for the pod's own REPL.
+
+    The two places a DUT tty comes from spell the same device differently: an
+    attach resolves the by-id link to its real node, while looking up an
+    attachment this host already holds returns the link itself. Keying a session
+    on the raw string would give one DUT two ids, and the second open would build
+    a second reader on the same tty. An empty or whitespace device is treated as
+    absent, because passing it through would silently target the pod: the session
+    layer falls back to the pod's socket REPL when no device is given.
+    """
+    if device is None:
+        return None
+    device = device.strip().rstrip("/")
+    if not device:
+        return None
+    try:
+        return os.path.realpath(device)
+    except OSError:
+        return device
+
+
 def _session_id(label: str, device: str = None) -> str:
     """The session id for a target: `<label>:pod`, or `<label>:dut:<leaf>`.
 
-    The leaf is the device's basename, kept short enough to pass around. A
-    forwarded DUT normally arrives as a /dev/serial/by-id path (usbip prefers
-    those over raw ttyACM nodes because they carry the serial), and those names
-    run to 60+ characters, so a long one is truncated to its tail, which is the
-    part that distinguishes devices, plus a digest of the whole path so two
+    The leaf is the canonical device's basename, kept short enough to pass
+    around. A forwarded DUT normally arrives as a /dev/serial/by-id path (usbip
+    prefers those over raw ttyACM nodes because they carry the serial), and those
+    names run to 60+ characters, so a long one is truncated to its tail, which is
+    the part that distinguishes devices, plus a digest of the whole path so two
     devices sharing a tail cannot collide onto one session.
     """
+    device = _canonical_device(device)
     if device is None:
         return "%s:pod" % label
     leaf = device.rsplit("/", 1)[-1]
@@ -181,6 +204,7 @@ def _open_session(label: str, log_path: str = None, device: str = None,
     session_close. Re-opening a target already held returns that session with
     already_open set, rather than building a second one against the same device.
     """
+    device = _canonical_device(device)
     sid = _session_id(label, device)
     held = _SESSIONS.get(sid)
     if held is not None and held["session"].running:
@@ -190,6 +214,14 @@ def _open_session(label: str, log_path: str = None, device: str = None,
                 "running": True, "mounted": s.mounted, "already_open": True,
                 "note": "session already open; mount/exec/cp/soft_reset args "
                         "were ignored - session_close first to change them"}
+    if held is not None:
+        # Held but not running: close it before the id is reused, so its log file
+        # handle and reader thread are released rather than orphaned.
+        try:
+            held["session"].close()
+        except Exception:  # noqa: BLE001 - already dead, nothing to salvage
+            pass
+        _SESSIONS.pop(sid, None)
     pre_exec = [exec] if isinstance(exec, str) else (list(exec) if exec else None)
     pre_cp = None
     if cp:
@@ -243,6 +275,7 @@ def handle_dut_open(label: str, device: str = None, log_path: str = None,
     _open_session for the setup chain and the already-open behaviour.
     """
     result = {}
+    device = _canonical_device(device)
     if device is None:
         # Bringing the link up runs code on the pod, which needs the pod's single
         # REPL slot; reusing a link this host already holds does not. So only
@@ -250,7 +283,8 @@ def handle_dut_open(label: str, device: str = None, log_path: str = None,
         # sitting on the slot, which would otherwise be refused by the pod and
         # surface as a bare transport error.
         from pod import usbip as _u
-        if not (_pod_for(label).attached_ports() and _u.forwarded_tty()):
+        _pod = _pod_for(label)
+        if not _u.forwarded_tty(_pod.attached_ports()):
             pod_sid = _session_id(label)
             held = _SESSIONS.get(pod_sid)
             if held is not None and held["session"].running:
@@ -293,8 +327,12 @@ def _dut_session_for(label: str):
     picking a DUT for the caller would silently run their code on the wrong one.
     """
     prefix = "%s:dut:" % label
-    live = [(sid, rec) for sid, rec in _SESSIONS.items()
-            if sid.startswith(prefix) and rec["session"].running]
+    # `connected` as well as `running`: the reader thread stays alive across a
+    # dropped link (that is what reconnect=True means), so `running` alone would
+    # route code into a session whose transport has gone away.
+    live = [(sid, rec) for sid, rec in list(_SESSIONS.items())
+            if sid.startswith(prefix) and rec["session"].running
+            and rec["session"].connected]
     if not live:
         return None
     if len(live) > 1:
@@ -385,38 +423,76 @@ def handle_session_close(session: str) -> dict:
     return result
 
 
+# Sentinels the session route has the DUT print around the body, so the outcome
+# comes from the DUT itself rather than from pattern-matching its output.
+_OK = "__pod_exec_ok__"
+_ERR = "__pod_exec_err__"
+
+
+def _session_exec_line(code: str) -> str:
+    """One REPL line that runs `code` on the DUT and reports how it went.
+
+    The body is carried inside a string, so its newlines and indentation never
+    reach the REPL's line discipline and no raw-REPL paste is needed, which
+    matters because entering the raw REPL would contend with the session's own
+    reader thread for the stream. The try/except lives inside that string too,
+    since a bare one-liner cannot express one.
+    """
+    body = ("try:\n"
+            "    exec(%r)\n"
+            "    print(%r)\n"
+            "except Exception as _e:\n"
+            "    print(%r, repr(_e))" % (code, _OK, _ERR))
+    return "exec(%r)" % body
+
+
 def handle_dut_exec(label: str, code: str, wait: float = 1.0) -> dict:
     """Run MicroPython on the DUT once. Prefer dut_open + session_send for more
     than a single call.
 
-    Takes the cheapest route to the DUT that is available, reported as `via`:
+    Takes the cheapest route to the DUT that is available, reported as `via`, and
+    returns the same keys either way: {via, returncode, stdout, stderr, ...}.
 
     - `via="session"` when this process already holds a DUT session for `label`.
       The code goes down that connection, so nothing is attached, detached or
-      settled. `code` is submitted as a single `exec()` line so a multi-line
-      body needs no raw-REPL paste, which means expression values are not
-      echoed the way a bare REPL line would echo them: print what you want
-      back. Output is whatever the DUT wrote within `wait`.
+      settled. The body runs inside an `exec()` on the DUT, which means
+      expression values are not echoed the way a bare REPL line would echo
+      them: print what you want back. `returncode` is 0 when the DUT reported
+      success, 1 when the body raised (`stderr` carries the exception repr), and
+      None when the DUT said nothing within `wait`, which is not the same as
+      success: raise `wait`, or read on with session_read from the returned
+      cursor.
     - `via="attach"` with no session open: bring the link up, attach, then exec
-      over mpremote's raw REPL. This is the slow path, several seconds, because
-      the pod's usbip server is single-import and the fresh CDC tty has to
-      settle. Open a session first if you are going to call more than once.
-
-    Returns {via, ...}: the session routes add `session` and `stdout`, the
-    attach route adds {tty, returncode, stdout, stderr, reattached}.
+      over mpremote's raw REPL, whose returncode is used directly. Several
+      seconds when the link has to be built, because the pod's usbip server is
+      single-import and a fresh CDC tty has to settle.
     """
     found = _dut_session_for(label)
     if found is not None:
         sid, rec = found
-        # A single `exec()` line carries an arbitrary multi-line body through the
-        # friendly REPL without depending on indentation surviving line-by-line
-        # submission, and without entering the raw REPL, which would contend
-        # with the session's own reader thread for the stream.
-        out = _session_write(sid, "exec(%r)" % code, wait=wait)
-        out["via"] = "session"
-        out["session"] = sid
-        out["device"] = rec["device"]
-        return out
+        line = _session_exec_line(code)
+        out = _session_write(sid, line, wait=wait)
+        text = out.get("text", "") or ""
+        # The friendly REPL echoes what it was sent, and that echo contains the
+        # sentinels as part of the source, so they are only meaningful at the
+        # start of a line: that is where the DUT's own print() puts them.
+        echo = line.strip()
+        body, returncode, stderr = [], None, ""
+        for raw in text.splitlines():
+            ln = raw.rstrip("\r")
+            if ln.strip() == echo or ln.strip() in (">>>", "..."):
+                continue
+            if ln.startswith(_ERR):
+                returncode, stderr = 1, ln[len(_ERR):].strip()
+                continue
+            if ln.startswith(_OK):
+                if returncode is None:
+                    returncode = 0
+                continue
+            body.append(ln)
+        stdout = "\n".join(body).strip()
+        return dict(out, via="session", session=sid, device=rec["device"],
+                    returncode=returncode, stdout=stdout, stderr=stderr)
     return dict(_pod_for(label).dut_exec(code), via="attach")
 
 
@@ -1143,13 +1219,19 @@ def build_server():
                     "Run MicroPython on the DUT once. THE NAMED ONE-SHOT: "
                     "for more than a single call open a session with dut_open "
                     "and use session_send. Takes the cheapest available route "
-                    "and reports it as `via`: \"session\" reuses a DUT session "
-                    "this process already holds, attaching nothing (the code is "
-                    "submitted as one exec() line, so print what you want back "
-                    "- expression values are not echoed); \"attach\" brings the "
-                    "link up and attaches, which carries a multi-second floor "
-                    "because the pod's usbip server is single-import and a "
-                    "fresh CDC tty must settle. "
+                    "and reports it as `via`, returning the same keys either "
+                    "way ({via, returncode, stdout, stderr}). \"session\" reuses "
+                    "a DUT session this process already holds, attaching "
+                    "nothing; the body runs inside an exec() on the DUT, so "
+                    "print what you want back because expression values are not "
+                    "echoed, and returncode is null when the DUT said nothing "
+                    "within `wait` (which is NOT success - raise wait, or read "
+                    "on with session_read from the returned cursor). "
+                    "\"attach\" brings the link up and attaches; it reuses an "
+                    "attachment this host already holds, and only pays a "
+                    "multi-second floor when one has to be built, because the "
+                    "pod's usbip server is single-import and a fresh CDC tty "
+                    "must settle. "
                     "For pod-side code use pod_exec instead. The forwarded "
                     "REPL is reliable when the DUT is correctly flashed and "
                     "is not DTR-gated by host ModemManager (run `pod "

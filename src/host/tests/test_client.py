@@ -662,7 +662,7 @@ class TestDutExecTurnkey:
 
     @pytest.fixture(autouse=True)
     def _nothing_attached(self, monkeypatch):
-        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: None)
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
 
     def test_flow_runs_mpremote_on_tty(self, monkeypatch):
         import pod.usbip as u
@@ -1347,7 +1347,7 @@ class TestForwardedLinkIsReused:
     def test_usbip_attach_returns_the_held_attachment(self, monkeypatch):
         p = self._pod()
         monkeypatch.setattr(p, "attached_ports", lambda: [0])
-        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: "/dev/ttyACM6")
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM6")
         monkeypatch.setattr("pod.usbip.ports",
                             lambda **k: [{"port": 0, "remote": "x",
                                           "busid": "1-1"}])
@@ -1371,7 +1371,7 @@ class TestForwardedLinkIsReused:
             return SimpleNamespace(returncode=0, stdout="54\n", stderr="")
 
         p = self._pod(runner)
-        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: "/dev/ttyACM6")
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM6")
         slept = []
         monkeypatch.setattr("pod.client.time.sleep", lambda s: slept.append(s))
         monkeypatch.setattr(p, "usbip_detach",
@@ -1391,7 +1391,7 @@ class TestForwardedLinkIsReused:
             return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
 
         p = self._pod(runner)
-        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: None)
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
         monkeypatch.setattr("pod.usbip.list_remote", lambda *a, **k: [{"busid": "1-1"}])
         monkeypatch.setattr("pod.client.time.sleep", lambda s: None)
         monkeypatch.setattr(p, "usbip_detach", lambda *a, **k: {"detached": []})
@@ -1402,3 +1402,106 @@ class TestForwardedLinkIsReused:
 
         assert res["reattached"] is True
         assert res["tty"] == "/dev/ttyACM9"
+
+
+# ── a forwarded tty is scoped to the pod that forwarded it ─────────────────
+
+
+class TestForwardedTtyIsPodScoped:
+    """Every forwarded device looks alike from a device node, so an unscoped
+    lookup would hand one pod's caller another pod's DUT. The vhci status table
+    maps a port to the local bus address the tty's own sysfs path spells, which
+    is the link between them."""
+
+    STATUS = (
+        "hub port sta spd dev      sockfd local_busid\n"
+        "hs  0000 006 002 00010001 000003 5-1\n"
+        "hs  0001 006 002 00010002 000004 5-2\n"
+        "hs  0002 004 000 00000000 000000 0-0\n"
+    )
+
+    def test_parses_only_ports_in_use(self):
+        from pod import usbip
+        assert usbip.parse_vhci_status(self.STATUS) == {0: "5-1", 1: "5-2"}
+
+    def test_empty_and_garbage_are_tolerated(self):
+        from pod import usbip
+        assert usbip.parse_vhci_status("") == {}
+        assert usbip.parse_vhci_status("header only\n") == {}
+        assert usbip.parse_vhci_status("hub port\nnot a row\n") == {}
+
+    def test_no_ports_means_no_tty(self):
+        from pod import usbip
+        assert usbip.forwarded_tty([], _status={0: "5-1"}) is None
+        assert usbip.forwarded_tty(None, _status={0: "5-1"}) is None
+
+    def test_a_port_this_pod_does_not_hold_is_not_matched(self):
+        from pod import usbip
+        # port 7 is not in the status table at all
+        assert usbip.forwarded_tty([7], _status={0: "5-1"}) is None
+
+
+class TestUsbipAttachShape:
+    def test_already_attached_carries_the_same_keys_as_a_fresh_attach(self, monkeypatch):
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        monkeypatch.setattr(p, "attached_ports", lambda: [0])
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM6")
+        monkeypatch.setattr("pod.usbip.ports",
+                            lambda **k: [{"port": 0, "remote": "x", "busid": "1-1"}])
+        monkeypatch.setattr("pod.usbip.list_remote",
+                            lambda *a, **k: [{"busid": "1-1", "vid": "f055",
+                                              "pid": "9802"}])
+        dev = p.usbip_attach()
+        # the CLI prints dev['vid']/dev['pid'] outside its try block, so a missing
+        # key here is an unhandled traceback rather than a message
+        for key in ("busid", "vid", "pid", "tty"):
+            assert key in dev, key
+        assert dev["already_attached"] is True
+
+    def test_ids_absent_rather_than_fatal_when_the_pod_cannot_be_listed(self, monkeypatch):
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        monkeypatch.setattr(p, "attached_ports", lambda: [0])
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM6")
+        monkeypatch.setattr("pod.usbip.ports", lambda **k: [])
+        monkeypatch.setattr("pod.usbip.list_remote",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+        dev = p.usbip_attach()
+        assert dev["vid"] is None and dev["tty"] == "/dev/ttyACM6"
+
+
+class TestStaleForwardedTtyIsRebuilt:
+    """A device node surviving a DUT re-enumeration is the stale-export case; the
+    reuse fast path must not turn that into a reported DUT error."""
+
+    def test_a_reused_tty_that_fails_is_rebuilt_once(self, monkeypatch):
+        calls = []
+
+        def runner(argv, **kw):
+            calls.append(argv[2])
+            rc = 1 if argv[2] == "/dev/stale" else 0
+            return SimpleNamespace(returncode=rc, stdout="ok\n" if not rc else "",
+                                   stderr="")
+
+        p = Pod(address=ADDRESS, repl_port=PORT, runner=runner)
+        monkeypatch.setattr("pod.client.time.sleep", lambda s: None)
+        monkeypatch.setattr(p, "attached_ports", lambda: [0])
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/stale")
+        monkeypatch.setattr(p, "_rebuild_dut_link", lambda: "/dev/fresh")
+
+        res = p.dut_exec("print(1)")
+
+        assert "/dev/stale" in calls and "/dev/fresh" in calls
+        assert res["tty"] == "/dev/fresh"
+        assert res["reattached"] is True
+        assert res["returncode"] == 0
+
+    def test_an_explicit_tty_is_not_rebuilt(self, monkeypatch):
+        def runner(argv, **kw):
+            return SimpleNamespace(returncode=1, stdout="", stderr="nope")
+
+        p = Pod(address=ADDRESS, repl_port=PORT, runner=runner)
+        monkeypatch.setattr("pod.client.time.sleep", lambda s: None)
+        monkeypatch.setattr(p, "_rebuild_dut_link",
+                            lambda: pytest.fail("rebuilt an explicit tty"))
+        res = p.dut_exec("print(1)", tty="/dev/ttyACM0")
+        assert res["returncode"] == 1
