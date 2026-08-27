@@ -712,6 +712,12 @@ class TestDutExecRoute:
 
 
 class TestDutOpenBringsTheLinkUp:
+    def _link_down(self, monkeypatch):
+        """No attachment held, so a bring-up is genuinely required."""
+        monkeypatch.setattr(m, "_pod_for",
+                            lambda label: MagicMock(attached_ports=lambda: []))
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: None)
+
     def test_device_omitted_brings_the_link_up_and_uses_its_tty(self, monkeypatch):
         opened = {}
         monkeypatch.setattr(m, "handle_dut_link",
@@ -747,11 +753,51 @@ class TestDutOpenBringsTheLinkUp:
         assert "link" not in info
 
     def test_a_bring_up_with_no_tty_is_an_error_not_a_broken_session(self, monkeypatch):
+        self._link_down(monkeypatch)
         monkeypatch.setattr(m, "handle_dut_link",
                             lambda label, action=None, **kw: {"busid": "1-1",
                                                               "tty": None})
         with pytest.raises(RuntimeError, match="no CDC tty"):
             m.handle_dut_open("lab")
+
+    def test_a_bring_up_is_refused_while_our_own_pod_session_holds_the_repl(
+            self, monkeypatch):
+        """Bringing the link up runs code on the pod, so it needs the pod's one
+        REPL slot. Holding that slot ourselves has to be reported as the conflict
+        it is, not left to surface as a transport error from the pod."""
+        self._link_down(monkeypatch)
+        held = MagicMock()
+        held.running = True
+        monkeypatch.setitem(m._SESSIONS, "lab:pod",
+                            {"session": held, "log_path": "/tmp/x.log",
+                             "device": None, "label": "lab"})
+        monkeypatch.setattr(m, "handle_dut_link",
+                            lambda *a, **k: pytest.fail("attempted a bring-up"))
+        with pytest.raises(ValueError, match="holding it"):
+            m.handle_dut_open("lab")
+
+    def test_an_already_attached_link_needs_no_pod_repl(self, monkeypatch):
+        """The converse: with the link already up there is nothing to run on the
+        pod, so a held pod session must not block opening the DUT session."""
+        monkeypatch.setattr(m, "_pod_for",
+                            lambda label: MagicMock(attached_ports=lambda: [0]))
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: "/dev/ttyACM0")
+        held = MagicMock()
+        held.running = True
+        monkeypatch.setitem(m._SESSIONS, "lab:pod",
+                            {"session": held, "log_path": "/tmp/x.log",
+                             "device": None, "label": "lab"})
+        monkeypatch.setattr(m, "handle_dut_link",
+                            lambda label, action=None, **kw: {
+                                "busid": "1-1", "tty": "/dev/ttyACM0",
+                                "already_attached": True})
+        fake = MagicMock()
+        fake.running, fake.target, fake.mounted = True, "/dev/ttyACM0", False
+        monkeypatch.setattr(m, "_open_session",
+                            lambda *a, **k: {"running": True})
+
+        info = m.handle_dut_open("lab")
+        assert info["link"]["already_attached"] is True
 
 
 # ── the tty a caller already holds is not re-attached ──────────────────────

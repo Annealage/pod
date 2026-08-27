@@ -826,6 +826,15 @@ class Pod:
             cursor = sess.tell()
             sess.interrupt()                    # Ctrl-C: break a running program
             time.sleep(settle)
+            # Probe before the Ctrl-B: a CR draws '>>>' from the friendly REPL,
+            # while a raw REPL neither echoes nor executes CR-terminated lines.
+            # The probe is what tells the two apart, because Ctrl-B answers with
+            # the friendly banner either way and so cannot discriminate.
+            probe_cursor = sess.tell()
+            sess.send(b"\r", newline=False)
+            time.sleep(read_wait)
+            probe = sess.read_since(probe_cursor).get("text", "")
+            was_raw = ">>>" not in probe
             sess.send(b"\x02", newline=False)    # Ctrl-B: raw REPL -> friendly
             time.sleep(settle)
             sess.send(b"\r", newline=False)      # nudge a fresh prompt
@@ -835,7 +844,7 @@ class Pod:
             sess.close()
         prompt = ">>>" in text
         return {"ok": True, "device": device, "recovered": prompt,
-                "prompt_seen": prompt, "was_raw": "raw REPL" in text,
+                "prompt_seen": prompt, "was_raw": was_raw,
                 "output": text}
 
     def dut_exec(self, code: str, tty: Optional[str] = None) -> dict:
@@ -845,15 +854,22 @@ class Pod:
         REPL. Returns {tty, returncode, stdout, stderr, reattached}. Distinct
         from exec(), which runs on the POD.
 
-        Given a `tty` the caller already holds, that device is used as-is: no
-        detach, no re-attach, and none of the settle delays those need, which is
-        the difference between a sub-second call and a multi-second one. Without
-        one the full path runs: ensure the pod USB host + usbip server, detach
-        any stale host attachment, wait for the pod's single-import server to
-        release it, and attach afresh. That re-attach is host-side only (no
-        physical re-enumeration), so it does not trip the forwarder wedge.
+        The device is whichever of these is available first, since each avoids
+        work the next one needs: an explicit `tty`; an attachment this host
+        already holds (found from the vhci sysfs path); otherwise the full path,
+        which ensures the pod USB host + usbip server, detaches any stale
+        attachment, waits for the pod's single-import server to release it, and
+        attaches afresh. Only that last route pays the settle delays, which is
+        the difference between a roughly one-second call and a ten-second one.
+        The re-attach is host-side only (no physical re-enumeration), so it does
+        not trip the forwarder wedge.
         """
         from pod import usbip as _u
+        if tty is None:
+            # An attachment this host already holds is the DUT's tty: use it
+            # rather than tearing the link down and rebuilding it, which is what
+            # the settle delays below exist for.
+            tty = _u.forwarded_tty()
         reattached = tty is None
         if tty is None:
             try:
@@ -1440,6 +1456,18 @@ class Pod:
         the list retried, so a consumer recovers without a manual step.
         """
         from pod import usbip as _u
+        # Idempotent: the pod's usbip server allows one import per busid, so a
+        # second attach while this host already holds one is refused with
+        # "Request Failed". Reuse the attachment instead, which also avoids
+        # needing the pod's REPL for ensure_server when there is nothing to do.
+        held = self.attached_ports()
+        if held:
+            tty = _u.forwarded_tty()
+            if tty:
+                busid = next((p["busid"] for p in _u.ports()
+                              if p["port"] in held), None)
+                return {"busid": busid, "tty": tty, "port": held[0],
+                        "already_attached": True}
         if ensure:
             _u.ensure_server(self)
         host = self._usbip_host()

@@ -244,6 +244,22 @@ def handle_dut_open(label: str, device: str = None, log_path: str = None,
     """
     result = {}
     if device is None:
+        # Bringing the link up runs code on the pod, which needs the pod's single
+        # REPL slot; reusing a link this host already holds does not. So only
+        # refuse when a real bring-up is required and our own pod session is
+        # sitting on the slot, which would otherwise be refused by the pod and
+        # surface as a bare transport error.
+        from pod import usbip as _u
+        if not (_pod_for(label).attached_ports() and _u.forwarded_tty()):
+            pod_sid = _session_id(label)
+            held = _SESSIONS.get(pod_sid)
+            if held is not None and held["session"].running:
+                raise ValueError(
+                    "dut_open needs the pod's REPL to bring the USB/IP link up, "
+                    "but '%s' is holding it. Either pass device= (a tty from a "
+                    "link already up, which needs no pod REPL), or bring the "
+                    "link up before opening the pod session, or session_close "
+                    "'%s' first." % (pod_sid, pod_sid))
         link = handle_dut_link(label, action="up")
         device = link.get("tty")
         if not device:
