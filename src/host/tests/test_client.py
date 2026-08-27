@@ -2,6 +2,7 @@
 
 import subprocess
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from pod.client import Pod
@@ -644,6 +645,14 @@ class TestMcpPodExec:
 
 
 class TestDutExecTurnkey:
+    """The rebuild path. Each test pins forwarded_tty to None: without that these
+    read the real host's vhci state, so they would pass or fail depending on
+    whether a DUT happens to be attached to the machine running them."""
+
+    @pytest.fixture(autouse=True)
+    def _nothing_attached(self, monkeypatch):
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: None)
+
     def test_flow_runs_mpremote_on_tty(self, monkeypatch):
         import pod.usbip as u
         monkeypatch.setattr('time.sleep', lambda *a: None)
@@ -923,11 +932,15 @@ class TestRecoverDutRepl:
         assert res["ok"] is True
         assert res["recovered"] is True
         assert res["prompt_seen"] is True
-        # Ctrl-C (interrupt), then Ctrl-B (0x02), then a bare CR, in that order.
+        # Ctrl-C (interrupt), a CR to probe whether the friendly REPL answers,
+        # then Ctrl-B (0x02) to leave raw mode, then a CR to draw a fresh prompt.
+        # The probe has to precede the Ctrl-B: Ctrl-B answers with the friendly
+        # banner from either mode, so only the probe distinguishes them.
         ops = [e for e in events if e[0] in ("interrupt", "send")]
         assert ops[0] == ("interrupt",)
-        assert ops[1] == ("send", b"\x02", False)
-        assert ops[2] == ("send", b"\r", False)
+        assert ops[1] == ("send", b"\r", False)
+        assert ops[2] == ("send", b"\x02", False)
+        assert ops[3] == ("send", b"\r", False)
         assert ("close",) in events            # tty released (DTR restored to opener)
         # Opened non-reconnecting on the given device.
         assert events[0] == ("init", "/dev/ttyACM9", False)
@@ -1253,3 +1266,74 @@ class TestFlmAlgoInstall:
 def _b64_of(algo):
     import base64
     return base64.b64encode(algo["instructions"]).decode("ascii")
+
+
+# ── a link this host already holds is reused, not rebuilt ──────────────────
+
+
+class TestForwardedLinkIsReused:
+    """The pod's usbip server allows one import per busid, so rebuilding a link
+    this host already holds is both refused and pointless. Both the attach and
+    the exec path have to notice."""
+
+    def _pod(self, runner=None):
+        return Pod(address=ADDRESS, repl_port=PORT, runner=runner)
+
+    def test_usbip_attach_returns_the_held_attachment(self, monkeypatch):
+        p = self._pod()
+        monkeypatch.setattr(p, "attached_ports", lambda: [0])
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: "/dev/ttyACM6")
+        monkeypatch.setattr("pod.usbip.ports",
+                            lambda **k: [{"port": 0, "remote": "x",
+                                          "busid": "1-1"}])
+        monkeypatch.setattr("pod.usbip.ensure_server",
+                            lambda *a, **k: pytest.fail("touched the pod REPL"))
+        monkeypatch.setattr("pod.usbip.attach",
+                            lambda *a, **k: pytest.fail("re-imported"))
+
+        dev = p.usbip_attach()
+
+        assert dev["already_attached"] is True
+        assert dev["tty"] == "/dev/ttyACM6"
+        assert dev["busid"] == "1-1"
+        assert dev["port"] == 0
+
+    def test_dut_exec_uses_the_held_tty_without_rebuilding(self, monkeypatch):
+        runs = []
+
+        def runner(argv, **kw):
+            runs.append(argv)
+            return SimpleNamespace(returncode=0, stdout="54\n", stderr="")
+
+        p = self._pod(runner)
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: "/dev/ttyACM6")
+        slept = []
+        monkeypatch.setattr("pod.client.time.sleep", lambda s: slept.append(s))
+        monkeypatch.setattr(p, "usbip_detach",
+                            lambda *a, **k: pytest.fail("detached a live link"))
+        monkeypatch.setattr(p, "usbip_attach",
+                            lambda *a, **k: pytest.fail("re-attached"))
+
+        res = p.dut_exec("print(6*9)")
+
+        assert res["reattached"] is False
+        assert res["tty"] == "/dev/ttyACM6"
+        assert slept == []                      # none of the settle delays run
+        assert runs[0][:3] == ["mpremote", "connect", "/dev/ttyACM6"]
+
+    def test_dut_exec_rebuilds_when_nothing_is_attached(self, monkeypatch):
+        def runner(argv, **kw):
+            return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+        p = self._pod(runner)
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: None)
+        monkeypatch.setattr("pod.usbip.list_remote", lambda *a, **k: [{"busid": "1-1"}])
+        monkeypatch.setattr("pod.client.time.sleep", lambda s: None)
+        monkeypatch.setattr(p, "usbip_detach", lambda *a, **k: {"detached": []})
+        monkeypatch.setattr(p, "usbip_attach",
+                            lambda *a, **k: {"tty": "/dev/ttyACM9"})
+
+        res = p.dut_exec("print(1)")
+
+        assert res["reattached"] is True
+        assert res["tty"] == "/dev/ttyACM9"

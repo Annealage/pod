@@ -141,6 +141,32 @@ def serial_devices():
     return set(glob.glob("/dev/serial/by-id/*")) | set(glob.glob("/dev/ttyACM*"))
 
 
+def forwarded_tty():
+    """The CDC tty of a USB/IP-attached device, or None if nothing is attached.
+
+    A forwarded device hangs off the vhci_hcd platform controller rather than a
+    real PCI USB host, so its sysfs path is what identifies it. VID:PID is not
+    enough on its own: several physically-attached boards can carry the same ids
+    as the DUT, and matching on those would hand back the wrong device.
+
+    Returned as a /dev/serial/by-id path when one resolves to it, since that name
+    survives renumbering, else the raw node.
+    """
+    for node in sorted(glob.glob("/dev/ttyACM*")):
+        try:
+            path = os.path.realpath(
+                "/sys/class/tty/%s/device" % os.path.basename(node))
+        except OSError:
+            continue
+        if "vhci_hcd" not in path:
+            continue
+        for link in sorted(glob.glob("/dev/serial/by-id/*")):
+            if os.path.realpath(link) == os.path.realpath(node):
+                return link
+        return node
+    return None
+
+
 def pick_new_tty(before, after):
     """Choose the device that appeared between two serial_devices() sets (pure).
 
