@@ -804,7 +804,7 @@ class Pod:
             sess.send(b"\r", newline=False)
             time.sleep(read_wait)
             probe = sess.read_since(probe_cursor).get("text", "")
-            was_raw = ">>>" not in probe
+            probe_silent = ">>>" not in probe
             sess.send(b"\x02", newline=False)    # Ctrl-B: raw REPL -> friendly
             time.sleep(settle)
             sess.send(b"\r", newline=False)      # nudge a fresh prompt
@@ -813,9 +813,67 @@ class Pod:
         finally:
             sess.close()
         prompt = ">>>" in text
+        # Two independent signs of raw mode: the DUT printed the raw-REPL banner
+        # (direct evidence), or the probe drew nothing and the Ctrl-B then
+        # produced a prompt (the transition observed). Requiring the transition
+        # alone would misreport a DUT that answers neither as latched when it is
+        # simply unresponsive, which sends the caller down the wrong branch of
+        # the troubleshooting tree.
+        was_raw = "raw REPL" in text or (probe_silent and prompt)
         return {"ok": True, "device": device, "recovered": prompt,
                 "prompt_seen": prompt, "was_raw": was_raw,
                 "output": text}
+
+    def _rebuild_dut_link(self) -> Optional[str]:
+        """Tear the host attachment down and build a fresh one; return its tty.
+
+        Ensures the pod USB host + usbip server if the pod exports nothing, then
+        detaches and re-attaches so the tty is known to be live. The re-attach is
+        host-side only (no physical re-enumeration), so it does not trip the
+        forwarder wedge. This is also the recovery for a stale export: the DUT
+        re-enumerated while the vhci port stayed attached, leaving a device node
+        that no longer answers.
+        """
+        from pod import usbip as _u
+        try:
+            exported = _u.list_remote(self._usbip_host())
+        except Exception:  # noqa: BLE001 - server not up yet
+            exported = []
+        if not exported:
+            _u.ensure_server(self)
+        self.usbip_detach()                       # clear any stale attachment
+        # The pod's usbip server is single-import; give it a moment to release
+        # the prior attachment (on TCP teardown) before the new OP_IMPORT, else
+        # it answers "Request Failed".
+        time.sleep(1.5)
+        return self.usbip_attach(ensure=False).get("tty")
+
+    def _dut_exec_on(self, tty: str, code: str, settle: bool) -> dict:
+        """Run `code` over mpremote on `tty`. Returns {returncode, stdout, stderr}.
+
+        settle=True waits before the first attempt, which a freshly-enumerated CDC
+        tty needs before it answers the raw-REPL handshake; a tty already up does
+        not. Either way the transient "could not enter raw repl" that occurs when
+        mpremote races the cdc_acm bind is retried.
+        """
+        last_err = ""
+        for attempt in range(3):
+            if settle or attempt:
+                time.sleep(1.0)
+            try:
+                out = self._runner(
+                    ["mpremote", "connect", tty, "resume", "exec", code],
+                    capture_output=True, text=True, timeout=20)
+            except _subprocess.TimeoutExpired:
+                last_err = "mpremote timed out talking to %s" % tty
+                continue
+            if getattr(out, "returncode", 0) == 0 or \
+                    "raw repl" not in (getattr(out, "stderr", "") or "").lower():
+                return {"returncode": getattr(out, "returncode", 0),
+                        "stdout": getattr(out, "stdout", ""),
+                        "stderr": getattr(out, "stderr", "")}
+        return {"returncode": 1, "stdout": "", "stderr": last_err or
+                "mpremote could not enter the raw REPL on %s" % tty}
 
     def dut_exec(self, code: str, tty: Optional[str] = None) -> dict:
         """Run MicroPython on the DUT (turnkey) and return its stdout.
@@ -824,67 +882,37 @@ class Pod:
         REPL. Returns {tty, returncode, stdout, stderr, reattached}. Distinct
         from exec(), which runs on the POD.
 
-        The device is whichever of these is available first, since each avoids
-        work the next one needs: an explicit `tty`; an attachment this host
-        already holds (found from the vhci sysfs path); otherwise the full path,
-        which ensures the pod USB host + usbip server, detaches any stale
-        attachment, waits for the pod's single-import server to release it, and
-        attaches afresh. Only that last route pays the settle delays, which is
+        The device is whichever is available first, since each avoids work the
+        next one needs: an explicit `tty`; an attachment THIS pod already holds,
+        found by matching its vhci port against the pod's own; otherwise a fresh
+        attachment, which is the only route that pays the settle delays and so
         the difference between a roughly one-second call and a ten-second one.
-        The re-attach is host-side only (no physical re-enumeration), so it does
-        not trip the forwarder wedge.
+
+        A reused attachment that turns out not to answer is rebuilt once and
+        retried, since a device node surviving a DUT re-enumeration is exactly
+        the stale-export case rebuilding recovers. An explicitly passed `tty` is
+        taken at its word and fails without a rebuild.
         """
         from pod import usbip as _u
+        explicit = tty is not None
         if tty is None:
-            # An attachment this host already holds is the DUT's tty: use it
-            # rather than tearing the link down and rebuilding it, which is what
-            # the settle delays below exist for.
-            tty = _u.forwarded_tty()
+            tty = _u.forwarded_tty(self.attached_ports())
+        reused = tty is not None and not explicit
         reattached = tty is None
         if tty is None:
-            try:
-                exported = _u.list_remote(self._usbip_host())
-            except Exception:  # noqa: BLE001 - server not up yet
-                exported = []
-            if not exported:
-                _u.ensure_server(self)
-            self.usbip_detach()                   # clear any stale host attachment
-            # The pod's usbip server is single-import; give it a moment to
-            # release the prior attachment (on TCP teardown) before the new
-            # OP_IMPORT, else it answers "Request Failed".
-            time.sleep(1.5)
-            dev = self.usbip_attach(ensure=False)  # fresh attach -> known tty
-            tty = dev.get("tty")
+            tty = self._rebuild_dut_link()
         if not tty:
             raise RuntimeError("DUT attached but no CDC tty appeared")
-        # A freshly-enumerated CDC tty needs a moment before it answers the
-        # raw-REPL handshake, so the re-attach path settles before each attempt;
-        # a tty this host was already holding is up and needs no settle. Either
-        # way, retry the transient "could not enter raw repl" that occurs if
-        # mpremote races the cdc_acm bind.
-        out = None
-        last_err = ""
-        for attempt in range(3):
-            if reattached or attempt:
-                time.sleep(1.0)
-            try:
-                out = self._runner(
-                    ["mpremote", "connect", tty, "resume", "exec", code],
-                    capture_output=True, text=True, timeout=20)
-            except _subprocess.TimeoutExpired:
-                last_err = "mpremote timed out talking to %s" % tty
-                out = None
-                continue
-            if getattr(out, "returncode", 0) == 0 or \
-                    "raw repl" not in (getattr(out, "stderr", "") or "").lower():
-                break
-        if out is None:
-            return {"tty": tty, "returncode": 1, "stdout": "", "stderr": last_err,
-                    "reattached": reattached}
-        return {"tty": tty, "returncode": getattr(out, "returncode", 0),
-                "stdout": getattr(out, "stdout", ""),
-                "stderr": getattr(out, "stderr", ""),
-                "reattached": reattached}
+
+        res = self._dut_exec_on(tty, code, settle=reattached)
+        if res["returncode"] != 0 and reused:
+            # The reused node did not answer: rebuild and try once more, so a
+            # stale export is recovered rather than reported as the DUT's error.
+            fresh = self._rebuild_dut_link()
+            if fresh:
+                tty, reattached = fresh, True
+                res = self._dut_exec_on(tty, code, settle=True)
+        return dict(res, tty=tty, reattached=reattached)
 
     def pinmap(self) -> dict:
         """Report the pod's own DUT-facing GPIO assignments (SWD/nRST/I2C-target).
@@ -1143,14 +1171,21 @@ class Pod:
         after connecting instead.
         """
         from pod import session as _session
-        if soft_reset:
-            # The ampremote soft-reset verb (own connection); best-effort.
-            self._runner(self._argv("soft-reset"), capture_output=True, text=True)
-        for src, dst in (pre_cp or []):
-            self.cp(src, dst)
-        for code in (pre_exec or []):
-            self.exec(code)
         target = device or self._resolver.ampremote_target(self.repl_port)
+
+        # The setup chain runs against the SESSION'S target, so a DUT session
+        # sets up the DUT. Routing it through self.exec()/self.cp() would send
+        # it to the pod regardless of which target the session then connects to.
+        def _setup(*argv):
+            return self._runner(["ampremote", "connect", target] + list(argv),
+                                capture_output=True, text=True)
+
+        if soft_reset:
+            _setup("soft-reset")            # best-effort, own connection
+        for src, dst in (pre_cp or []):
+            _setup("fs", "cp", src, dst)
+        for code in (pre_exec or []):
+            _setup("exec", code)
         kwargs = {"log_path": log_path, "on_output": on_output,
                   "unsafe_links": unsafe_links, "reconnect": reconnect}
         if mount is not None:
@@ -1432,12 +1467,22 @@ class Pod:
         # needing the pod's REPL for ensure_server when there is nothing to do.
         held = self.attached_ports()
         if held:
-            tty = _u.forwarded_tty()
+            tty = _u.forwarded_tty(held)
             if tty:
                 busid = next((p["busid"] for p in _u.ports()
                               if p["port"] in held), None)
-                return {"busid": busid, "tty": tty, "port": held[0],
-                        "already_attached": True}
+                # Same keys as the attach path below, so a caller never has to
+                # ask which route produced the result before reading it.
+                vid = pid = None
+                try:
+                    for d in _u.list_remote(self._usbip_host()):
+                        if busid is None or d.get("busid") == busid:
+                            vid, pid = d.get("vid"), d.get("pid")
+                            break
+                except Exception:  # noqa: BLE001 - ids are informational here
+                    pass
+                return {"busid": busid, "vid": vid, "pid": pid, "tty": tty,
+                        "port": held[0], "already_attached": True}
         if ensure:
             _u.ensure_server(self)
         host = self._usbip_host()

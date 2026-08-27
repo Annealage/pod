@@ -141,17 +141,65 @@ def serial_devices():
     return set(glob.glob("/dev/serial/by-id/*")) | set(glob.glob("/dev/ttyACM*"))
 
 
-def forwarded_tty():
-    """The CDC tty of a USB/IP-attached device, or None if nothing is attached.
+def parse_vhci_status(text):
+    """Parse vhci_hcd's status table into {port: local_busid}, in-use only (pure).
+
+    The table is one row per virtual port, `hub port sta spd dev sockfd
+    local_busid` under a header line. A free port carries local_busid `0-0`.
+    local_busid is the LOCAL bus address the forwarded device was given (e.g.
+    `5-1`), which is what a tty's own sysfs path spells, so it is the link
+    between a vhci port and the device node it produced.
+    """
+    out = {}
+    for line in (text or "").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 7:
+            continue
+        try:
+            port = int(fields[1])
+        except ValueError:
+            continue
+        busid = fields[6]
+        if busid and busid != "0-0":
+            out[port] = busid
+    return out
+
+
+def vhci_status():
+    """{port: local_busid} for every in-use vhci port, or {} if unreadable."""
+    out = {}
+    for path in sorted(glob.glob("/sys/devices/platform/vhci_hcd*/status")):
+        try:
+            with open(path) as fh:
+                out.update(parse_vhci_status(fh.read()))
+        except OSError:
+            continue
+    return out
+
+
+def forwarded_tty(ports, _status=None):
+    """The CDC tty of a device attached on one of `ports`, or None.
+
+    `ports` is the vhci port list for ONE pod (Pod.attached_ports()). It is
+    required rather than defaulted because an unscoped answer is unsafe: several
+    pods can forward at once, and every forwarded device looks alike from a
+    tty's perspective, so a global "first vhci tty" would hand one pod's caller
+    another pod's DUT.
 
     A forwarded device hangs off the vhci_hcd platform controller rather than a
-    real PCI USB host, so its sysfs path is what identifies it. VID:PID is not
-    enough on its own: several physically-attached boards can carry the same ids
-    as the DUT, and matching on those would hand back the wrong device.
+    real PCI USB host, and its sysfs path spells the local bus address that
+    vhci's status table maps the port to, which is how the two are matched.
+    VID:PID cannot do this: physically-attached boards can carry the DUT's ids.
 
     Returned as a /dev/serial/by-id path when one resolves to it, since that name
     survives renumbering, else the raw node.
     """
+    if not ports:
+        return None
+    status = vhci_status() if _status is None else _status
+    wanted = {status[p] for p in ports if p in status}
+    if not wanted:
+        return None
     for node in sorted(glob.glob("/dev/ttyACM*")):
         try:
             path = os.path.realpath(
@@ -159,6 +207,9 @@ def forwarded_tty():
         except OSError:
             continue
         if "vhci_hcd" not in path:
+            continue
+        # .../vhci_hcd.0/usb5/5-1/5-1:1.0 -> the local busid is the 5-1 element
+        if not any(("/%s/" % b) in path + "/" for b in wanted):
             continue
         for link in sorted(glob.glob("/dev/serial/by-id/*")):
             if os.path.realpath(link) == os.path.realpath(node):

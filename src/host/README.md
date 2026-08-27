@@ -254,9 +254,17 @@ same verbs: `session_send`, `session_read`, `session_close`.
 
 A pod session holds the pod's single socket-REPL slot for its lifetime, so while
 it is open use `session_send` rather than `pod_exec`, which would contend for the
-slot. One label carries one session, so opening a DUT session against a label
-that already holds a pod session is refused rather than silently returning the
-pod's.
+slot. A DUT session rides the DUT's own tty, so a pod session and any number of
+DUT sessions coexist; each is identified by the session id its open call returns,
+derived from what it is attached to (`<label>:pod`, `<label>:dut:<tty>`), so
+re-opening the same target hands back the session already held.
+
+Two consequences worth knowing. Bringing the USB/IP link up runs code on the pod,
+so `dut_open` with no `device` needs that same REPL slot: with a pod session open,
+either pass a `device` from a link already up, or bring the link up first. And the
+session store is per-process, so what a session listing shows is this process's
+own sessions, not the pod's state; another agent's sessions are invisible here and
+an empty list does not mean the pod is free.
 
 Chain mpremote-style setup before the connect (like `mpremote mount ./fw exec
 "..." repl`): `--mount DIR` / `--exec CODE` / `--cp SRC DST` / `--soft-reset`

@@ -716,7 +716,7 @@ class TestDutOpenBringsTheLinkUp:
         """No attachment held, so a bring-up is genuinely required."""
         monkeypatch.setattr(m, "_pod_for",
                             lambda label: MagicMock(attached_ports=lambda: []))
-        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: None)
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
 
     def test_device_omitted_brings_the_link_up_and_uses_its_tty(self, monkeypatch):
         opened = {}
@@ -781,7 +781,7 @@ class TestDutOpenBringsTheLinkUp:
         pod, so a held pod session must not block opening the DUT session."""
         monkeypatch.setattr(m, "_pod_for",
                             lambda label: MagicMock(attached_ports=lambda: [0]))
-        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda: "/dev/ttyACM0")
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM0")
         held = MagicMock()
         held.running = True
         monkeypatch.setitem(m._SESSIONS, "lab:pod",
@@ -829,26 +829,28 @@ class TestPodDutExecReusesAKnownTty:
 
 
 class TestSessionIdStaysPassable:
-    """usbip prefers /dev/serial/by-id paths, whose names run to 60+ characters,
-    so the by-id case is the normal one for a forwarded DUT rather than an edge
-    case. The id has to stay short enough to hand around without losing the part
-    that tells two devices apart."""
+    """A session id has to name one device unambiguously and stay short enough to
+    hand around. Ids key on the CANONICAL device, so the same tty spelled two ways
+    is one session; a device path that does not resolve is used as written, and a
+    long one is truncated with a digest so two devices cannot share an id."""
 
-    BY_ID = ("/dev/serial/by-id/usb-Raspberry_Pi_Debugprobe_on_Pico__"
-             "CMSIS-DAP__0501083219160908-if01")
+    # Deliberately a path that exists on no host, so realpath leaves it alone and
+    # the test measures the truncation rather than the machine it runs on.
+    SYNTH = ("/dev/serial/by-id/usb-SynthVendor_SynthBoard_"
+             "0501083219160908-if01")
 
     def test_a_short_tty_is_left_readable(self):
         assert m._session_id("lab", "/dev/ttyACM0") == "lab:dut:ttyACM0"
 
-    def test_a_by_id_path_is_bounded(self):
-        sid = m._session_id("lab", self.BY_ID)
+    def test_an_unresolvable_long_path_is_bounded(self):
+        sid = m._session_id("lab", self.SYNTH)
         assert len(sid) < 45, sid
         # the serial and the interface are what distinguish devices; keep them
         assert "0501083219160908" in sid
         assert "if01" in sid
 
     def test_ids_are_stable_across_calls(self):
-        assert m._session_id("lab", self.BY_ID) == m._session_id("lab", self.BY_ID)
+        assert m._session_id("lab", self.SYNTH) == m._session_id("lab", self.SYNTH)
 
     def test_devices_sharing_a_tail_do_not_collide(self):
         a = "/dev/serial/by-id/usb-VendorAlpha_Widget_0000000000000001-if00"
@@ -856,7 +858,145 @@ class TestSessionIdStaysPassable:
         assert a[-24:] == b[-24:]              # same tail, different device
         assert m._session_id("lab", a) != m._session_id("lab", b)
 
+    def test_one_device_spelled_two_ways_is_one_session(self, tmp_path):
+        """The attach path resolves a by-id link to its real node while looking up
+        a held attachment returns the link, so keying on the raw string would give
+        one DUT two ids and open a second reader on the same tty."""
+        node = tmp_path / "ttyACM9"
+        node.write_text("")
+        link = tmp_path / "by-id-alias"
+        link.symlink_to(node)
+        assert m._session_id("lab", str(link)) == m._session_id("lab", str(node))
+
+    def test_an_empty_device_is_not_a_dut(self):
+        """Empty must read as absent: the session layer falls back to the pod's
+        socket REPL when no device is given, so passing it through would open a
+        pod session wearing a DUT id."""
+        for blank in ("", "   ", None):
+            assert m._session_id("lab", blank) == "lab:pod"
+
+    def test_a_trailing_slash_is_the_same_device(self):
+        assert m._session_id("lab", "/dev/ttyACM0/") == \
+            m._session_id("lab", "/dev/ttyACM0")
+
     def test_the_log_path_inherits_the_bound(self):
-        assert len(m._default_repl_log("lab", self.BY_ID)) < 80
+        assert len(m._default_repl_log("lab", self.SYNTH)) < 80
         assert m._default_repl_log("lab", None) != \
-            m._default_repl_log("lab", self.BY_ID)
+            m._default_repl_log("lab", self.SYNTH)
+
+
+
+
+# ── the two dut_exec routes report the same way ────────────────────────────
+
+
+class TestDutExecRouteShape:
+    """The session route used to return the DUT's output as `text` with no status,
+    so a traceback on the DUT was indistinguishable from success."""
+
+    def _session(self, monkeypatch, text):
+        sess = MagicMock()
+        sess.running = True
+        sess.connected = True
+        sess.target = "/dev/ttyACM0"
+        sess.tell.return_value = 0
+        sess.send.return_value = 1
+        sess.read_since.return_value = {"text": text, "cursor": len(text),
+                                        "dropped": 0}
+        monkeypatch.setitem(
+            m._SESSIONS, m._session_id("lab", "/dev/ttyACM0"),
+            {"session": sess, "log_path": "/tmp/x.log",
+             "device": "/dev/ttyACM0", "label": "lab"})
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock())
+        return sess
+
+    def _echo(self, code):
+        return m._session_exec_line(code)
+
+    def test_success_reports_zero_and_clean_stdout(self, monkeypatch):
+        code = "print(6*7)"
+        self._session(monkeypatch, "%s\r\n42\r\n%s\r\n>>> " % (self._echo(code), m._OK))
+        r = m.handle_dut_exec("lab", code, wait=0)
+        assert r["via"] == "session"
+        assert r["returncode"] == 0
+        assert r["stdout"] == "42"          # echo, sentinel and prompt stripped
+        assert r["stderr"] == ""
+
+    def test_a_raising_body_reports_nonzero_with_the_exception(self, monkeypatch):
+        code = "1/0"
+        self._session(monkeypatch, "%s\r\n%s ZeroDivisionError('divide by zero',)\r\n>>> "
+                      % (self._echo(code), m._ERR))
+        r = m.handle_dut_exec("lab", code, wait=0)
+        assert r["returncode"] == 1
+        assert "ZeroDivisionError" in r["stderr"]
+        assert r["stdout"] == ""
+
+    def test_silence_is_reported_as_unknown_not_success(self, monkeypatch):
+        """No sentinel means the DUT said nothing in time. That is not success:
+        reporting 0 here would make a hung DUT look like a clean run."""
+        self._session(monkeypatch, "")
+        r = m.handle_dut_exec("lab", "print(1)", wait=0)
+        assert r["returncode"] is None
+
+    def test_the_echoed_command_does_not_trip_the_sentinels(self, monkeypatch):
+        """The friendly REPL echoes what it was sent, and the echo contains both
+        sentinels as part of the source, so they only count at line start."""
+        code = "print(1)"
+        self._session(monkeypatch, "%s\r\n1\r\n%s\r\n>>> " % (self._echo(code), m._OK))
+        r = m.handle_dut_exec("lab", code, wait=0)
+        assert r["returncode"] == 0
+        assert m._OK not in r["stdout"] and m._ERR not in r["stdout"]
+        assert "exec(" not in r["stdout"]
+
+    def test_both_routes_share_their_result_keys(self, monkeypatch):
+        code = "print(1)"
+        self._session(monkeypatch, "%s\r\n1\r\n%s\r\n>>> " % (self._echo(code), m._OK))
+        sess_keys = set(m.handle_dut_exec("lab", code, wait=0))
+        m._SESSIONS.clear()
+        fake = MagicMock()
+        fake.dut_exec.return_value = {"tty": "/dev/ttyACM0", "returncode": 0,
+                                      "stdout": "1\n", "stderr": "",
+                                      "reattached": False}
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake)
+        att_keys = set(m.handle_dut_exec("lab", code))
+        for key in ("via", "returncode", "stdout", "stderr"):
+            assert key in sess_keys and key in att_keys, key
+
+
+class TestDutSessionLiveness:
+    def test_a_disconnected_session_is_not_routed_into(self, monkeypatch):
+        """running only says the reader thread is alive, and with reconnect=True it
+        stays alive retrying a tty that has gone away."""
+        sess = MagicMock()
+        sess.running = True
+        sess.connected = False              # transport gone
+        monkeypatch.setitem(
+            m._SESSIONS, m._session_id("lab", "/dev/ttyACM0"),
+            {"session": sess, "log_path": "/tmp/x.log",
+             "device": "/dev/ttyACM0", "label": "lab"})
+        fake = MagicMock()
+        fake.dut_exec.return_value = {"tty": "/dev/ttyACM0", "returncode": 0,
+                                      "stdout": "", "stderr": "",
+                                      "reattached": True}
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake)
+        assert m.handle_dut_exec("lab", "print(1)")["via"] == "attach"
+        sess.send.assert_not_called()
+
+
+class TestDeadSessionIsClosedBeforeItsIdIsReused:
+    def test_replacing_a_stopped_session_closes_it(self, monkeypatch):
+        dead = MagicMock()
+        dead.running = False
+        monkeypatch.setitem(
+            m._SESSIONS, "lab:pod",
+            {"session": dead, "log_path": "/tmp/x.log", "device": None,
+             "label": "lab"})
+        fresh = MagicMock()
+        fresh.running, fresh.target, fresh.mounted = True, "socket://x", False
+        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock(
+            open_session=lambda **kw: fresh))
+
+        m.handle_pod_open("lab")
+
+        dead.close.assert_called_once()     # log handle released, not orphaned
+        assert m._SESSIONS["lab:pod"]["session"] is fresh
