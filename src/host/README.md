@@ -66,9 +66,13 @@ The device under test:
 
 ```
 pod dut identify <label> [--dut-* ...] [--adopt]   show / set / verify the wired DUT
-pod dut open <label> <device> [--recover] [--log FILE] [--mount DIR] [--exec CODE] [--cp SRC DST]
-                                      persistent session on the DUT's CDC tty; --recover un-sticks a
-                                      DUT latched in raw mode (Ctrl-C + Ctrl-B) before connecting
+pod dut open <label> [device] [--recover] [--log FILE] [--mount DIR] [--exec CODE] [--cp SRC DST]
+                                      persistent session on the DUT's CDC tty. Omit the device to
+                                      bring the USB/IP link up and use the tty it returns, which
+                                      activates the pod USB host and can disturb its Wi-Fi.
+                                      --recover un-sticks a DUT latched in raw mode (Ctrl-C +
+                                      Ctrl-B) before connecting. Setup chained with --exec/--cp/
+                                      --soft-reset runs on the DUT, not the pod
 pod dut exec <label> "<code>"         run MicroPython on the DUT once
 pod dut flash <label> <image> [--addr 0xADDR] [--target T] [--loader native|flm]
 pod dut erase <label> [--loader native|flm]        erase the entire DUT flash
@@ -212,12 +216,12 @@ an agent drives the hardware loop with the same verbs:
 | `pod_info` | registry info for a label, plus this process's open sessions |
 | `pod_exec` | run MicroPython on the pod's own interpreter |
 | `pod_mount` | mount a host directory on a pod (one-shot; unmounts on return) |
-| `pod_open` | persistent session on the pod's socket REPL |
-| `dut_open` | persistent, auto-reconnecting session on the DUT's CDC tty (`recover` un-sticks a raw-latched DUT first; chain mount/exec/cp/soft_reset) |
-| `session_send` | write to the session's stdin and read back its output, or send Ctrl-C / Ctrl-B / Ctrl-D via `control` |
-| `session_read` | tail the session's buffered stdout by cursor |
-| `session_close` | close the session, leaving the target running |
-| `dut_exec` | run MicroPython on the DUT once |
+| `pod_open` | persistent session on the pod's socket REPL; returns the session id the `session_*` verbs take |
+| `dut_open` | persistent, auto-reconnecting session on the DUT's CDC tty, returning its session id. With no `device` it brings the USB/IP link up and uses that tty. `recover` un-sticks a raw-latched DUT first; `mount`/`exec`/`cp`/`soft_reset` chain setup on the DUT |
+| `session_send` | write to a session's stdin (by session id) and read back its output, or send Ctrl-C / Ctrl-B / Ctrl-D via `control` |
+| `session_read` | tail that session's buffered stdout by cursor |
+| `session_close` | close it, leaving the target running |
+| `dut_exec` | run MicroPython on the DUT once, over an open session when there is one and otherwise over a fresh attach; reports which as `via`, with `returncode` either way |
 | `dut_identify` | show, set, or verify the wired DUT (declared vs live IDs) |
 | `dut_halt` / `dut_resume` | halt/resume the DUT core over SWD (no auto-resume; halt freezes the DUT) |
 | `dut_reg` | read a core register over SWD, or write it when `value` is given (core must be halted) |
