@@ -70,8 +70,10 @@ and naming conventions.
   attribution + anti-bump gate; the one to build first), `bench-lease.md`
   (multi-agent DUT checkout, sequenced after it), `mcp-surface.md` (MCP tool
   reorg: pod_/dut_/bench_ namespaces, session-first DUT access),
-  `carrier-hardware.md` (custom-carrier feature spec), and
-  `resume-after-power-cycle.md` (brick-recovery runbook).
+  `cmsis-flash-completion.md` (finish the generic CMSIS-FLM flash path, then
+  delete the native nRF52 driver it stood in for), `carrier-hardware.md`
+  (custom-carrier feature spec), and `resume-after-power-cycle.md`
+  (brick-recovery runbook).
   Dynamic plan: each phase ends at a hardware-validated gate, then the remainder is
   re-cut. Development happens on the `main` branch (the `rp2350-pivot` branch was
   promoted to `main`).

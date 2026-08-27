@@ -121,6 +121,12 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   Also carries the recompose gates for getting any upstream fix into the pod's
   firmware, and the separate by-design limitation that a busy device cannot be
   interrupted over the socket REPL at all.
+- `cmsis-flash-completion.md` - finishing the generic CMSIS-FLM flash path and
+  deleting the hand-written native nRF52 driver it was a stand-in for. Covers the
+  FLM resume bug that leaves the DUT parked on the algorithm's breakpoint, the
+  unvalidated host pack-to-algo layer, the dropped FlashDevice timeouts, and the
+  pack-versus-registry geometry question. Native is retained only as the revert
+  tool through the validation steps, then removed.
 
 ### Agent-surface track (execution order)
 
