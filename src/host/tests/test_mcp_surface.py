@@ -780,3 +780,37 @@ class TestPodDutExecReusesAKnownTty:
         assert result["stdout"] == "42\n"
         assert slept == []                      # no settle delays at all
         assert runs[0][:4] == ["mpremote", "connect", "/dev/ttyACM0", "resume"]
+
+
+class TestSessionIdStaysPassable:
+    """usbip prefers /dev/serial/by-id paths, whose names run to 60+ characters,
+    so the by-id case is the normal one for a forwarded DUT rather than an edge
+    case. The id has to stay short enough to hand around without losing the part
+    that tells two devices apart."""
+
+    BY_ID = ("/dev/serial/by-id/usb-Raspberry_Pi_Debugprobe_on_Pico__"
+             "CMSIS-DAP__0501083219160908-if01")
+
+    def test_a_short_tty_is_left_readable(self):
+        assert m._session_id("lab", "/dev/ttyACM0") == "lab:dut:ttyACM0"
+
+    def test_a_by_id_path_is_bounded(self):
+        sid = m._session_id("lab", self.BY_ID)
+        assert len(sid) < 45, sid
+        # the serial and the interface are what distinguish devices; keep them
+        assert "0501083219160908" in sid
+        assert "if01" in sid
+
+    def test_ids_are_stable_across_calls(self):
+        assert m._session_id("lab", self.BY_ID) == m._session_id("lab", self.BY_ID)
+
+    def test_devices_sharing_a_tail_do_not_collide(self):
+        a = "/dev/serial/by-id/usb-VendorAlpha_Widget_0000000000000001-if00"
+        b = "/dev/serial/by-id/usb-VendorBeta_Gadget_0000000000000001-if00"
+        assert a[-24:] == b[-24:]              # same tail, different device
+        assert m._session_id("lab", a) != m._session_id("lab", b)
+
+    def test_the_log_path_inherits_the_bound(self):
+        assert len(m._default_repl_log("lab", self.BY_ID)) < 80
+        assert m._default_repl_log("lab", None) != \
+            m._default_repl_log("lab", self.BY_ID)

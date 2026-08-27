@@ -20,6 +20,7 @@ the mcp package is absent. build_server() is only called from main().
 """
 
 import asyncio
+import hashlib
 import os
 import sys
 import tempfile
@@ -127,19 +128,35 @@ def handle_pod_mount(label: str, directory: str) -> str:
 _SESSIONS: dict = {}
 
 
+_ID_LEAF_MAX = 24
+
+
 def _session_id(label: str, device: str = None) -> str:
-    """The session id for a target: `<label>:pod`, or `<label>:dut:<tty>`."""
+    """The session id for a target: `<label>:pod`, or `<label>:dut:<leaf>`.
+
+    The leaf is the device's basename, kept short enough to pass around. A
+    forwarded DUT normally arrives as a /dev/serial/by-id path (usbip prefers
+    those over raw ttyACM nodes because they carry the serial), and those names
+    run to 60+ characters, so a long one is truncated to its tail, which is the
+    part that distinguishes devices, plus a digest of the whole path so two
+    devices sharing a tail cannot collide onto one session.
+    """
     if device is None:
         return "%s:pod" % label
-    return "%s:dut:%s" % (label, device.rsplit("/", 1)[-1])
+    leaf = device.rsplit("/", 1)[-1]
+    if len(leaf) > _ID_LEAF_MAX:
+        digest = hashlib.sha1(device.encode()).hexdigest()[:4]
+        leaf = "%s.%s" % (leaf[-_ID_LEAF_MAX:], digest)
+    return "%s:dut:%s" % (label, leaf)
 
 
 def _default_repl_log(label: str, device: str = None) -> str:
-    # One log per session, so a pod session and a DUT session on the same pod
-    # do not interleave into one file.
-    leaf = "pod" if device is None else "dut-%s" % device.rsplit("/", 1)[-1]
-    return os.path.join(tempfile.gettempdir(),
-                        "pod-repl-%s-%s.log" % (label, leaf))
+    # Named from the session id, so one log per session (a pod session and a DUT
+    # session on the same pod never interleave into one file) and the filename
+    # inherits the id's length bound.
+    return os.path.join(
+        tempfile.gettempdir(),
+        "pod-repl-%s.log" % _session_id(label, device).replace(":", "-"))
 
 
 def _open_session(label: str, log_path: str = None, device: str = None,
