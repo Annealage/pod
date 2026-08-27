@@ -1,10 +1,16 @@
 # MCP surface: subject-first namespaces, sessions by default
 
-**Status: phase 1 has landed.** The 27-tool surface and the nested CLI are
-implemented; `src/host/README.md` and `docs/website-features.md` document the
+**Status: phases 1 and 2 have landed.** The 27-tool surface and the nested CLI
+are implemented, and so is the session rework: sessions are keyed by an id
+derived from what they are attached to, a pod session and any number of DUT
+sessions coexist, `dut_open` brings the USB/IP link up itself, and `dut_exec`
+reuses an open session or an attachment this host already holds instead of
+rebuilding one. `src/host/README.md` and `docs/website-features.md` document the
 result, and `src/host/tests/test_mcp_surface.py` holds the contract as tests.
-Phase 2 (session ids, concurrent pod and DUT sessions, `dut_exec` session reuse)
-is not built. The pre-cutover names below are retained deliberately: this
+Validated against a live pod and a forwarded nRF52840 DUT.
+
+Phase 3, the doc sweep, was done for phase 1 and needs a second pass over what
+phase 2 changed. The pre-cutover names below are retained deliberately: this
 document is the mapping from the old surface to the new one, and it stops being
 readable if they are edited out.
 

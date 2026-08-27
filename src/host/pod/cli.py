@@ -673,7 +673,10 @@ def cmd_dut_open(args):
     """
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
-    device = args.device
+    # Blank is absent, not a device: the session layer falls back to the pod's
+    # own socket REPL when given no device, so an empty argument would quietly
+    # open a POD session from a command line that says dut.
+    device = (args.device or "").strip() or None
     if device is None:
         dev = pod.usbip_attach(ensure=True)
         device = dev.get("tty")

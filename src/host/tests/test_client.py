@@ -1393,13 +1393,25 @@ class TestUsbipAttachShape:
             assert key in dev, key
         assert dev["already_attached"] is True
 
-    def test_ids_absent_rather_than_fatal_when_the_pod_cannot_be_listed(self, monkeypatch):
+    def test_ids_are_read_locally_without_touching_the_pod(self, monkeypatch):
+        """The ids come from the tty's own sysfs node. Querying the pod for them
+        would put a round trip on the one route whose purpose is to touch it."""
         p = Pod(address=ADDRESS, repl_port=PORT)
         monkeypatch.setattr(p, "attached_ports", lambda: [0])
         monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM6")
         monkeypatch.setattr("pod.usbip.ports", lambda **k: [])
+        monkeypatch.setattr("pod.usbip.tty_usb_ids", lambda tty: ("f055", "9802"))
         monkeypatch.setattr("pod.usbip.list_remote",
-                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+                            lambda *a, **k: pytest.fail("queried the pod"))
+        dev = p.usbip_attach()
+        assert (dev["vid"], dev["pid"]) == ("f055", "9802")
+
+    def test_ids_absent_rather_than_fatal_when_sysfs_says_nothing(self, monkeypatch):
+        p = Pod(address=ADDRESS, repl_port=PORT)
+        monkeypatch.setattr(p, "attached_ports", lambda: [0])
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM6")
+        monkeypatch.setattr("pod.usbip.ports", lambda **k: [])
+        monkeypatch.setattr("pod.usbip.tty_usb_ids", lambda tty: (None, None))
         dev = p.usbip_attach()
         assert dev["vid"] is None and dev["tty"] == "/dev/ttyACM6"
 
@@ -1413,9 +1425,11 @@ class TestStaleForwardedTtyIsRebuilt:
 
         def runner(argv, **kw):
             calls.append(argv[2])
-            rc = 1 if argv[2] == "/dev/stale" else 0
-            return SimpleNamespace(returncode=rc, stdout="ok\n" if not rc else "",
-                                   stderr="")
+            if argv[2] == "/dev/stale":
+                # what a vanished device looks like, not a DUT-side error
+                return SimpleNamespace(returncode=1, stdout="",
+                                       stderr="failed to access /dev/stale")
+            return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
 
         p = Pod(address=ADDRESS, repl_port=PORT, runner=runner)
         monkeypatch.setattr("pod.client.time.sleep", lambda s: None)
@@ -1429,6 +1443,30 @@ class TestStaleForwardedTtyIsRebuilt:
         assert res["tty"] == "/dev/fresh"
         assert res["reattached"] is True
         assert res["returncode"] == 0
+
+    def test_a_dut_side_exception_does_not_rebuild_or_rerun(self, monkeypatch):
+        """A traceback is a working link running failing code. Rebuilding on it
+        would tear the link down and execute the caller's code a second time."""
+        calls = []
+
+        def runner(argv, **kw):
+            calls.append(argv[2])
+            return SimpleNamespace(
+                returncode=1, stdout="",
+                stderr="Traceback (most recent call last):\n  ZeroDivisionError")
+
+        p = Pod(address=ADDRESS, repl_port=PORT, runner=runner)
+        monkeypatch.setattr("pod.client.time.sleep", lambda s: None)
+        monkeypatch.setattr(p, "attached_ports", lambda: [0])
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM6")
+        monkeypatch.setattr(p, "_rebuild_dut_link",
+                            lambda: pytest.fail("rebuilt on a DUT-side error"))
+
+        res = p.dut_exec("1/0")
+
+        assert calls == ["/dev/ttyACM6"]        # ran exactly once
+        assert res["returncode"] == 1
+        assert "ZeroDivisionError" in res["stderr"]
 
     def test_an_explicit_tty_is_not_rebuilt(self, monkeypatch):
         def runner(argv, **kw):

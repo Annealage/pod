@@ -141,6 +141,37 @@ def serial_devices():
     return set(glob.glob("/dev/serial/by-id/*")) | set(glob.glob("/dev/ttyACM*"))
 
 
+def tty_usb_ids(tty):
+    """(idVendor, idProduct) for a tty's USB device, or (None, None).
+
+    Walks up from the tty's sysfs node to the first ancestor carrying the ids.
+    Local reads only, so this stays cheap enough for a path whose purpose is to
+    avoid touching the pod.
+    """
+    try:
+        node = os.path.realpath(tty)
+        path = os.path.realpath(
+            "/sys/class/tty/%s/device" % os.path.basename(node))
+    except OSError:
+        return (None, None)
+    for _ in range(6):
+        vid_path = os.path.join(path, "idVendor")
+        if os.path.exists(vid_path):
+            try:
+                with open(vid_path) as fh:
+                    vid = fh.read().strip()
+                with open(os.path.join(path, "idProduct")) as fh:
+                    pid = fh.read().strip()
+                return (vid, pid)
+            except OSError:
+                return (None, None)
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return (None, None)
+
+
 def parse_vhci_status(text):
     """Parse vhci_hcd's status table into {port: local_busid}, in-use only (pure).
 
