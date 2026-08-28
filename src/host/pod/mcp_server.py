@@ -1909,9 +1909,18 @@ def build_server():
             # treat as a broken pod: the documented response to an unreachable
             # pod is reset and power-cycle, which against a pod that is merely
             # in use destroys someone else's session.
+            holder = None
+            if exc.busy:
+                # The pod names the holder in its refusal, but the transport
+                # reports only the closed socket, so ask the pod directly.
+                try:
+                    holder = _pod_for(arguments["label"]).repl_holder()
+                except Exception:  # noqa: BLE001 - best effort, never fatal
+                    holder = None
             return _fail("busy" if exc.busy else "pod_exec_failed", str(exc),
                          tool=name, reason=exc.reason, retryable=exc.busy,
-                         pod_stderr=exc.stderr or None, caller=exc.caller)
+                         pod_stderr=exc.stderr or None, caller=exc.caller,
+                         held_by=holder)
         except PodUnreachable as exc:
             # No tier yielded an identity-confirmed target - unreachable, or a
             # DHCP-moved IPv4 whose fingerprint did not match. Distinct from a
