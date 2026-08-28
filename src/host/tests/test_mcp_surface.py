@@ -1119,3 +1119,72 @@ class TestToolResultsAreMachineReadable:
         res = self._call("pod_info", {"label": "lab"})
         assert res.isError is True
         assert "unforeseen" in self._body(res)["error"]
+
+
+class TestBusyNamesTheHolder:
+    """The pod refuses a second REPL client with a line naming the holder, but
+    the transport reports only the closed socket, so the name has to be asked
+    for or it never reaches the agent that collided."""
+
+    def _call(self, name, arguments):
+        import asyncio
+        import mcp.types as t
+        srv = m.build_server()
+        handler = srv.request_handlers[t.CallToolRequest]
+        req = t.CallToolRequest(
+            method="tools/call",
+            params=t.CallToolRequestParams(name=name, arguments=arguments))
+        return asyncio.run(handler(req)).root
+
+    def _body(self, res):
+        import json
+        return json.loads(res.content[0].text)
+
+    def test_a_busy_failure_carries_the_holder(self, monkeypatch):
+        from pod.client import PodExecError
+
+        def busy(*a, **k):
+            raise PodExecError("exec", 1, "", "Connection reset by peer")
+
+        fake = MagicMock()
+        fake.repl_holder.return_value = (
+            "annealage-pod: BUSY - REPL in use by another client, "
+            "held by FD32::1:42232 for 12s")
+        monkeypatch.setattr(m, "handle_pod_exec", busy)
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake)
+
+        body = self._body(self._call("pod_exec", {"label": "lab", "code": "x"}))
+        assert body["kind"] == "busy"
+        assert "FD32::1:42232" in body["held_by"]
+
+    def test_an_unreachable_holder_probe_is_not_fatal(self, monkeypatch):
+        from pod.client import PodExecError
+
+        def busy(*a, **k):
+            raise PodExecError("exec", 1, "", "Connection reset by peer")
+
+        fake = MagicMock()
+        fake.repl_holder.side_effect = OSError("no route")
+        monkeypatch.setattr(m, "handle_pod_exec", busy)
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake)
+
+        body = self._body(self._call("pod_exec", {"label": "lab", "code": "x"}))
+        assert body["kind"] == "busy"            # still classified
+        assert body["held_by"] is None
+
+    def test_a_real_fault_does_not_probe_the_repl(self, monkeypatch):
+        """Probing takes the slot when it is free, so it must only run once the
+        failure is already known to be contention."""
+        from pod.client import PodExecError
+
+        def broken(*a, **k):
+            raise PodExecError("exec", 1, "", "could not enter raw repl")
+
+        fake = MagicMock()
+        fake.repl_holder.side_effect = AssertionError("probed on a real fault")
+        monkeypatch.setattr(m, "handle_pod_exec", broken)
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake)
+
+        body = self._body(self._call("pod_exec", {"label": "lab", "code": "x"}))
+        assert body["kind"] == "pod_exec_failed"
+        assert body["held_by"] is None

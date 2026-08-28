@@ -199,6 +199,7 @@ async def _repl_accept(port):
     poller.register(s, select.POLLIN)
     live = select.poll()
     cur = None
+    cur_who = None            # (addr, ticks_ms) of the client holding the slot
     while True:
         try:
             # Has the active session ended? On disconnect the client handle polls
@@ -232,6 +233,7 @@ async def _repl_accept(port):
                     except Exception:
                         pass
                     cur = None
+                    cur_who = None
             if poller.poll(0):
                 try:
                     cli, addr = s.accept()
@@ -241,6 +243,7 @@ async def _repl_accept(port):
                     cli.setblocking(False)
                     if cur is None:
                         cur = cli
+                        cur_who = (addr, time.ticks_ms())
                         try:
                             os.dupterm(cli)
                             live.register(cli, select.POLLIN)
@@ -256,9 +259,22 @@ async def _repl_accept(port):
                                 pass
                             cur = None
                     else:
-                        # A session is already attached: refuse without evicting.
+                        # A session is already attached: refuse without evicting,
+                        # and say WHO holds it. An arriving agent otherwise sees
+                        # only a closed socket, which reads as a broken pod and
+                        # invites a reset that would destroy the live session.
                         try:
-                            cli.send(b"annealage-pod: BUSY - REPL in use by another client\r\n")
+                            if cur_who is not None:
+                                held = "%s:%s" % (cur_who[0][0], cur_who[0][1])
+                                secs = time.ticks_diff(
+                                    time.ticks_ms(), cur_who[1]) // 1000
+                                note = ("annealage-pod: BUSY - REPL in use by "
+                                        "another client, held by %s for %ds\r\n"
+                                        % (held, secs))
+                            else:
+                                note = ("annealage-pod: BUSY - REPL in use by "
+                                        "another client\r\n")
+                            cli.send(note.encode())
                         except Exception:
                             pass
                         try:

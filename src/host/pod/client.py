@@ -333,6 +333,45 @@ class Pod:
 
     # ── argv construction (pure, testable) ───────────────────────────────
 
+    def repl_holder(self, timeout: float = 3.0) -> Optional[str]:
+        """The pod's own account of who holds its REPL, or None.
+
+        The pod refuses a second REPL client with a one-line BUSY notice naming
+        the holder, but the transport reports only the closed socket, so that
+        line never reaches the caller. This opens a bare connection to read it.
+
+        Only call this once a failure has already been classified as contention.
+        If the slot happens to be free the pod will attach this connection
+        instead of refusing it, and although it is closed immediately, that is a
+        moment of holding a slot that belongs to someone else.
+        """
+        import socket as _socket
+        host, _port = self._resolver.endpoint(self.repl_port)
+        try:
+            infos = _socket.getaddrinfo(host, self.repl_port, 0,
+                                        _socket.SOCK_STREAM)
+        except Exception:  # noqa: BLE001 - unresolvable is simply "unknown"
+            return None
+        for family, socktype, proto, _c, sockaddr in infos:
+            sock = None
+            try:
+                sock = _socket.socket(family, socktype, proto)
+                sock.settimeout(timeout)
+                sock.connect(sockaddr)
+                data = sock.recv(400).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001 - try the next address
+                continue
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+            line = (data or "").strip().splitlines()
+            if line and "BUSY" in line[0]:
+                return line[0]
+        return None
+
     def _argv(self, verb: str, *args: str) -> List[str]:
         """Build the ampremote argv list for a given verb and arguments.
 
