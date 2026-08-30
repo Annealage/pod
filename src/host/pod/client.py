@@ -1001,29 +1001,48 @@ class Pod:
                 return last
         return last
 
-    def dut_exec(self, code: str, tty: Optional[str] = None) -> dict:
+    def dut_tty(self, ensure: bool = True) -> str:
+        """The DUT's CDC tty, bringing the USB/IP link up if it is not already.
+
+        The single place that answers "where is the DUT", so the CLI and the MCP
+        handler cannot drift into two behaviours or two error messages. Raises
+        RuntimeError when the link comes up but no tty appears, which is a real
+        state (the export exists, the CDC interface has not enumerated) and not
+        something a caller can act on by retrying immediately.
+        """
+        from pod import usbip as _u
+        tty = _u.forwarded_tty(self.attached_ports())
+        if tty:
+            return tty
+        dev = self.usbip_attach(ensure=ensure)
+        tty = dev.get("tty")
+        if not tty:
+            raise RuntimeError(
+                "the pod's DUT attached (busid %s) but no CDC tty appeared; "
+                "check `usbip port` and dmesg, then pass the device explicitly"
+                % dev.get("busid"))
+        return tty
+
+    def dut_exec(self, code: str) -> dict:
         """Run MicroPython on the DUT (turnkey) and return its stdout.
 
         Runs `mpremote connect <tty> resume exec <code>` on the DUT's own CDC
         REPL. Returns {tty, returncode, stdout, stderr, reattached}. Distinct
         from exec(), which runs on the POD.
 
-        The device is whichever is available first, since each avoids work the
-        next one needs: an explicit `tty`; an attachment THIS pod already holds,
-        found by matching its vhci port against the pod's own; otherwise a fresh
-        attachment, which is the only route that pays the settle delays and so
-        the difference between a roughly one-second call and a ten-second one.
+        An attachment THIS pod already holds is used as-is, found by matching
+        its vhci port against the pod's own; otherwise a fresh one is built,
+        which is the only route that pays the settle delays and so the difference
+        between a roughly one-second call and a ten-second one.
 
         A reused attachment that turns out not to answer is rebuilt once and
         retried, since a device node surviving a DUT re-enumeration is exactly
-        the stale-export case rebuilding recovers. An explicitly passed `tty` is
-        taken at its word and fails without a rebuild.
+        the stale-export case rebuilding recovers. A DUT-side exception is not
+        that: it is a working link running failing code, so it is returned as-is.
         """
         from pod import usbip as _u
-        explicit = tty is not None
-        if tty is None:
-            tty = _u.forwarded_tty(self.attached_ports())
-        reused = tty is not None and not explicit
+        tty = _u.forwarded_tty(self.attached_ports())
+        reused = tty is not None
         reattached = tty is None
         if tty is None:
             tty = self._rebuild_dut_link()

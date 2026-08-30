@@ -678,13 +678,12 @@ def cmd_dut_open(args):
     # open a POD session from a command line that says dut.
     device = (args.device or "").strip() or None
     if device is None:
-        dev = pod.usbip_attach(ensure=True)
-        device = dev.get("tty")
-        if not device:
-            print("dut open: attached the DUT but no CDC tty appeared",
-                  file=sys.stderr)
+        try:
+            device = pod.dut_tty()
+        except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+            print("dut open: %s" % exc, file=sys.stderr)
             return 1
-        print("dut open: attached %s -> %s" % (dev.get("busid"), device))
+        print("dut open: using DUT tty %s" % device)
     if args.recover:
         rec = pod.recover_dut_repl(device, settle=args.settle,
                                    read_wait=args.read_wait)

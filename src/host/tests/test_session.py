@@ -389,11 +389,11 @@ class TestMcpRepl:
         assert r["sent"] == len("print(1)")
 
         assert m.handle_session_read("lab:pod")["text"] == "out"
-        assert m._open_sessions()[0]["label"] == "lab"
+        assert m._open_sessions("lab")[0]["label"] == "lab"
 
         res = m.handle_session_close("lab:pod")
         assert res["ok"] is True and fake.closed is True
-        assert m._open_sessions() == []
+        assert m._open_sessions("lab") == []
 
     def test_open_builds_chain(self, mcp_repl):
         m, _, opened = mcp_repl

@@ -720,15 +720,14 @@ class TestDutOpenBringsTheLinkUp:
 
     def test_device_omitted_brings_the_link_up_and_uses_its_tty(self, monkeypatch):
         opened = {}
-        monkeypatch.setattr(m, "handle_dut_link",
-                            lambda label, action=None, **kw: {
-                                "busid": "1-1", "tty": "/dev/ttyACM3"})
         fake = MagicMock()
-        fake.running = True
-        fake.target = "/dev/ttyACM3"
-        fake.mounted = False
-        monkeypatch.setattr(m, "_pod_for", lambda label: MagicMock(
-            open_session=lambda **kw: (opened.update(kw), fake)[1]))
+        fake.running, fake.target, fake.mounted = True, "/dev/ttyACM3", False
+        pod = MagicMock()
+        pod.attached_ports.return_value = []
+        pod.dut_tty.return_value = "/dev/ttyACM3"
+        pod.open_session = lambda **kw: (opened.update(kw), fake)[1]
+        monkeypatch.setattr(m, "_pod_for", lambda label: pod)
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
 
         info = m.handle_dut_open("lab")
 
@@ -753,10 +752,11 @@ class TestDutOpenBringsTheLinkUp:
         assert "link" not in info
 
     def test_a_bring_up_with_no_tty_is_an_error_not_a_broken_session(self, monkeypatch):
-        self._link_down(monkeypatch)
-        monkeypatch.setattr(m, "handle_dut_link",
-                            lambda label, action=None, **kw: {"busid": "1-1",
-                                                              "tty": None})
+        pod = MagicMock()
+        pod.attached_ports.return_value = []
+        pod.dut_tty.side_effect = RuntimeError("no CDC tty appeared")
+        monkeypatch.setattr(m, "_pod_for", lambda label: pod)
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
         with pytest.raises(RuntimeError, match="no CDC tty"):
             m.handle_dut_open("lab")
 
@@ -779,53 +779,59 @@ class TestDutOpenBringsTheLinkUp:
     def test_an_already_attached_link_needs_no_pod_repl(self, monkeypatch):
         """The converse: with the link already up there is nothing to run on the
         pod, so a held pod session must not block opening the DUT session."""
-        monkeypatch.setattr(m, "_pod_for",
-                            lambda label: MagicMock(attached_ports=lambda: [0]))
+        pod = MagicMock()
+        pod.attached_ports.return_value = [0]
+        pod.dut_tty.return_value = "/dev/ttyACM0"
+        monkeypatch.setattr(m, "_pod_for", lambda label: pod)
         monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM0")
         held = MagicMock()
         held.running = True
         monkeypatch.setitem(m._SESSIONS, "lab:pod",
                             {"session": held, "log_path": "/tmp/x.log",
                              "device": None, "label": "lab"})
-        monkeypatch.setattr(m, "handle_dut_link",
-                            lambda label, action=None, **kw: {
-                                "busid": "1-1", "tty": "/dev/ttyACM0",
-                                "already_attached": True})
-        fake = MagicMock()
-        fake.running, fake.target, fake.mounted = True, "/dev/ttyACM0", False
         monkeypatch.setattr(m, "_open_session",
                             lambda *a, **k: {"running": True})
 
         info = m.handle_dut_open("lab")
-        assert info["link"]["already_attached"] is True
+        assert info["link"]["tty"] == "/dev/ttyACM0"
 
 
 # ── the tty a caller already holds is not re-attached ──────────────────────
 
 
-class TestPodDutExecReusesAKnownTty:
-    def test_given_tty_skips_the_attach_cycle(self, monkeypatch):
+class TestDutTtyIsTheOneAcquisitionPath:
+    """The CLI and the MCP handler both ask for the DUT's tty, so they share one
+    implementation: two copies drifted into two behaviours and two messages."""
+
+    def test_a_held_attachment_is_used_without_attaching(self, monkeypatch):
         from pod.client import Pod
-        runs = []
-
-        def runner(argv, **kw):
-            runs.append(argv)
-            return SimpleNamespace(returncode=0, stdout="42\n", stderr="")
-
-        pod = Pod(address="10.0.0.1", repl_port=8266, runner=runner)
-        slept = []
-        monkeypatch.setattr("pod.client.time.sleep", lambda s: slept.append(s))
-        monkeypatch.setattr(pod, "usbip_detach",
-                            lambda *a, **k: pytest.fail("detached"))
+        pod = Pod(address="10.0.0.1", repl_port=8266)
+        monkeypatch.setattr(pod, "attached_ports", lambda: [0])
+        monkeypatch.setattr("pod.usbip.forwarded_tty",
+                            lambda *a, **k: "/dev/ttyACM0")
         monkeypatch.setattr(pod, "usbip_attach",
-                            lambda *a, **k: pytest.fail("re-attached"))
+                            lambda *a, **k: pytest.fail("attached needlessly"))
+        assert pod.dut_tty() == "/dev/ttyACM0"
 
-        result = pod.dut_exec("print(6*7)", tty="/dev/ttyACM0")
+    def test_nothing_held_means_attach(self, monkeypatch):
+        from pod.client import Pod
+        pod = Pod(address="10.0.0.1", repl_port=8266)
+        monkeypatch.setattr(pod, "attached_ports", lambda: [])
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
+        monkeypatch.setattr(pod, "usbip_attach",
+                            lambda ensure=True: {"busid": "1-1",
+                                                 "tty": "/dev/ttyACM3"})
+        assert pod.dut_tty() == "/dev/ttyACM3"
 
-        assert result["reattached"] is False
-        assert result["stdout"] == "42\n"
-        assert slept == []                      # no settle delays at all
-        assert runs[0][:4] == ["mpremote", "connect", "/dev/ttyACM0", "resume"]
+    def test_an_attach_with_no_tty_is_a_named_error(self, monkeypatch):
+        from pod.client import Pod
+        pod = Pod(address="10.0.0.1", repl_port=8266)
+        monkeypatch.setattr(pod, "attached_ports", lambda: [])
+        monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
+        monkeypatch.setattr(pod, "usbip_attach",
+                            lambda ensure=True: {"busid": "1-1", "tty": None})
+        with pytest.raises(RuntimeError, match="no CDC tty"):
+            pod.dut_tty()
 
 
 class TestSessionIdStaysPassable:
