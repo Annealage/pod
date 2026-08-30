@@ -46,6 +46,9 @@ def entry_from_podinfo(info):
         "usbip_port": info.usbip_port,
         "uart_port": info.uart_port,
         "gdb_port": info.gdb_port or 3335,
+        # No default: absent means the pod's firmware has no holder listener,
+        # and a default would send the gate at a port that is not there.
+        "control_port": info.control_port,
         "carrier_id": info.carrier_id or "",
         "mp_version": info.mp_version or "",
         "last_seen": _now(),

@@ -21,6 +21,8 @@ keys:
   usbip_port  - USB/IP server port (int or None)
   uart_port   - UART-over-TCP port (int or None)
   gdb_port    - GDB debug-command server port (int or None)
+  control_port - holder/status listener port (int or None; absent on a pod
+                whose firmware predates it, which is how a caller tells)
   carrier_id  - carrier board identifier string (may be empty)
   mp_version  - MicroPython version string (may be empty)
 """
@@ -75,6 +77,7 @@ class PodInfo:
     usbip_port: Optional[int] = None
     uart_port: Optional[int] = None
     gdb_port: Optional[int] = None
+    control_port: Optional[int] = None
     carrier_id: str = ""
     mp_version: str = ""
     hostname: str = ""
@@ -103,6 +106,7 @@ class PodInfo:
             "usbip_port": self.usbip_port,
             "uart_port": self.uart_port,
             "gdb_port": self.gdb_port,
+            "control_port": self.control_port,
             "carrier_id": self.carrier_id,
             "mp_version": self.mp_version,
         }
@@ -120,16 +124,23 @@ def _parse_txt_properties(txt_parts: list) -> dict:
 
 
 def _ports_from_props(props: dict, default_port: int):
-    """Pull the repl/usbip/uart/gdb ports out of a parsed TXT property dict."""
+    """Pull the repl/usbip/uart/gdb/control ports out of a parsed TXT dict.
+
+    Each optional port is None when the key is absent, which is meaningful
+    rather than merely missing: the pod only advertises a key once that listener
+    has actually bound, so None says the feature is not there to be used.
+    """
     repl_port = int(props.get("repl-port", default_port))
     usbip_raw = props.get("usbip-port")
     uart_raw = props.get("uart-port")
     gdb_raw = props.get("gdb-port")
+    control_raw = props.get("control-port")
     return (
         repl_port,
         int(usbip_raw) if usbip_raw else None,
         int(uart_raw) if uart_raw else None,
         int(gdb_raw) if gdb_raw else None,
+        int(control_raw) if control_raw else None,
     )
 
 
@@ -168,7 +179,8 @@ def parse_avahi_line(line: str) -> Optional[PodInfo]:
     except ValueError:
         txt_tokens = txt_raw.split()
     props = _parse_txt_properties(txt_tokens)
-    repl_port, usbip_port, uart_port, gdb_port = _ports_from_props(props, port)
+    (repl_port, usbip_port, uart_port, gdb_port,
+     control_port) = _ports_from_props(props, port)
 
     addr4, addr6 = _sort_addrs([address])
     return PodInfo(
@@ -181,6 +193,7 @@ def parse_avahi_line(line: str) -> Optional[PodInfo]:
         usbip_port=usbip_port,
         uart_port=uart_port,
         gdb_port=gdb_port,
+        control_port=control_port,
         carrier_id=props.get("carrier-id", ""),
         mp_version=props.get("mp-version", ""),
     )
@@ -243,7 +256,8 @@ def parse_zeroconf_info(info) -> Optional[PodInfo]:
         )
         for k, v in info.properties.items()
     }
-    repl_port, usbip_port, uart_port, gdb_port = _ports_from_props(
+    (repl_port, usbip_port, uart_port, gdb_port,
+     control_port) = _ports_from_props(
         props_raw, info.port)
     hostname = (getattr(info, "server", "") or "").rstrip(".")
     return PodInfo(
@@ -256,6 +270,7 @@ def parse_zeroconf_info(info) -> Optional[PodInfo]:
         usbip_port=usbip_port,
         uart_port=uart_port,
         gdb_port=gdb_port,
+        control_port=control_port,
         carrier_id=props_raw.get("carrier-id", ""),
         mp_version=props_raw.get("mp-version", ""),
     )

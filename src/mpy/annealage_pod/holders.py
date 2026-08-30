@@ -73,6 +73,17 @@ def _read_through():
                                             "detail": "live instance"}
     except Exception:  # noqa: BLE001
         pass
+    try:
+        import usbip as _usbip
+        for busid in _usbip.attached_devices():
+            # The C server knows a busid is imported but not which host did it,
+            # so caller is the busid. A host tells whether the importer is
+            # itself by checking its own vhci table: imported, and not ours,
+            # means someone else holds it.
+            out["usbip"] = {"caller": busid, "since_s": None,
+                            "detail": "imported over USB/IP"}
+    except Exception:  # noqa: BLE001 - module absent or server not running
+        pass
     return out
 
 

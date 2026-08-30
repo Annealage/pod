@@ -315,6 +315,10 @@ class Pod:
         else:
             pod._elf_flash_ranges = None
         pod._cmsis_device = dut.get("target_family")
+        # The registry keeps whatever mDNS advertised. control_port is absent on
+        # a pod whose firmware predates the holder listener, and that absence is
+        # what tells the gate it has no record to consult.
+        pod._entry = entry
         return pod
 
     @property
@@ -371,6 +375,83 @@ class Pod:
             if line and "BUSY" in line[0]:
                 return line[0]
         return None
+
+    # ── who holds what (the pod's control listener, not its REPL) ─────────
+
+    def who(self, resource=None, timeout: float = 3.0) -> dict:
+        """The pod's holder record, or {} when it cannot be reached.
+
+        Asks the control listener, NOT the REPL: the REPL is the contended thing,
+        so a caller that cannot get in is exactly the one that needs the answer.
+        Returns None when the answer could not be obtained, and {} only when
+        the pod genuinely reports nobody holding anything. A gate deciding
+        whether to displace someone must not read "I could not find out" as
+        "the bench is free", so the two are different values rather than
+        different shades of empty.
+        """
+        import json as _json
+        import socket as _socket
+        port = self._control_port()
+        if port is None:
+            return None
+        host, _p = self._resolver.endpoint(port)
+        req = ("who %s" % resource if resource else "who") + "\n"
+        try:
+            infos = _socket.getaddrinfo(host, port, 0, _socket.SOCK_STREAM)
+        except Exception:  # noqa: BLE001
+            return None
+        for family, socktype, proto, _c, sockaddr in infos:
+            sock = None
+            try:
+                sock = _socket.socket(family, socktype, proto)
+                sock.settimeout(timeout)
+                sock.connect(sockaddr)
+                sock.send(req.encode())
+                data = b""
+                while b"\n" not in data:
+                    chunk = sock.recv(1024)
+                    if not chunk:
+                        break
+                    data += chunk
+                body = _json.loads(data.decode().strip())
+            except Exception:  # noqa: BLE001 - try the next address
+                continue
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+            if body.get("ok"):
+                return body.get("holders") or {}
+        return None
+
+    def who_available(self) -> bool:
+        """Whether this pod advertises a control listener at all.
+
+        False means the pod's firmware predates it, so the gate has no holder
+        record to consult and says so instead of assuming the bench is free.
+        """
+        return self._control_port() is not None
+
+    def _control_port(self):
+        entry = getattr(self, "_entry", None) or {}
+        return entry.get("control_port")
+
+    def usbip_held_by_other(self):
+        """Whether the pod's DUT export is imported by someone that is not us.
+
+        The pod's usbip server knows a busid is imported but not which host did
+        it, so this pairs that with our own vhci table: imported, and no port of
+        ours attached to this pod, means another host holds it. Returns None when
+        the pod cannot say, which is not the same as False.
+        """
+        holders = self.who()
+        if holders is None:
+            return None                      # could not find out
+        if "usbip" not in holders:
+            return False                     # the pod says nobody imported it
+        return not self.attached_ports()
 
     def _argv(self, verb: str, *args: str) -> List[str]:
         """Build the ampremote argv list for a given verb and arguments.

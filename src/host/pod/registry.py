@@ -17,6 +17,8 @@ pod.target for the connect strategy). Pod record keys:
   usbip_port    - USB/IP port (int or null)
   uart_port     - UART-over-TCP port (int or null)
   gdb_port      - GDB debug-command server port (int or null)
+  control_port  - holder/status listener port (int or null; null on a pod whose
+                  firmware predates it)
   carrier_id    - carrier board identifier
   mp_version    - MicroPython version string
   fingerprint   - machine.unique_id() hex; the identity an IPv4/mDNS connect
@@ -176,6 +178,7 @@ def reconcile(label: str, pod_info) -> dict:
         "usbip_port": pod_info.usbip_port,
         "uart_port": pod_info.uart_port,
         "gdb_port": pod_info.gdb_port,
+        "control_port": getattr(pod_info, "control_port", None),
         "carrier_id": pod_info.carrier_id,
         "mp_version": pod_info.mp_version,
         "last_seen": datetime.now(timezone.utc).isoformat(timespec="seconds"),
