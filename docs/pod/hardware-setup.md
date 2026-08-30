@@ -6,11 +6,22 @@ the live RP2350 target; the other RP2350 docs (`debug-stack.md`,
 `peripherals.md`, `logic-analyser.md`) cover their subsystem in depth and link
 here for the "what wires where" overview.
 
-The pod is a bare Pico 2 W running MicroPython. A DUT connects to it through up to
-four channels: SWD (the pod debugs/flashes the DUT), USB (the DUT's native USB is
-forwarded to a PC over USB/IP), a UART bridge, and assorted GPIO for functional
-tests (I2C, SPI, plain GPIO, ADC, logic-analyser taps). You drive the pod from a
-PC over Wi-Fi.
+The pod is a bare RP2350 board running MicroPython. A DUT connects to it through
+up to four channels: SWD (the pod debugs/flashes the DUT), USB (the DUT's native
+USB is forwarded to a PC over USB/IP), a UART bridge, and assorted GPIO for
+functional tests (I2C, SPI, plain GPIO, ADC, logic-analyser taps). You drive the
+pod from a PC over Wi-Fi.
+
+Two boards are supported and **every DUT-facing pin below is the same on both**,
+so a harness built for one plugs into the other unchanged:
+
+- **Raspberry Pi Pico 2 W** (`ANNEALAGE_POD_RP2350`) - the board this document
+  is written against; all pin-budget and header-position notes below describe it.
+- **Waveshare RP2350B-Plus-W** (`ANNEALAGE_POD_RP2350B`) - same pin numbers, but
+  a 48-GPIO part with a different header layout, more free pins, and its ADC on
+  GPIO40-GPIO45 instead of GP26-GP28. See
+  `../../src/boards/ANNEALAGE_POD_RP2350B/README.md` for the differences before
+  wiring anything to a pin not listed below.
 
 > Authoritative pin facts live in code, not here. Pin numbers below are quoted
 > from the board definition and the `annealage_pod` modules; the PIO block
@@ -43,11 +54,14 @@ tagged:
 
 ## 2. What you need
 
-- A Raspberry Pi Pico 2 W (the pod), with male headers or solder leads.
+- The pod board (a Raspberry Pi Pico 2 W, or a Waveshare RP2350B-Plus-W), with
+  male headers or solder leads.
 - Jumper wires; a breadboard helps.
 - A CMSIS-DAP probe (e.g. a Raspberry Pi Debug Probe / "pico-probe") to flash the
   pod over SWD, referenced by serial. The same probe doubles as the pod's backup
-  UART console (section 5g).
+  UART console (section 5g). Optional on the RP2350B-Plus-W, which is flashed
+  over USB in BOOTSEL mode (`make BOARD=ANNEALAGE_POD_RP2350B flash-usb`); a
+  probe is still the only way in if its Wi-Fi and USB are both unavailable.
 - A host PC with the `pod` tooling and `ampremote` (`src/host/README.md`), plus
   Wi-Fi credentials for the pod.
 - The DUT (e.g. an nRF52840 board) and whatever it needs to be powered.
@@ -69,6 +83,10 @@ diagram below carry the same information as text.
 Header GPIOs exposed by the board are GP0-GP22 and GP26-GP28 (`pins.csv`).
 GP23/24/25/29 are **not on the header** - they are internal CYW43 Wi-Fi pins
 (driven on PIO2) and must never be touched.
+
+On the RP2350B-Plus-W the equivalent untouchable set is GPIO36-GPIO39 (the RM2
+radio, also on PIO2), GPIO46 (VSYS sense) and GPIO47 (PSRAM chip select);
+GP23-GP29 there are ordinary pins.
 
 | Pod GPIO | Header pin | Assigned to | Status |
 |---|---|---|---|

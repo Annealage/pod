@@ -5,11 +5,18 @@ and naming conventions.
 
 ## Targets
 
-- **RP2350 (Pico 2 W)** (canonical, current target): the pod runs the debugger
+- **RP2350** (canonical, current target): the pod runs the debugger
   itself in MicroPython (PIO SWD + DP/AP/MEM-AP + CMSIS FLM flash loader + an
   on-pod GDB RSP server) instead of exporting a synthetic CMSIS-DAP probe over
   USB/IP. The native USB controller is the DUT host port; pod management (REPL,
-  flashing, mount) rides Wi-Fi over a socket REPL.
+  flashing, mount) rides Wi-Fi over a socket REPL. Two interchangeable boards
+  run this target, sharing one DUT-facing pin map and all frozen Python
+  (`src/boards/common/`):
+  - `ANNEALAGE_POD_RP2350` - Raspberry Pi Pico 2 W (RP2350A, 4 MB flash),
+    flashed over SWD by a wired pico-probe.
+  - `ANNEALAGE_POD_RP2350B` - Waveshare RP2350B-Plus-W (RP2350B, 16 MB flash,
+    optional 8 MB QSPI PSRAM, radio on GPIO36-39), flashed over USB BOOTSEL.
+    See `src/boards/ANNEALAGE_POD_RP2350B/README.md` for the hardware deltas.
 - **ESP32-S3** (prior, superseded design; no new features): single ESP32-S3 +
   ESP-IDF + MicroPython, C user modules for USB/IP, synthetic CMSIS-DAP-v2, UART
   bridge, I2C/SPI slave. Its docs are retained for reference at

@@ -1,26 +1,36 @@
-# Annealage Pod - RP2350 (Pico 2 W) firmware build.
+# Annealage Pod - RP2350 firmware build.
 #
-# The pod board is defined out-of-tree at src/boards/ANNEALAGE_POD_RP2350 (it is
-# not in the MicroPython submodule's ports/rp2/boards/), so the build passes
-# BOARD_DIR to the rp2 port and lets it derive BOARD from the directory name.
-# The pod's C user modules (usbhost, usbip) are pulled in by the board's frozen
-# manifest via the c_module() directive (the manifest_c_module branch), so no
-# USER_C_MODULES is needed.
+# Pod boards are defined out-of-tree under src/boards/ (they are not in the
+# MicroPython submodule's ports/rp2/boards/), so the build passes BOARD_DIR to
+# the rp2 port and lets it derive BOARD from the directory name. The pod's C user
+# modules (usbhost, usbip) are pulled in by the board's frozen manifest via the
+# c_module() directive (the manifest_c_module branch), so no USER_C_MODULES is
+# needed.
+#
+# Two pod boards exist, differing only in hardware:
+#   ANNEALAGE_POD_RP2350  - Raspberry Pi Pico 2 W (RP2350A, 4 MB flash). Flashed
+#                           over SWD by a wired pico-probe.
+#   ANNEALAGE_POD_RP2350B - Waveshare RP2350B-Plus-W (RP2350B, 16 MB flash,
+#                           optional QSPI PSRAM). No probe is wired to it, so it
+#                           is flashed over USB in BOOTSEL mode.
+# Select one with BOARD=; ANNEALAGE_POD_RP2350 is the default.
 #
 # The MicroPython integration branch (tessera) is composed by mbm from the
 # feature branches listed in mbm.toml; the src/micropython submodule must be
 # checked out on tessera before building (see mbm.toml).
 #
 # Usage:
-#   make            # build the firmware (.uf2 + .elf)
-#   make flash      # build, then flash over SWD via the wired pico-probe
-#   make reset      # reset the target
-#   make clean      # remove the board build directory
-#   make help       # list targets
+#   make                       # build the default board (.uf2 + .elf)
+#   make BOARD=ANNEALAGE_POD_RP2350B         # build the Waveshare pod
+#   make flash                 # build, then flash over SWD via the pico-probe
+#   make BOARD=ANNEALAGE_POD_RP2350B flash-usb  # build, then flash over BOOTSEL
+#   make reset                 # reset the target
+#   make clean                 # remove the board build directory
+#   make help                  # list targets
 
 MPY_DIR   := src/micropython
 RP2_PORT  := $(MPY_DIR)/ports/rp2
-BOARD     := ANNEALAGE_POD_RP2350
+BOARD     ?= ANNEALAGE_POD_RP2350
 BOARD_DIR := $(abspath src/boards/$(BOARD))
 BUILD     := $(RP2_PORT)/build-$(BOARD)
 JOBS      ?= $(shell nproc)
@@ -44,6 +54,13 @@ CHIP  ?= RP235x
 OPENOCD      ?= /home/corona/openocd_rpi/src/openocd
 OPENOCD_TCL  ?= /home/corona/openocd_rpi/tcl
 PROBE_SERIAL ?= $(lastword $(subst :, ,$(PROBE)))
+
+# BOOTSEL-mode USB flashing, for a pod with no probe wired to it (the Waveshare
+# board). picotool addresses the target by its RP2350 chip serial so that a
+# second RP-series board sitting in BOOTSEL cannot be flashed by accident; read
+# the serial off the intended board with `picotool info -a` (it is the "chipid",
+# uppercased and without the 0x).
+POD_USB_SERIAL ?= 8E495826EE18B97A
 
 # picotool cache for the pico-sdk fetch-from-git, so a fresh cmake configure does
 # not fail on the host picotool version gate.
@@ -85,6 +102,10 @@ flash-probe-rs: firmware ## Fallback flash via probe-rs (flattens the multi-sect
 	probe-rs download --probe $(PROBE) --chip $(CHIP) \
 		--binary-format bin --base-address 0x10000000 $(BUILD)/prog.bin
 	probe-rs reset --probe $(PROBE) --chip $(CHIP)
+
+.PHONY: flash-usb
+flash-usb: firmware ## Build, then flash over USB with the board in BOOTSEL mode (picotool; for boards with no wired probe)
+	picotool load -x --ser $(POD_USB_SERIAL) $(BUILD)/firmware.uf2
 
 .PHONY: reset
 reset: ## Reset the target over SWD
