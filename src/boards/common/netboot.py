@@ -57,6 +57,33 @@ def _pm_none(wlan):
     except Exception:
         pass
 
+# The pod's network identity. Derived from the RP2350 chip ID so that several
+# pods coexist on one LAN with one firmware image and no per-unit config: a
+# fixed name would make two pods collide on both DHCP and mDNS. The suffix is
+# the low 5 hex digits of machine.unique_id() - short enough for
+# network.hostname() (32 chars) and for a discovery listing, wide enough to
+# separate a bench of pods. Hosts find pods by browsing the _annealage-pod._tcp
+# service type, not by a fixed name, so a per-unit name costs discovery nothing.
+_POD_NAME = None
+
+
+def pod_name():
+    """This pod's hostname and mDNS instance name, e.g. "annealage-pod-8b97a"."""
+    global _POD_NAME
+    if _POD_NAME is None:
+        try:
+            import machine
+            import binascii
+
+            uid = binascii.hexlify(machine.unique_id()).decode()
+            _POD_NAME = "annealage-pod-" + uid[-5:]
+        except Exception:
+            # Identity derivation must never stop the pod reaching the network:
+            # fall back to the generic name, which collides only against another
+            # pod that also failed here.
+            _POD_NAME = "annealage-pod"
+    return _POD_NAME
+
 
 def _advertise_mdns(repl_port, uart_port=None):
     # Advertise a browsable service via the native lwIP mDNS responder. Guarded
@@ -82,7 +109,7 @@ def _advertise_mdns(repl_port, uart_port=None):
         txt["uart-port"] = str(uart_port)
     try:
         slot = network.mdns_add_service(
-            "annealage-pod", "_annealage-pod", "tcp", repl_port, txt=txt
+            pod_name(), "_annealage-pod", "tcp", repl_port, txt=txt
         )
         print("netboot: mDNS service advertised, slot", slot)
         return slot
@@ -244,6 +271,12 @@ async def main():
         config = None
     ssid = getattr(config, "WIFI_SSID", None) if config else None
     port = getattr(config, "REPL_PORT", 8266) if config else 8266
+    # Claim the per-unit identity before the interface goes up, so the DHCP
+    # client offers it and the lwIP mDNS responder answers <pod_name>.local.
+    try:
+        network.hostname(pod_name())
+    except Exception as e:
+        sys.print_exception(e)
     if ssid:
         pw = getattr(config, "WIFI_PASSWORD", "")
         wlan = network.WLAN(network.STA_IF)
