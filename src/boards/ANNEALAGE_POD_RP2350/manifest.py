@@ -6,8 +6,9 @@ require("bundle-networking")
 
 # Freeze the network boot bootstrap (Wi-Fi + os.dupterm socket REPL) so the pod
 # comes up reachable over Wi-Fi with no USB-CDC REPL. config.py (credentials)
-# stays on the filesystem, not frozen.
-freeze("$(BOARD_DIR)", ("netboot.py", "main.py"))
+# stays on the filesystem, not frozen. These two files are board-agnostic and
+# shared with the other pod boards from src/boards/common.
+freeze("$(BOARD_DIR)/../common", ("netboot.py", "main.py"))
 
 # USB/IP forwarder C modules: the on-pod raw-URB backend (usbhost) and the
 # lwIP-RAW USB/IP server (usbip). Pulled in via the manifest c_module() directive
