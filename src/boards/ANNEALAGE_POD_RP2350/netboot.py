@@ -212,14 +212,18 @@ async def _repl_accept(port):
                         cur = cli
                         cur_who = (addr, time.ticks_ms())
                         try:
-                            from annealage_pod import holders
-                            holders.note("repl", "%s:%s" % (addr[0], addr[1]),
-                                         "socket REPL")
-                        except Exception:
-                            pass
-                        try:
                             os.dupterm(cli)
                             live.register(cli, select.POLLIN)
+                            # Recorded only once the client is really attached:
+                            # noting it earlier would leave a holder for a client
+                            # the failure path below then discards.
+                            try:
+                                from annealage_pod import holders
+                                holders.note("repl",
+                                             "%s:%s" % (addr[0], addr[1]),
+                                             "socket REPL")
+                            except Exception:
+                                pass
                             print("netboot: REPL client", addr)
                         except Exception:
                             try:

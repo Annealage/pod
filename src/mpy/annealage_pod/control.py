@@ -51,7 +51,7 @@ def bind(port):
         s = socket.socket(socket.AF_INET6)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("::", port))
-        s.listen(2)
+        s.listen(4)
         s.setblocking(False)
         _server_sock = s
         return port
@@ -93,15 +93,20 @@ async def serve(port):
         print("control: no server socket - listener not started")
         return
     print("control: holder listener on port", port)
-    poller = select.poll()
-    poller.register(s, select.POLLIN)
 
     while True:
         try:
-            if poller.poll(0):
+            # accept() directly rather than gating on poll(): a listening socket
+            # is not reliably reported readable here, and a connection that is
+            # never accepted sits in the backlog forever, so a few of them wedge
+            # the listener permanently. EAGAIN simply means nobody is waiting.
+            cli = None
+            try:
+                cli, addr = s.accept()
+            except OSError:
                 cli = None
+            if cli is not None:
                 try:
-                    cli, addr = s.accept()
                     cli.setblocking(False)
                     # One short read: the request is a single line and a client
                     # that sends nothing must not stall the loop.
