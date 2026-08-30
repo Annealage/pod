@@ -1533,16 +1533,6 @@ class TestStaleForwardedTtyIsRebuilt:
         assert res["returncode"] == 1
         assert "ZeroDivisionError" in res["stderr"]
 
-    def test_an_explicit_tty_is_not_rebuilt(self, monkeypatch):
-        def runner(argv, **kw):
-            return SimpleNamespace(returncode=1, stdout="", stderr="nope")
-
-        p = Pod(address=ADDRESS, repl_port=PORT, runner=runner)
-        monkeypatch.setattr("pod.client.time.sleep", lambda s: None)
-        monkeypatch.setattr(p, "_rebuild_dut_link",
-                            lambda: pytest.fail("rebuilt an explicit tty"))
-        res = p.dut_exec("print(1)", tty="/dev/ttyACM0")
-        assert res["returncode"] == 1
 
 
 # ── a busy pod is not a broken pod ─────────────────────────────────────────

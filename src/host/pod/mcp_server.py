@@ -104,8 +104,8 @@ def handle_pod_register(label: str, match: str = None,
     return {"label": label, **entry}
 
 
-def _open_sessions(label: str = None) -> list:
-    """Open sessions in this process, optionally only those for one pod."""
+def _open_sessions(label: str) -> list:
+    """The sessions this process holds against one pod."""
     # Snapshot the store: another handler thread can insert or pop while this
     # comprehension runs, and `running` is a property, so iterating the live dict
     # can raise "dictionary changed size during iteration".
@@ -114,7 +114,7 @@ def _open_sessions(label: str = None) -> list:
              "running": rec["session"].running,
              "connected": rec["session"].connected}
             for sid, rec in list(_SESSIONS.items())
-            if label is None or rec["label"] == label]
+            if rec["label"] == label]
 
 
 def handle_pod_info(label: str) -> dict:
@@ -344,20 +344,55 @@ def handle_dut_open(label: str, device: str = None, log_path: str = None,
                     "link already up, which needs no pod REPL), or bring the "
                     "link up before opening the pod session, or session_close "
                     "'%s' first." % (pod_sid, pod_sid))
-        link = handle_dut_link(label, action="up")
-        device = link.get("tty")
-        if not device:
-            raise RuntimeError(
-                "dut_link(action=\"up\") attached the DUT but no CDC tty "
-                "appeared; pass device= explicitly once one does")
-        result["link"] = link
+        device = _pod.dut_tty()
+        result["link"] = {"tty": device}
     if recover:
-        result["recover"] = _pod_for(label).recover_dut_repl(device)
+        # recover_dut_repl opens its own exclusive transport on the tty, which
+        # pyserial refuses while a session of ours already holds it. Drive the
+        # same Ctrl-C / probe / Ctrl-B sequence down the held session instead,
+        # so recover=true means the same thing whether or not one is open.
+        sid = _session_id(label, device)
+        held = _SESSIONS.get(sid)
+        if held is not None and held["session"].running:
+            result["recover"] = _recover_over_session(sid)
+        else:
+            result["recover"] = _pod_for(label).recover_dut_repl(device)
     result.update(_open_session(
         label, log_path=log_path, device=device, mount=mount, exec=exec,
         cp=cp, soft_reset=soft_reset, unsafe_links=unsafe_links,
         reconnect=reconnect))
     return result
+
+
+def _recover_over_session(session: str, settle: float = 0.4,
+                          read_wait: float = 0.6) -> dict:
+    """Un-stick a raw-latched DUT over a session this process already holds.
+
+    Same sequence as Pod.recover_dut_repl, driven through the open connection
+    because opening a second one on the same tty is refused: Ctrl-C to break a
+    running program, a CR to see whether the friendly REPL answers, then Ctrl-B
+    to leave raw mode, then a CR to draw a fresh prompt. The probe is what tells
+    raw mode from a healthy REPL, since Ctrl-B answers with the friendly banner
+    either way.
+    """
+    s = _require_session(session)
+    start = s.tell()
+    s.interrupt()
+    time.sleep(settle)
+    probe_at = s.tell()
+    s.send(b"\r", newline=False)
+    time.sleep(read_wait)
+    probe_silent = ">>>" not in s.read_since(probe_at).get("text", "")
+    s.send(b"\x02", newline=False)          # Ctrl-B: raw REPL -> friendly
+    time.sleep(settle)
+    s.send(b"\r", newline=False)
+    time.sleep(read_wait)
+    text = s.read_since(start).get("text", "")
+    prompt = ">>>" in text
+    return {"ok": True, "session": session, "recovered": prompt,
+            "prompt_seen": prompt,
+            "was_raw": "raw REPL" in text or (probe_silent and prompt),
+            "output": text}
 
 
 def _require_session(session: str):
