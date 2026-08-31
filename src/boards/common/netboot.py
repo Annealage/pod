@@ -46,6 +46,10 @@ _ACCEPT_POLL_MS = const(150)
 # cached handle polls one of these. POLLNVAL is not exported by select, so its
 # numeric value (MP_STREAM_POLL_NVAL = 0x20) is OR'd in.
 _POLL_DEAD = select.POLLHUP | select.POLLERR | 0x20
+# Pause before restarting the REPL task after it returns (see main()). Only caps
+# the restart rate if stdin is permanently gone; a normal client disconnect
+# restarts fast enough to be invisible.
+_REPL_RESTART_MS = const(100)
 
 
 def _pm_none(wlan):
@@ -324,4 +328,24 @@ async def main():
     # persistent=True: Ctrl-D re-prompts, keeping the console up for the life of
     # the pod. stop_loop_on_exit=False: the REPL task can never tear down the
     # management plane. One sys.stdin reader serves UART and the dupterm socket.
-    await arepl.task(persistent=True, stop_loop_on_exit=False)
+    #
+    # arepl.task() returns when the stream feeding it goes away, which
+    # persistent= does not cover: that governs Ctrl-D only. A socket REPL client
+    # that disconnects mid-session is exactly that, and the REPL is meant to end
+    # there and be restarted rather than keep reading a dead source. This is the
+    # last await in main(), so letting it return would end asyncio.run() and
+    # cancel the accept loop, Wi-Fi supervisor and UART bridge with it, leaving
+    # a pod that still completes TCP handshakes on the REPL port but serves
+    # nobody, reachable only over the fallback UART REPL until someone resets
+    # it. Restart the REPL instead, so a disconnecting client costs its own
+    # session and nothing more.
+    while True:
+        try:
+            await arepl.task(persistent=True, stop_loop_on_exit=False)
+        except Exception as _e:
+            # A client that resets mid-session can surface as OSError out of the
+            # REPL's own stdin handling. Swallow it for the same reason the
+            # return is swallowed: the REPL is one session, the management plane
+            # is everything.
+            sys.print_exception(_e)
+        await asyncio.sleep_ms(_REPL_RESTART_MS)
