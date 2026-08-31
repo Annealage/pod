@@ -104,6 +104,10 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   software reaching GA; the counterpart to the deferred-capabilities list above.
 - `resume-after-power-cycle.md` - the brick-recovery runbook: XIP-wedge / flash
   power-on-reset recovery and the forward plan it unblocks.
+- `arepl-dupterm-upstream.md` - how the socket-REPL raw-mode disconnect fix is
+  composed into micropython fork branches for upstream submission, with the
+  draft PR descriptions and the reproduction. Also records the one thing it does
+  not address: a busy device cannot be interrupted over the socket REPL.
 
 ## 5. Code-sharing strategy with the ESP32-S3 variant
 
