@@ -1,5 +1,6 @@
 """Tests for pod.client - argv construction and subprocess injection."""
 
+import os
 import subprocess
 import pytest
 from unittest.mock import MagicMock
@@ -32,27 +33,37 @@ def pod_fake(fake_runner):
     return Pod(address=ADDRESS, repl_port=PORT, runner=fake_runner)
 
 
+def _norm(argv):
+    """argv with the ampremote path reduced to its basename.
+
+    _argv resolves the CLI next to sys.executable when one is installed there
+    (a venv or uv tool install), so the leading element is layout-dependent.
+    These tests cover argument construction, not which copy gets found.
+    """
+    return [os.path.basename(argv[0])] + list(argv[1:])
+
+
 class TestArgvConstruction:
     def test_exec_argv(self, pod):
         argv = pod._argv("exec", "print(1)")
-        assert argv == ["ampremote", "connect", CONNECT_TARGET, "exec", "print(1)"]
+        assert _norm(argv) == ["ampremote", "connect", CONNECT_TARGET, "exec", "print(1)"]
 
     def test_eval_argv(self, pod):
         argv = pod._argv("eval", "1+1")
-        assert argv == ["ampremote", "connect", CONNECT_TARGET, "eval", "1+1"]
+        assert _norm(argv) == ["ampremote", "connect", CONNECT_TARGET, "eval", "1+1"]
 
     def test_cp_argv(self, pod):
         # cp goes through fs cp
         argv = pod._argv("fs", "cp", "./main.py", ":main.py")
-        assert argv == ["ampremote", "connect", CONNECT_TARGET, "fs", "cp", "./main.py", ":main.py"]
+        assert _norm(argv) == ["ampremote", "connect", CONNECT_TARGET, "fs", "cp", "./main.py", ":main.py"]
 
     def test_mount_argv(self, pod):
         argv = pod._argv("mount", "/home/user/firmware")
-        assert argv == ["ampremote", "connect", CONNECT_TARGET, "mount", "/home/user/firmware"]
+        assert _norm(argv) == ["ampremote", "connect", CONNECT_TARGET, "mount", "/home/user/firmware"]
 
     def test_repl_argv(self, pod):
         argv = pod._argv("repl")
-        assert argv == ["ampremote", "connect", CONNECT_TARGET, "repl"]
+        assert _norm(argv) == ["ampremote", "connect", CONNECT_TARGET, "repl"]
 
     def test_connect_target_format(self, pod):
         # Verify the socket:// URI is formed correctly
@@ -73,7 +84,7 @@ class TestExecWithFakeRunner:
     def test_exec_argv_passed_to_runner(self, pod_fake, fake_runner):
         pod_fake.exec("print('hello')")
         call_argv = fake_runner.call_args[0][0]
-        assert call_argv[0] == "ampremote"
+        assert os.path.basename(call_argv[0]) == "ampremote"
         assert call_argv[3] == "exec"
         assert call_argv[4] == "print('hello')"
 
@@ -1132,3 +1143,59 @@ class TestFlashChunking:
         r = p._flash_region_chunked(0x0, data, 3333, True, "native")
         assert r["ok"] is True
         assert vcalls == [(0x0, 130 * 1024)]     # one verify, whole region
+
+
+class TestAmpremoteResolution:
+    """pod.client must shell out to the ampremote that ships with its own
+    interpreter, so the subprocess transport and pod.session's in-process
+    mpremote import are the same distribution. Resolving through PATH instead
+    can silently put the two on different code, which is the split this
+    resolution exists to prevent.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        from pod import client
+        saved = client._AMPREMOTE_EXE
+        client._AMPREMOTE_EXE = None
+        yield
+        client._AMPREMOTE_EXE = saved
+
+    def test_prefers_the_cli_beside_sys_executable(self, monkeypatch, tmp_path):
+        from pod import client
+        exe = tmp_path / "ampremote"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        monkeypatch.setattr(client.sys, "executable", str(tmp_path / "python3"))
+        assert client._ampremote_exe() == str(exe)
+
+    def test_falls_back_to_path_when_absent(self, monkeypatch, tmp_path):
+        from pod import client
+        monkeypatch.setattr(client.sys, "executable", str(tmp_path / "python3"))
+        assert client._ampremote_exe() == "ampremote"
+
+    def test_non_executable_neighbour_is_not_used(self, monkeypatch, tmp_path):
+        # A same-named file without the exec bit must not be selected.
+        from pod import client
+        (tmp_path / "ampremote").write_text("not executable")
+        monkeypatch.setattr(client.sys, "executable", str(tmp_path / "python3"))
+        assert client._ampremote_exe() == "ampremote"
+
+    def test_result_is_cached(self, monkeypatch, tmp_path):
+        from pod import client
+        monkeypatch.setattr(client.sys, "executable", str(tmp_path / "python3"))
+        first = client._ampremote_exe()
+        exe = tmp_path / "ampremote"          # appears after the first call
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        assert client._ampremote_exe() == first
+
+    def test_argv_uses_the_resolved_cli(self, monkeypatch, tmp_path):
+        from pod import client
+        exe = tmp_path / "ampremote"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        monkeypatch.setattr(client.sys, "executable", str(tmp_path / "python3"))
+        client._AMPREMOTE_EXE = None
+        p = Pod(addr4="10.0.0.1")
+        assert p._argv("exec", "x")[0] == str(exe)

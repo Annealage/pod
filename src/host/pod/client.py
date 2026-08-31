@@ -57,6 +57,30 @@ def _iid6(addr):
     return int(ip) & 0xFFFFFFFFFFFFFFFF
 
 
+_AMPREMOTE_EXE = None
+
+
+def _ampremote_exe() -> str:
+    """Path to the ampremote CLI belonging to this interpreter.
+
+    pod.client shells out to the ampremote CLI while pod.session imports
+    mpremote in-process. Those must be the same distribution: ampremote ships
+    both, so a single install satisfies both, but only if the subprocess
+    resolves to the install this interpreter came from. A bare name would go
+    through PATH instead and can pick up an unrelated copy, which silently
+    puts the two transports on different code. Looking next to sys.executable
+    makes them agree by construction in a venv, a uv tool install or a system
+    install; the bare name remains as a fallback for layouts that put the
+    script elsewhere.
+    """
+    global _AMPREMOTE_EXE
+    if _AMPREMOTE_EXE is None:
+        candidate = os.path.join(os.path.dirname(sys.executable), "ampremote")
+        _AMPREMOTE_EXE = (candidate if os.access(candidate, os.X_OK)
+                          else "ampremote")
+    return _AMPREMOTE_EXE
+
+
 def _last_dict(stdout: str) -> dict:
     """Parse the last printed dict literal from on-pod stdout."""
     for line in reversed((stdout or "").strip().splitlines()):
@@ -237,12 +261,12 @@ class Pod:
     def _argv(self, verb: str, *args: str) -> List[str]:
         """Build the ampremote argv list for a given verb and arguments.
 
-        Returns a list starting with ['ampremote', 'connect',
+        Returns a list starting with [<ampremote>, 'connect',
         'socket://HOST:PORT', verb, *args] where HOST is the resolved connect
         target (IPv6 literals bracketed). No subprocess is invoked.
         """
         connect_target = self._resolver.ampremote_target(self.repl_port)
-        return ["ampremote", "connect", connect_target, verb] + list(args)
+        return [_ampremote_exe(), "connect", connect_target, verb] + list(args)
 
     # ── live commands ────────────────────────────────────────────────────
 

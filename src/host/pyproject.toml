@@ -8,14 +8,39 @@ version = "0.1.0"
 description = "Host-side tooling for the Annealage Pod hardware-in-the-loop test rig."
 requires-python = ">=3.10"
 # ampremote (Andrew's async mpremote fork - improved TCP + raw-REPL support over
-# upstream) provides the `mpremote` import the pod tooling drives: the one-shot
-# exec/eval/cp/mount verbs and the persistent streaming REPL session
-# (pod.session, via mpremote SerialTransport). Not on PyPI - installed straight
-# from GitHub; the package lives in a subdirectory of the monorepo fork. Pinned
-# to a commit (not @main) so the transport contract this depends on is
-# reproducible; bump the SHA deliberately when picking up fork fixes.
+# upstream) is the single mpremote this project uses. It installs as the
+# `mpremote` import package AND provides the `ampremote` console script, so both
+# consumers resolve to the same code: pod.client shells out to `ampremote` for
+# the one-shot exec/eval/cp/mount verbs, and pod.session imports
+# mpremote.transport_serial.SerialTransport for the persistent streaming REPL.
+# Do not install upstream `mpremote` alongside it; both claim the `mpremote`
+# import name, and whichever wins silently decides which transport code runs.
+#
+# Not on PyPI, so it installs from git. Pinned to a commit rather than @main so
+# the transport contract is reproducible on another host; bump deliberately.
+#
+# The pin names the fork of micropython directly with the package's own
+# subdirectory: one repo and one SHA, so a clean install needs no submodule init
+# and does not depend on a wrapper repo's gitlink. The commit is tagged
+# ampremote-pin-54a3b1ea5e82 so it cannot be garbage collected out from under
+# this pin.
+#
+# That tag is only safe because the package restricts its version discovery to
+# version tags (git describe --match "v[0-9]*"). The package versions itself
+# from VCS, and a checkout sitting exactly on a NON-version tag - which is what
+# a SHA pin always produces - previously made the build fail outright with
+# "Can't parse version from tag". Verified at this commit: describe over all
+# tags still yields the unparseable ampremote-pin-54a3b1ea5e82, while the
+# restricted match yields v1.29.0-61-g54a3b1ea5e. So do not pin to a commit in
+# a fork whose packaging predates that fix.
+#
+# Verified for this pin in a clean venv: installs as
+# ampremote 1.29.0.post61+g54a3b1ea5, provides both the `mpremote` import
+# package and the ampremote/ampr console scripts, and drives a live pod over
+# socket://. Includes the SIGTERM/SIGHUP raw-exit guard, so a host tool killed
+# mid-session leaves the REPL cleanly instead of stranding it.
 dependencies = [
-  "ampremote @ git+https://github.com/andrewleech/ampremote@999188c8816f15900a8fce1d552a6de8f39645de#subdirectory=micropython/tools/mpremote",
+  "ampremote @ git+https://github.com/andrewleech/micropython@54a3b1ea5e8259eef7c7cc9c017ce06ecb0ac499#subdirectory=tools/mpremote",
   "pyelftools",
 ]
 
@@ -26,7 +51,7 @@ dev = [
   "pytest",
   "zeroconf",
   "mcp",
-  "ampremote @ git+https://github.com/andrewleech/ampremote@999188c8816f15900a8fce1d552a6de8f39645de#subdirectory=micropython/tools/mpremote",
+  "ampremote @ git+https://github.com/andrewleech/micropython@54a3b1ea5e8259eef7c7cc9c017ce06ecb0ac499#subdirectory=tools/mpremote",
 ]
 
 [project.scripts]
