@@ -1,6 +1,6 @@
 # Unit tests for annealage_pod.power.
 
-from annealage_pod import power
+from annealage_pod.esp32 import power
 
 
 def test_rails_default_off():

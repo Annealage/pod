@@ -2,7 +2,7 @@
 
 import pytest
 
-from annealage_pod import dut, power, relays
+from annealage_pod.esp32 import dut, power, relays
 
 
 def test_reset_unknown_mode_raises():

@@ -1,6 +1,6 @@
 # Unit tests for annealage_pod.supervisor cleanup hooks.
 
-from annealage_pod import supervisor
+from annealage_pod.esp32 import supervisor
 
 
 def test_default_hook_present_on_import():

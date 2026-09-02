@@ -4,7 +4,7 @@
 
 import asyncio
 
-from annealage_pod import dut, power, relays, supervisor
+from annealage_pod.esp32 import dut, power, relays, supervisor
 
 
 async def _exercise():

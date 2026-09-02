@@ -1,6 +1,6 @@
 # Unit tests for annealage_pod.relays.
 
-from annealage_pod import relays
+from annealage_pod.esp32 import relays
 
 
 def test_numbers():

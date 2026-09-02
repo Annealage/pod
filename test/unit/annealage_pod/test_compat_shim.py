@@ -1,6 +1,6 @@
 # Unit tests for annealage_pod.compat (RP_INFRA shim).
 
-from annealage_pod import compat, relays
+from annealage_pod.esp32 import compat, relays
 
 
 def test_module_level_vars_present():

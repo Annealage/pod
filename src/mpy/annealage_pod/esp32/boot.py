@@ -30,7 +30,8 @@ try:
 except ImportError:
     _json = None
 
-from . import _version, supervisor
+from .. import _version
+from . import supervisor
 
 
 # --- Credentials ----------------------------------------------------------
