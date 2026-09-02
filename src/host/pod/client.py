@@ -92,15 +92,23 @@ BUSY_MARKERS = ("busy - repl in use", "repl in use by another client",
                 "annealage-pod: busy")
 REFUSED_MARKERS = ("connection reset by peer", "connection refused")
 
+# ops.SwdBusy (the phase-7 re-entrancy guard) raises this on the pod when a
+# guarded op is refused; it surfaces here as a plain traceback line in the
+# exec's own output, not a closed connection, so it needs its own marker
+# rather than falling into the generic "exception on the pod" bucket.
+SWD_BUSY_MARKERS = ("annealage-pod: swd busy",)
+
 
 def _classify_exec_failure(stderr, stdout):
     """Best-effort label for why a pod exec failed, from ampremote output.
 
-    Distinguishes a pod whose REPL is held by someone else from a pod that
-    cannot be reached at all. Those need opposite responses, and only one of
-    them is a fault.
+    Distinguishes a pod whose REPL is held by someone else, or whose shared
+    SWD session is held by someone else, from a pod that cannot be reached at
+    all. Those need opposite responses, and only one of them is a fault.
     """
     blob = ((stderr or "") + "\n" + (stdout or "")).lower()
+    if any(s in blob for s in SWD_BUSY_MARKERS):
+        return "pod SWD busy (held by another caller)"
     if any(s in blob for s in BUSY_MARKERS):
         return "pod REPL busy (held by another client)"
     if any(s in blob for s in REFUSED_MARKERS):
@@ -189,6 +197,7 @@ class PodExecError(RuntimeError):
         self.reason = _classify_exec_failure(self.stderr, self.stdout)
         self.caller = caller
         self.busy = self.reason.startswith("pod REPL busy") or \
+            self.reason.startswith("pod SWD busy") or \
             self.reason.startswith("pod closed the connection")
         detail = self.stderr or self.stdout
         last = detail.splitlines()[-1] if detail else ""
@@ -505,33 +514,39 @@ class Pod:
 
     @staticmethod
     def _flash_stream_cmd(addr: int, total: int, port: int, verify: bool,
-                          loader: str = "native") -> str:
-        """Build the on-pod flash_stream invocation (pure, for testability)."""
+                          loader: str = "native", caller=None) -> str:
+        """Build the on-pod flash_stream invocation (pure, for testability).
+
+        caller feeds the pod-side SWD re-entrancy guard (ops._guarded); None
+        (the default, e.g. a direct call with no client wrapper) is never
+        gated, matching every other guarded-op command builder below.
+        """
         return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.flash_stream(%d, %d, port=%d, verify=%s, loader=%r))"
-            % (addr, total, port, bool(verify), loader)
+            "print(o.flash_stream(%d, %d, port=%d, verify=%s, loader=%r, caller=%r))"
+            % (addr, total, port, bool(verify), loader, caller)
         )
 
     @staticmethod
     def _write_mem_stream_cmd(addr: int, total: int, port: int,
-                              protect) -> str:
+                              protect, caller=None) -> str:
         """Build the on-pod write_mem_stream invocation (pure, for testability)."""
         prot_arg = ("None" if not protect
                     else repr([[int(lo), int(hi)] for lo, hi in protect]))
         return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.write_mem_stream(%d, %d, port=%d, protect=%s))"
-            % (addr, total, port, prot_arg)
+            "print(o.write_mem_stream(%d, %d, port=%d, protect=%s, caller=%r))"
+            % (addr, total, port, prot_arg, caller)
         )
 
     @staticmethod
-    def _erase_all_cmd(clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native") -> str:
+    def _erase_all_cmd(clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native",
+                       caller=None) -> str:
         """Build the on-pod erase_all invocation (pure, for testability)."""
         return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.erase_all(clkdiv=%d, loader=%r))"
-            % (clkdiv, loader)
+            "print(o.erase_all(clkdiv=%d, loader=%r, caller=%r))"
+            % (clkdiv, loader, caller)
         )
 
     def _stream_region(self, cmd: str, payload, size: int, port: int) -> dict:
@@ -710,7 +725,8 @@ class Pod:
         re-log an eviction that the enclosing call already settled."""
         if loader == "flm":
             self.ensure_flm_algo()
-        out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader))
+        out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader,
+                                            caller=self.caller))
         return _last_dict(out)
 
     def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native",
@@ -739,7 +755,8 @@ class Pod:
         ops.flash_crc). Returns {ok, crc, addr, length, err}."""
         out = self.exec(
             "import annealage_pod.debug.ops as o; "
-            "print(o.flash_crc(%d, %d, clkdiv=%d))" % (addr, length, clkdiv)
+            "print(o.flash_crc(%d, %d, clkdiv=%d, caller=%r))"
+            % (addr, length, clkdiv, self.caller)
         )
         return _last_dict(out)
 
@@ -765,7 +782,8 @@ class Pod:
                 * self._FLASH_STREAM_CHUNK
             sub_end = min(addr + total, boundary)
             n = sub_end - sub_start
-            cmd = self._flash_stream_cmd(sub_start, n, port, verify, loader=loader)
+            cmd = self._flash_stream_cmd(sub_start, n, port, verify, loader=loader,
+                                         caller=self.caller)
             sub = self._stream_region(cmd, data[off:off + n], n, port)
             if not sub.get("ok"):
                 return {"ok": False, "addr": addr, "bytes": off,
@@ -949,7 +967,8 @@ class Pod:
                 # flash region" is correct for the actual target. RAM segments are
                 # MEM-AP writes (no erase/stream-drop risk) and are not CRC-checked.
                 cmd = self._write_mem_stream_cmd(lma, size, port,
-                                                 protect=flash_ranges)
+                                                 protect=flash_ranges,
+                                                 caller=self.caller)
                 seg_dict = self._stream_region(cmd, data, size, port)
             seg_dict["lma"] = lma
             seg_dict["region"] = region
@@ -1036,7 +1055,8 @@ class Pod:
         """
         stolen = self._guard_live_attach(keep_attached, force=force)
         out = self.exec(
-            "import annealage_pod.debug.ops as o; print(o.reset(%r))" % mode
+            "import annealage_pod.debug.ops as o; print(o.reset(%r, caller=%r))"
+            % (mode, self.caller)
         )
         result = _last_dict(out)
         if stolen:
@@ -1259,7 +1279,8 @@ class Pod:
         does not connect (DUT unpowered / not wired).
         """
         out = self.exec(
-            "import annealage_pod.debug.ops as o; print(o.discover())")
+            "import annealage_pod.debug.ops as o; print(o.discover(caller=%r))"
+            % (self.caller,))
         return _last_dict(out)
 
     # ── DUT register / memory peek-poke over SWD (on-pod debug stack) ──────
@@ -1279,7 +1300,8 @@ class Pod:
         """
         stolen = self._guard_live_attach(keep_attached, force=force)
         result = _last_dict(self.exec(
-            "import annealage_pod.debug.ops as o; print(o.halt())"))
+            "import annealage_pod.debug.ops as o; print(o.halt(caller=%r))"
+            % (self.caller,)))
         if stolen:
             result["stole_from"] = stolen
         return result
@@ -1287,7 +1309,8 @@ class Pod:
     def resume_dut(self) -> dict:
         """Resume the DUT core over SWD after halt_dut / reset_dut mode='halt'."""
         return _last_dict(self.exec(
-            "import annealage_pod.debug.ops as o; print(o.resume())"))
+            "import annealage_pod.debug.ops as o; print(o.resume(caller=%r))"
+            % (self.caller,)))
 
     def read_reg(self, reg) -> dict:
         """Read one DUT core register over SWD (core must be halted first).
@@ -1299,14 +1322,16 @@ class Pod:
         """
         regsel = _resolve_regsel(reg)
         return _last_dict(self.exec(
-            "import annealage_pod.debug.ops as o; print(o.read_reg(%d))" % regsel))
+            "import annealage_pod.debug.ops as o; print(o.read_reg(%d, caller=%r))"
+            % (regsel, self.caller)))
 
     def write_reg(self, reg, value: int) -> dict:
         """Write one DUT core register over SWD (core must be halted first)."""
         regsel = _resolve_regsel(reg)
         return _last_dict(self.exec(
-            "import annealage_pod.debug.ops as o; print(o.write_reg(%d, %d))"
-            % (regsel, value & 0xFFFFFFFF)))
+            "import annealage_pod.debug.ops as o; "
+            "print(o.write_reg(%d, %d, caller=%r))"
+            % (regsel, value & 0xFFFFFFFF, self.caller)))
 
     # MEM-AP single-transfer cap (mirrors dbgsrv.MAX_DATA); larger reads/writes
     # belong on the streaming read_dut/flash_dut paths.
@@ -1324,8 +1349,9 @@ class Pod:
             raise ValueError("length %d out of range 0..%d (use read_dut for bulk)"
                              % (length, self._MAX_MEM))
         return _last_dict(self.exec(
-            "import annealage_pod.debug.ops as o; print(o.read_mem(%d, %d))"
-            % (addr, length)))
+            "import annealage_pod.debug.ops as o; "
+            "print(o.read_mem(%d, %d, caller=%r))"
+            % (addr, length, self.caller)))
 
     def write_mem(self, addr: int, data, protect=None) -> dict:
         """Write DUT memory over SWD (RAM/peripherals only, <= 4096 bytes).
@@ -1353,15 +1379,16 @@ class Pod:
                     else repr([[int(lo), int(hi)] for lo, hi in protect]))
         return _last_dict(self.exec(
             "import annealage_pod.debug.ops as o;"
-            " print(o.write_mem(%d, %r, protect=%s))"
-            % (addr, data_hex, prot_arg)))
+            " print(o.write_mem(%d, %r, protect=%s, caller=%r))"
+            % (addr, data_hex, prot_arg, self.caller)))
 
     @staticmethod
-    def _dump_stream_cmd(addr: int, length: int, port: int) -> str:
+    def _dump_stream_cmd(addr: int, length: int, port: int, caller=None) -> str:
         """Build the on-pod dump_stream invocation (pure, for testability)."""
         return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.dump_stream(%d, %d, port=%d))" % (addr, length, port)
+            "print(o.dump_stream(%d, %d, port=%d, caller=%r))"
+            % (addr, length, port, caller)
         )
 
     def read_dut(self, addr: int, length: int, out_path: str,
@@ -1378,7 +1405,7 @@ class Pod:
         def _run():
             try:
                 result["out"] = self.exec(
-                    self._dump_stream_cmd(addr, length, port))
+                    self._dump_stream_cmd(addr, length, port, caller=self.caller))
             except Exception as exc:  # noqa: BLE001 - surfaced to caller
                 result["exc"] = exc
 
@@ -1420,12 +1447,12 @@ class Pod:
     # ── DUT GDB endpoint (on-pod debug stack, workstream D3) ──────────────
 
     @staticmethod
-    def _gdb_serve_cmd(port: int, reset_halt: bool) -> str:
+    def _gdb_serve_cmd(port: int, reset_halt: bool, caller=None) -> str:
         """Build the on-pod gdb_serve invocation (pure, for testability)."""
         return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.gdb_serve(port=%d, reset_halt=%s))"
-            % (port, bool(reset_halt))
+            "print(o.gdb_serve(port=%d, reset_halt=%s, caller=%r))"
+            % (port, bool(reset_halt), caller)
         )
 
     def gdb_endpoint(self, listen_port: int = 0, gdb_port: int = 3335,
@@ -1451,7 +1478,7 @@ class Pod:
         def _run():
             try:
                 result["out"] = self.exec(
-                    self._gdb_serve_cmd(gdb_port, reset_halt))
+                    self._gdb_serve_cmd(gdb_port, reset_halt, caller=self.caller))
             except Exception as exc:  # noqa: BLE001 - surfaced to caller
                 result["exc"] = exc
 

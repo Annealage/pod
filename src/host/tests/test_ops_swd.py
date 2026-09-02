@@ -46,6 +46,24 @@ import annealage_pod.debug.ops as ops          # noqa: E402
 import annealage_pod.debug.dbgsrv as dbgsrv     # noqa: E402
 
 
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """holders.py calls time.ticks_ms()/ticks_diff(), MicroPython-only names
+    CPython's time module lacks. Stands in a controllable monotonic pair so
+    the SWD guard tests below can advance "now" deterministically, and clears
+    holders state before/after so a guard claim in one test cannot leak into
+    the next.
+    """
+    now = types.SimpleNamespace(ms=0)
+    monkeypatch.setattr(
+        ops.holders, "time",
+        types.SimpleNamespace(ticks_ms=lambda: now.ms,
+                              ticks_diff=lambda a, b: a - b))
+    ops.holders.clear()
+    yield now
+    ops.holders.clear()
+
+
 class _FakeCM:
     def __init__(self, halted=True, reg=0xCAFEBABE, dhcsr=0x00020000):
         self._halted = halted
@@ -293,3 +311,87 @@ class TestFlmAlgoInstall:
     def test_select_unknown_loader_refuses(self):
         with pytest.raises(ValueError, match="unknown loader"):
             ops._select_loader("nope")
+
+
+class TestSwdGuard:
+    """The phase-7 re-entrancy guard (conflict-legibility.md item 5): a plain
+    mutex on holders "swd" for genuinely concurrent entry, plus a short sticky
+    window (ops.STICKY_S) that keeps refusing a DIFFERENT caller for a few
+    seconds after the previous caller's last guarded call - closing the gap a
+    one-shot pod_exec sequence opens between calls, where each call releases
+    the REPL slot and would otherwise let a second caller's sequence interleave
+    before the first sequence's next call runs.
+    """
+
+    def test_no_caller_is_never_gated(self, fake_clock):
+        # A human at the REPL, or ops.* called directly with no client
+        # wrapper: deliberate god-mode: never gated (Non-goals).
+        ops._guard_enter(None, "reset")
+        ops._guard_enter(None, "reset")           # a second one still no-ops
+        assert ops.holders.who("swd") == {}
+
+    def test_first_caller_claims_and_releases_on_exit(self, fake_clock):
+        ops._guard_enter("agent-a", "reset")
+        assert ops.holders.who("swd")["swd"]["caller"] == "agent-a"
+        ops._guard_exit("agent-a")
+        assert ops.holders.who("swd") == {}
+
+    def test_concurrent_entry_by_a_different_caller_is_refused(self, fake_clock):
+        # Held right now, never exited: the plain-mutex half of the guard, not
+        # the sticky one - refused with no regard for elapsed time.
+        ops._guard_enter("agent-a", "reset")
+        with pytest.raises(ops.SwdBusy, match="agent-a"):
+            ops._guard_enter("agent-b", "reset")
+
+    def test_a_different_caller_right_after_exit_is_still_refused(self, fake_clock):
+        ops._guard_enter("agent-a", "reset")
+        ops._guard_exit("agent-a")
+        with pytest.raises(ops.SwdBusy, match="agent-a"):
+            ops._guard_enter("agent-b", "flash_file")
+
+    def test_the_same_caller_reconnecting_is_refreshed_not_refused(self, fake_clock):
+        ops._guard_enter("agent-a", "reset")
+        ops._guard_exit("agent-a")
+        fake_clock.ms += 1000                     # next call of the same sequence
+        ops._guard_enter("agent-a", "flash_file")
+        assert ops.holders.who("swd")["swd"]["caller"] == "agent-a"
+
+    def test_a_different_caller_is_admitted_once_the_sticky_window_elapses(self, fake_clock):
+        ops._guard_enter("agent-a", "reset")
+        ops._guard_exit("agent-a")
+        fake_clock.ms += (ops.STICKY_S + 1) * 1000
+        ops._guard_enter("agent-b", "reset")      # does not raise
+        assert ops.holders.who("swd")["swd"]["caller"] == "agent-b"
+
+    def test_guard_exit_releases_the_mutex_even_when_the_call_raises(self, fake_clock):
+        @ops._guarded("dummy")
+        def _op(caller=None):
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError):
+            _op(caller="agent-a")
+        assert ops.holders.who("swd") == {}       # mutex released
+        # but the sticky window still remembers agent-a was just here
+        with pytest.raises(ops.SwdBusy, match="agent-a"):
+            ops._guard_enter("agent-b", "reset")
+
+    def test_a_guarded_ops_function_releases_on_its_normal_exit_path(
+            self, monkeypatch, fake_clock):
+        _patch_session(monkeypatch, cm=_FakeCM(halted=False))
+        r = ops.halt(caller="agent-a")
+        assert r["ok"] is True
+        assert ops.holders.who("swd") == {}
+
+    def test_a_guarded_ops_function_raises_swdbusy_for_a_different_caller(
+            self, monkeypatch, fake_clock):
+        _patch_session(monkeypatch, cm=_FakeCM(halted=False))
+        ops.halt(caller="agent-a")
+        with pytest.raises(ops.SwdBusy, match="agent-a"):
+            ops.halt(caller="agent-b")
+
+    def test_a_guarded_ops_function_still_works_with_no_caller_at_all(
+            self, monkeypatch, fake_clock):
+        # Existing callers (direct REPL use, and every test above this class)
+        # never pass caller=; the decorator must not change that contract.
+        _patch_session(monkeypatch, cm=_FakeCM(halted=False))
+        assert ops.halt()["ok"] is True

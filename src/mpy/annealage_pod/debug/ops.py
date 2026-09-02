@@ -8,12 +8,17 @@
 # chunks, so the whole image is never held in pod RAM; the host transfers the
 # image with a normal file copy and never streams target contents back unless it
 # asks for an explicit dump.
+#
+# Every entry point that touches the shared _dp/_ap/_cm session is wrapped in
+# the @_guarded re-entrancy guard (see below): interleaved transactions from
+# two callers do not fail on their own, they return wrong data, so this is the
+# one place legibility and guarding are the same mechanism.
 
 import struct
 import time
 
 from . import swd_dap, swd_pio, flash_nrf52, netutil, dbgsrv
-from .. import _rp2_pinmap
+from .. import _rp2_pinmap, holders
 
 _dp = None
 _ap = None
@@ -24,6 +29,71 @@ _dwt = None
 _flm = None
 _flm_algo = None
 _flm_stage = None
+
+
+class SwdBusy(Exception):
+    """Raised by the @_guarded entry-point wrapper: another caller holds the
+    shared SWD session, or held it too recently for the sticky window (below)
+    to have expired. Uncaught, this propagates through the REPL exec as a
+    plain traceback that client._classify_exec_failure recognises and turns
+    into a busy PodExecError instead of a raw exception dump."""
+
+    def __init__(self, holder):
+        self.holder = holder
+        who = holder.get("caller", "unknown")
+        age = holder.get("since_s")
+        super().__init__(
+            "annealage-pod: SWD BUSY - held by %s%s"
+            % (who, (" %ds ago" % age) if age is not None else ""))
+
+
+# How long a caller's SWD use keeps a DIFFERENT caller out after the call that
+# claimed it has already returned and released the mutex below. Closes the gap
+# a one-shot pod_exec sequence opens: the REPL is single-holder, so two calls
+# of the SAME sequence are already serialised, but each call releases the REPL
+# slot on return, and without this a second caller's sequence is free to
+# interleave in the gap before the first sequence's next call. Seconds, not
+# minutes: enough for the same caller's next round trip, not long enough to
+# lock an idle pod against everyone else (conflict-legibility.md item 5).
+STICKY_S = 5
+
+
+def _guard_enter(caller, op):
+    if caller is None:
+        # No caller means a human at the REPL, or ops.* called directly with
+        # no client wrapper: deliberate god-mode, never gated (Non-goals).
+        return
+    held = holders.who("swd").get("swd")
+    if held and held["caller"] != caller:
+        raise SwdBusy(held)
+    last = holders.recent("swd")
+    if last and last["caller"] != caller and last["since_s"] < STICKY_S:
+        raise SwdBusy(last)
+    holders.note("swd", caller, op)
+
+
+def _guard_exit(caller):
+    if caller is not None:
+        holders.drop("swd")
+
+
+def _guarded(op):
+    """Wrap an ops entry point with the SWD re-entrancy guard.
+
+    `caller`, if passed as a keyword, never reaches the wrapped function: it
+    is consumed here so every guarded function's own signature stays exactly
+    what the host command set already documents.
+    """
+    def decorate(fn):
+        def wrapped(*args, **kwargs):
+            caller = kwargs.pop("caller", None)
+            _guard_enter(caller, op)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _guard_exit(caller)
+        return wrapped
+    return decorate
 
 
 # Selectable flash backend. "native" is the per-family NVM path
@@ -194,6 +264,7 @@ def _flm_program_file(flm_fl, addr, fileobj, verify):
     return n
 
 
+@_guarded('info')
 def info(clkdiv=swd_pio.DEFAULT_CLKDIV):
     dp, ap, cm, fl = _ensure(clkdiv)
     return {
@@ -205,6 +276,7 @@ def info(clkdiv=swd_pio.DEFAULT_CLKDIV):
     }
 
 
+@_guarded('discover')
 def discover(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Identify the connected DUT with architecturally-generic ADIv5/Cortex-M
     # reads only - the DP IDCODE, the MEM-AP IDR, the Cortex-M CPUID, and the
@@ -225,6 +297,7 @@ def discover(clkdiv=swd_pio.DEFAULT_CLKDIV):
         return {"ok": False, "err": repr(e)}
 
 
+@_guarded('flash_file')
 def flash_file(addr, path, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True, chunk_words=256,
                loader="native"):
     # Program target flash from a pod-side file, bounded memory, then resume.
@@ -251,6 +324,7 @@ def flash_file(addr, path, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True, chunk_wor
     return {"ok": True, "addr": addr, "bytes": n, "ms": dt, "loader": loader}
 
 
+@_guarded('flash_stream')
 def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True,
                  loader="native"):
     # Flash a DUT image streamed over TCP straight into pod RAM, no filesystem.
@@ -320,6 +394,7 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
             "loader": loader}
 
 
+@_guarded('erase_all')
 def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
     # Erase the entire DUT flash, returning timing and loader info. loader="native"
     # (default) uses NRF52Flash.mass_erase() directly through the NVMC; loader="flm"
@@ -351,6 +426,7 @@ def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
     return {"ok": err is None, "ms": dt, "loader": loader, "err": err}
 
 
+@_guarded('write_mem_stream')
 def write_mem_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_CLKDIV,
                      protect=None):
     # Write a raw byte stream received over TCP directly into target memory via
@@ -413,6 +489,7 @@ def write_mem_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFA
     return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err}
 
 
+@_guarded('dump_stream')
 def dump_stream(addr, length, port=3334, clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Explicit read of target memory streamed to the host over TCP, no
     # filesystem (the reverse of flash_stream). Reads the DUT in bounded
@@ -455,6 +532,7 @@ def dump_stream(addr, length, port=3334, clkdiv=swd_pio.DEFAULT_CLKDIV):
     return {"ok": err is None, "addr": addr, "bytes": length, "err": err}
 
 
+@_guarded('flash_crc')
 def flash_crc(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
     # CRC32 of a DUT flash region, read over SWD - the end-to-end integrity check
     # the streaming program path lacks. flash_stream verifies each chunk it
@@ -490,6 +568,7 @@ def flash_crc(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
             "length": length, "err": err}
 
 
+@_guarded('reset')
 def reset(mode="sysreset", clkdiv=swd_pio.DEFAULT_CLKDIV):
     dp, ap, cm, fl = _ensure(clkdiv)
     if mode == "halt":
@@ -516,6 +595,7 @@ def reset(mode="sysreset", clkdiv=swd_pio.DEFAULT_CLKDIV):
 # the flash-region write guard are reused from dbgsrv so there is one
 # implementation of each.
 
+@_guarded('halt')
 def halt(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Halt the core where it is and hold it (no auto-resume). Required before a
     # register read/write; also freezes the DUT (incl. its USB) for the duration.
@@ -527,6 +607,7 @@ def halt(clkdiv=swd_pio.DEFAULT_CLKDIV):
         return {"ok": False, "err": repr(e)}
 
 
+@_guarded('resume')
 def resume(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Resume a core halted by halt() / reset(mode="halt").
     try:
@@ -537,6 +618,7 @@ def resume(clkdiv=swd_pio.DEFAULT_CLKDIV):
         return {"ok": False, "err": repr(e)}
 
 
+@_guarded('read_reg')
 def read_reg(regsel, clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Validate the (cheap) argument before _ensure, which line-resets the DP.
     if regsel < 0 or regsel > dbgsrv.REGSEL_MAX:
@@ -551,6 +633,7 @@ def read_reg(regsel, clkdiv=swd_pio.DEFAULT_CLKDIV):
         return {"ok": False, "err": repr(e)}
 
 
+@_guarded('write_reg')
 def write_reg(regsel, value, clkdiv=swd_pio.DEFAULT_CLKDIV):
     if regsel < 0 or regsel > dbgsrv.REGSEL_MAX:
         return {"ok": False, "err": "regsel out of range 0..%d" % dbgsrv.REGSEL_MAX}
@@ -566,6 +649,7 @@ def write_reg(regsel, value, clkdiv=swd_pio.DEFAULT_CLKDIV):
         return {"ok": False, "err": repr(e)}
 
 
+@_guarded('read_mem')
 def read_mem(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
     import binascii
     if length < 0 or length > dbgsrv.MAX_DATA:
@@ -580,6 +664,7 @@ def read_mem(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
         return {"ok": False, "err": repr(e)}
 
 
+@_guarded('write_mem')
 def write_mem(addr, data_hex, protect=None, clkdiv=swd_pio.DEFAULT_CLKDIV):
     import binascii
     try:
@@ -612,6 +697,7 @@ def write_mem(addr, data_hex, protect=None, clkdiv=swd_pio.DEFAULT_CLKDIV):
     return {"ok": True, "addr": addr, "length": len(data)}
 
 
+@_guarded('gdb_serve')
 def gdb_serve(port=3335, clkdiv=swd_pio.DEFAULT_CLKDIV, reset_halt=True):
     # Bring the DP up ONCE, halt, and hand the live session to the binary debug
     # server (dbgsrv). The dbgsrv loop runs against this session and never calls
@@ -660,6 +746,7 @@ def gdb_serve(port=3335, clkdiv=swd_pio.DEFAULT_CLKDIV, reset_halt=True):
     return {"ok": err is None, "port": port, "err": err}
 
 
+@_guarded('close')
 def close():
     # Resume the target, fully release the SWD PIO (so PIO1 is reclaimable, e.g.
     # by the analyser swap), and drop the cached session (next call re-creates it).

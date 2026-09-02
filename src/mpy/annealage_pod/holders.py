@@ -22,11 +22,22 @@
 # pio and peripherals are NOT duplicated here. They already have registries
 # (pio_arbiter._claims, peripherals._INST) and who() reads through to those, so
 # each fact lives in exactly one place.
+#
+# recent() is the one deliberate exception to "no TTL, no expiry": it answers
+# who last held a resource and how long ago, surviving drop(), so a caller
+# built on top of this module (ops.py's SWD guard) can apply its own short
+# sticky window without this module tracking time-based policy itself.
 
 import time
 
 # resource -> (caller, since_ms, detail)
 _HELD = {}
+
+# resource -> (caller, since_ms, detail) of the last note(), regardless of any
+# drop() since. Powers a caller-scoped sticky window (see ops.py's SWD guard):
+# who() answers "is it held RIGHT NOW", this answers "who used it last, and
+# how long ago", which a plain drop() would otherwise erase.
+_RECENT = {}
 
 # Cumulative call counts, for diagnosing a record that appears to come and go:
 # they distinguish "drop is firing" from "the reader is racing".
@@ -38,17 +49,32 @@ RESOURCES = ("repl", "usbip", "swd")
 
 def note(resource, caller, detail=""):
     """Record that `caller` now holds `resource`. Idempotent for the same caller."""
-    _HELD[resource] = (caller, time.ticks_ms(), detail)
+    rec = (caller, time.ticks_ms(), detail)
+    _HELD[resource] = rec
+    _RECENT[resource] = rec
     _STATS["note"] += 1
     return True
 
 
 def drop(resource):
-    """Clear `resource`. Returns True if something was held."""
+    """Clear `resource`. Returns True if something was held.
+
+    Leaves _RECENT untouched: a resource that is no longer held right now was
+    still held a moment ago, and recent() answers exactly that question.
+    """
     gone = _HELD.pop(resource, None) is not None
     if gone:
         _STATS["drop"] += 1
     return gone
+
+
+def recent(resource):
+    """The last caller to note() `resource`, even if it has since been
+    dropped. {} if `resource` has never been noted since the last clear()."""
+    rec = _RECENT.get(resource)
+    if rec is None:
+        return {}
+    return {"caller": rec[0], "since_s": _age_s(rec[1]), "detail": rec[2]}
 
 
 def _age_s(since_ms):
@@ -105,8 +131,10 @@ def who(resource=None):
 
 
 def clear():
-    """Forget every directly-held record. For tests and a clean re-init."""
+    """Forget every directly-held record, live and recent. For tests and a
+    clean re-init."""
     _HELD.clear()
+    _RECENT.clear()
 
 
 def evict(resource, caller, victim, detail=""):

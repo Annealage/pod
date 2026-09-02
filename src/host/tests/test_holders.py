@@ -92,6 +92,35 @@ class TestHolderRecord:
         assert rec["since_s"] >= 86_400
 
 
+class TestRecent:
+    """recent() is the one deliberate exception to "no TTL, no expiry": it
+    answers who last held a resource, surviving drop(), so a caller built on
+    top of this module (ops.py's SWD guard) can apply its own sticky window
+    without holders.py tracking that policy itself."""
+
+    def test_empty_before_anything_is_ever_noted(self, holders):
+        assert holders.recent("swd") == {}
+
+    def test_survives_a_drop_that_clears_who(self, holders):
+        holders.note("swd", "agent-a")
+        holders.drop("swd")
+        assert holders.who("swd") == {}
+        rec = holders.recent("swd")
+        assert rec["caller"] == "agent-a"
+        assert rec["since_s"] >= 0
+
+    def test_the_next_note_overwrites_it_like_who(self, holders):
+        holders.note("swd", "agent-a")
+        holders.drop("swd")
+        holders.note("swd", "agent-b")
+        assert holders.recent("swd")["caller"] == "agent-b"
+
+    def test_clear_wipes_recent_too(self, holders):
+        holders.note("swd", "agent-a")
+        holders.clear()
+        assert holders.recent("swd") == {}
+
+
 class TestEvict:
     """The phase-6 anti-bump gate's audit trail: a console line, not a second
     holder record, since the record overwrite is what tells the evicted
