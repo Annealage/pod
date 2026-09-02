@@ -294,7 +294,7 @@ class TestMcpDutDebugPeek:
         calls = {}
 
         class FakePod:
-            def halt_dut(self, keep_attached=False):
+            def halt_dut(self, keep_attached=False, force=False):
                 calls["halt"] = keep_attached
                 return {"ok": True, "halted": True, "dhcsr": 0x20000}
 
@@ -723,6 +723,121 @@ class TestAttachGuard:
         p, detached = self._pod_and_detached(monkeypatch)
         p.halt_dut(keep_attached=True)
         assert detached == []
+
+
+class TestUsbipConflictGate:
+    """Phase 6 anti-bump gate: flash/erase/reset/halt/reprobe refuse a live
+    usbip session held by another host unless force=True bumps it."""
+
+    def _pod(self, monkeypatch, held_by_other):
+        from pod.client import Pod as _Pod
+        evicted = []
+        p = Pod(addr4="192.168.0.146",
+                runner=MagicMock(return_value=MagicMock(
+                    returncode=0, stdout="{'ok': True, 'ms': 1, 'err': None}\n")))
+        monkeypatch.setattr(_Pod, "usbip_held_by_other", lambda self: held_by_other)
+        monkeypatch.setattr(_Pod, "who",
+                            lambda self, resource=None, timeout=3.0:
+                                {"usbip": {"caller": "other@host/1"}})
+        monkeypatch.setattr(_Pod, "attached_ports", lambda self: [])
+
+        def _fake_exec(code):
+            if "holders" in code and "evict" in code:
+                evicted.append(code)
+                return "ok\n"
+            return "{'ok': True, 'ms': 1, 'mounted': 0, 'err': None}\n"
+        monkeypatch.setattr(p, "exec", _fake_exec)
+        return p, evicted
+
+    # ── not held / unknown: fails open, no refusal, no stole_from ──────────
+
+    def test_not_held_proceeds_and_carries_no_stole_from(self, monkeypatch):
+        p, evicted = self._pod(monkeypatch, held_by_other=False)
+        result = p.reset_dut()
+        assert "stole_from" not in result
+        assert evicted == []
+
+    def test_unknown_fails_open(self, monkeypatch):
+        # usbip_held_by_other() returns None when the pod cannot say (no
+        # control port / unreachable) - must not be read as "held".
+        p, evicted = self._pod(monkeypatch, held_by_other=None)
+        result = p.reset_dut()
+        assert "stole_from" not in result
+        assert evicted == []
+
+    # ── held by another: refuses, names the holder ─────────────────────────
+
+    def test_reset_refuses_when_held_by_other(self, monkeypatch):
+        from pod.client import PodConflictError
+        p, evicted = self._pod(monkeypatch, held_by_other=True)
+        with pytest.raises(PodConflictError) as excinfo:
+            p.reset_dut()
+        assert excinfo.value.resource == "usbip"
+        assert excinfo.value.holder == {"caller": "other@host/1"}
+        assert "other@host/1" in str(excinfo.value)
+        assert evicted == []          # no bump attempted, so no eviction log
+
+    def test_flash_refuses_when_held_by_other(self, monkeypatch, tmp_path):
+        from pod.client import PodConflictError
+        p, _ = self._pod(monkeypatch, held_by_other=True)
+        image = tmp_path / "fw.bin"
+        image.write_bytes(b"\x00" * 16)
+        with pytest.raises(PodConflictError):
+            p.flash_dut(str(image))
+
+    def test_erase_refuses_when_held_by_other(self, monkeypatch):
+        from pod.client import PodConflictError
+        p, _ = self._pod(monkeypatch, held_by_other=True)
+        with pytest.raises(PodConflictError):
+            p.erase_dut()
+
+    def test_halt_refuses_when_held_by_other(self, monkeypatch):
+        from pod.client import PodConflictError
+        p, _ = self._pod(monkeypatch, held_by_other=True)
+        with pytest.raises(PodConflictError):
+            p.halt_dut()
+
+    def test_reprobe_refuses_when_held_by_other(self, monkeypatch):
+        from pod.client import PodConflictError
+        p, _ = self._pod(monkeypatch, held_by_other=True)
+        with pytest.raises(PodConflictError):
+            p.reprobe_dut()
+
+    # ── force=True: bumps, logs the eviction, reports stole_from ───────────
+
+    def test_reset_force_bumps_and_logs_eviction(self, monkeypatch):
+        p, evicted = self._pod(monkeypatch, held_by_other=True)
+        result = p.reset_dut(force=True)
+        assert result["stole_from"] == {"caller": "other@host/1"}
+        assert len(evicted) == 1
+        assert "usbip" in evicted[0] and "other@host/1" in evicted[0]
+
+    def test_erase_force_bumps_and_reports_stole_from(self, monkeypatch):
+        p, evicted = self._pod(monkeypatch, held_by_other=True)
+        result = p.erase_dut(force=True)
+        assert result["stole_from"] == {"caller": "other@host/1"}
+        assert len(evicted) == 1
+
+    def test_reprobe_force_bumps_and_reports_stole_from(self, monkeypatch):
+        p, evicted = self._pod(monkeypatch, held_by_other=True)
+        result = p.reprobe_dut(force=True)
+        assert result["stole_from"] == {"caller": "other@host/1"}
+        assert len(evicted) == 1
+
+    def test_flash_mass_erase_does_not_double_gate_or_double_evict(self, monkeypatch, tmp_path):
+        # The internal mass_erase erase must not re-run the gate: the outer
+        # flash_dut call already decided go/no-go, and a second gate check
+        # would either re-refuse a forced bump or log a duplicate eviction.
+        p, evicted = self._pod(monkeypatch, held_by_other=True)
+        monkeypatch.setattr(p, "_stream_region",
+                            lambda cmd, payload, size, port:
+                                {"ok": True, "addr": 0, "bytes": size, "err": None})
+        image = tmp_path / "fw.bin"
+        image.write_bytes(b"\x00" * 16)
+        result = p.flash_dut(str(image), mass_erase=True, force=True, verify=False)
+        assert result["ok"] is True
+        assert result["stole_from"] == {"caller": "other@host/1"}
+        assert len(evicted) == 1      # exactly one eviction log, not two
 
 
 class TestFlashDutLoaderConsistency:

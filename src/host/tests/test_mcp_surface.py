@@ -20,12 +20,14 @@ from pod.cli import main
 
 @pytest.fixture(autouse=True)
 def _no_leaked_sessions():
-    """The session store is a module global that the open handlers write to
-    directly, so a test that opens one would otherwise leave it visible to the
-    next test in the file."""
+    """The session store and the peripheral-ownership tracker are module
+    globals the handlers write to directly, so a test that opens one would
+    otherwise leave it visible to the next test in the file."""
     m._SESSIONS.clear()
+    m._OWNED_PERIPHERALS.clear()
     yield
     m._SESSIONS.clear()
+    m._OWNED_PERIPHERALS.clear()
 
 
 # ── shared extraction from mcp_server.py's build_server() ──────────────────
@@ -215,7 +217,7 @@ class TestMcpDutLinkRouting:
         fake_pod.reprobe_dut.return_value = {"ok": True, "mounted": 1}
         self._patch(monkeypatch, fake_pod)
         result = m.handle_dut_link("lab", action="reprobe")
-        fake_pod.reprobe_dut.assert_called_once_with()
+        fake_pod.reprobe_dut.assert_called_once_with(force=False)
         assert result["ok"] is True
 
     def test_action_status_reports_exports_and_attached_ports(self, monkeypatch):
@@ -300,13 +302,47 @@ class TestMcpBenchDeviceRouting:
         fake_pod.spi_target_status.assert_called_once()
         assert result["bytes_rx"] == 3
 
-    def test_down_ignores_bus_and_sweeps_by_default(self, monkeypatch):
+    def test_down_with_explicit_name_ignores_bus_and_ownership(self, monkeypatch):
         fake_pod = MagicMock()
         fake_pod.peripheral_release.return_value = {"ok": True}
         self._patch(monkeypatch, fake_pod)
-        result = m.handle_bench_device("lab", bus=None, action="down")
-        fake_pod.peripheral_release.assert_called_once_with(name="*")
+        result = m.handle_bench_device("lab", bus=None, action="down",
+                                       name="spi_target")
+        fake_pod.peripheral_release.assert_called_once_with(name="spi_target")
         assert result["ok"] is True
+
+    def test_down_wildcard_with_nothing_owned_releases_nothing(self, monkeypatch):
+        # No prior action="up" in this process, so there is nothing tracked as
+        # this caller's own; an unscoped sweep would deinit another agent's
+        # live instance, so the default is a no-op that says so.
+        fake_pod = MagicMock()
+        self._patch(monkeypatch, fake_pod)
+        result = m.handle_bench_device("lab", bus=None, action="down")
+        fake_pod.peripheral_release.assert_not_called()
+        assert result["released"] == []
+
+    def test_down_wildcard_releases_only_what_this_caller_brought_up(self, monkeypatch):
+        fake_pod = MagicMock()
+        fake_pod.i2c_target.return_value = {"ok": True}
+        fake_pod.peripheral_release.return_value = {"ok": True, "released": ["i2c_target"]}
+        self._patch(monkeypatch, fake_pod)
+        m.handle_bench_device("lab", bus="i2c", action="up")
+        result = m.handle_bench_device("lab", bus=None, action="down")
+        fake_pod.peripheral_release.assert_called_once_with(name="i2c_target")
+        assert result["released"] == ["i2c_target"]
+
+    def test_down_wildcard_force_sweeps_everyone_and_reports_stole_from(self, monkeypatch):
+        fake_pod = MagicMock()
+        fake_pod.i2c_target.return_value = {"ok": True}
+        fake_pod.peripheral_list.return_value = {
+            "ok": True, "instances": ["i2c_target", "spi_target"]}
+        fake_pod.peripheral_release.return_value = {
+            "ok": True, "released": ["i2c_target", "spi_target"]}
+        self._patch(monkeypatch, fake_pod)
+        m.handle_bench_device("lab", bus="i2c", action="up")  # ours
+        result = m.handle_bench_device("lab", bus=None, action="down", force=True)
+        fake_pod.peripheral_release.assert_called_once_with(name="*")
+        assert result["stole_from"] == ["spi_target"]
 
     def test_up_without_bus_raises(self, monkeypatch):
         fake_pod = MagicMock()
@@ -1125,6 +1161,85 @@ class TestToolResultsAreMachineReadable:
         res = self._call("pod_info", {"label": "lab"})
         assert res.isError is True
         assert "unforeseen" in self._body(res)["error"]
+
+    def test_a_pre_emptive_refusal_is_kind_conflict_and_names_the_holder(self, monkeypatch):
+        """The phase-6 anti-bump gate refuses host-side, before any pod round
+        trip, so it is a distinct kind from "busy" (a pod-reported REPL
+        collision) even though both mean "wait or ask, do not reset"."""
+        from pod.client import PodConflictError
+
+        def refused(*a, **k):
+            raise PodConflictError("usbip", {"caller": "agent-b:corona@carbon"},
+                                   caller="agent-a:corona@carbon")
+
+        monkeypatch.setattr(m, "handle_dut_flash", refused)
+        res = self._call("dut_flash", {"label": "lab", "image": "fw.bin"})
+        assert res.isError is True
+        body = self._body(res)
+        assert body["kind"] == "conflict"
+        assert body["resource"] == "usbip"
+        assert body["retryable"] is True
+        assert body["held_by"] == {"caller": "agent-b:corona@carbon"}
+        assert body["caller"] == "agent-a:corona@carbon"
+
+
+class TestForceArgReachesTheHandler:
+    """call_tool threads its handler args positionally, so a new parameter
+    inserted in the wrong spot silently shifts every argument after it rather
+    than raising - assert force actually arrives, not just that the call
+    does not crash."""
+
+    def _call(self, name, arguments):
+        import asyncio
+        import mcp.types as t
+        srv = m.build_server()
+        handler = srv.request_handlers[t.CallToolRequest]
+        req = t.CallToolRequest(
+            method="tools/call",
+            params=t.CallToolRequestParams(name=name, arguments=arguments))
+        return asyncio.run(handler(req)).root
+
+    def test_dut_flash_force_true(self, monkeypatch):
+        fake = MagicMock(return_value={"ok": True})
+        monkeypatch.setattr(m, "handle_dut_flash", fake)
+        self._call("dut_flash", {"label": "lab", "image": "fw.bin", "force": True})
+        assert fake.call_args[0][-1] is True
+
+    def test_dut_flash_force_defaults_false(self, monkeypatch):
+        fake = MagicMock(return_value={"ok": True})
+        monkeypatch.setattr(m, "handle_dut_flash", fake)
+        self._call("dut_flash", {"label": "lab", "image": "fw.bin"})
+        assert fake.call_args[0][-1] is False
+
+    def test_dut_erase_force_true(self, monkeypatch):
+        fake = MagicMock(return_value={"ok": True})
+        monkeypatch.setattr(m, "handle_dut_erase", fake)
+        self._call("dut_erase", {"label": "lab", "force": True})
+        assert fake.call_args[0][-1] is True
+
+    def test_dut_reset_force_true(self, monkeypatch):
+        fake = MagicMock(return_value={"ok": True})
+        monkeypatch.setattr(m, "handle_dut_reset", fake)
+        self._call("dut_reset", {"label": "lab", "force": True})
+        assert fake.call_args[0][-1] is True
+
+    def test_dut_link_reprobe_force_true(self, monkeypatch):
+        fake = MagicMock(return_value={"ok": True})
+        monkeypatch.setattr(m, "handle_dut_link", fake)
+        self._call("dut_link", {"label": "lab", "action": "reprobe", "force": True})
+        assert fake.call_args[0][-1] is True
+
+    def test_bench_device_force_true(self, monkeypatch):
+        fake = MagicMock(return_value={"ok": True})
+        monkeypatch.setattr(m, "handle_bench_device", fake)
+        self._call("bench_device", {"label": "lab", "action": "down", "force": True})
+        assert fake.call_args[0][-1] is True
+
+    def test_dut_halt_force_true(self, monkeypatch):
+        fake = MagicMock(return_value={"ok": True})
+        monkeypatch.setattr(m, "handle_dut_halt", fake)
+        self._call("dut_halt", {"label": "lab", "force": True})
+        assert fake.call_args[0][-1] is True
 
 
 class TestBusyNamesTheHolder:

@@ -32,7 +32,7 @@ from pod.registry import (
     reconcile_dut,
     dut_protect_ranges,
 )
-from pod.client import Pod, PodExecError
+from pod.client import Pod, PodExecError, PodConflictError
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -715,10 +715,15 @@ def cmd_dut_flash(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
     addr = int(args.addr, 0) if isinstance(args.addr, str) else args.addr
-    result = pod.flash_dut(args.image, target=args.target, addr=addr,
-                           keep_attached=args.keep_attached,
-                           mass_erase=args.mass_erase,
-                           loader=getattr(args, "loader", None))
+    try:
+        result = pod.flash_dut(args.image, target=args.target, addr=addr,
+                               keep_attached=args.keep_attached,
+                               mass_erase=args.mass_erase,
+                               loader=getattr(args, "loader", None),
+                               force=args.force)
+    except PodConflictError as exc:
+        print(f"pod dut flash: {exc}", file=sys.stderr)
+        return 1
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -727,7 +732,12 @@ def cmd_dut_erase(args):
     """Erase the entire DUT flash via the on-pod debug stack."""
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
-    result = pod.erase_dut(loader=getattr(args, "loader", None) or "native")
+    try:
+        result = pod.erase_dut(loader=getattr(args, "loader", None) or "native",
+                               keep_attached=args.keep_attached, force=args.force)
+    except PodConflictError as exc:
+        print(f"pod dut erase: {exc}", file=sys.stderr)
+        return 1
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -735,7 +745,12 @@ def cmd_dut_erase(args):
 def cmd_dut_reset(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
-    result = pod.reset_dut(mode=args.mode, keep_attached=args.keep_attached)
+    try:
+        result = pod.reset_dut(mode=args.mode, keep_attached=args.keep_attached,
+                               force=args.force)
+    except PodConflictError as exc:
+        print(f"pod dut reset: {exc}", file=sys.stderr)
+        return 1
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -808,7 +823,11 @@ def cmd_dut_mem(args):
 def cmd_dut_halt(args):
     """Halt the DUT core over SWD (hold it; no auto-resume)."""
     pod = Pod.from_entry(_require_pod(args.label))
-    result = pod.halt_dut(keep_attached=args.keep_attached)
+    try:
+        result = pod.halt_dut(keep_attached=args.keep_attached, force=args.force)
+    except PodConflictError as exc:
+        print(f"pod dut halt: {exc}", file=sys.stderr)
+        return 1
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -970,7 +989,11 @@ def cmd_dut_link(args):
         return 0
 
     # action == "reprobe"
-    result = Pod.from_entry(entry).reprobe_dut()
+    try:
+        result = Pod.from_entry(entry).reprobe_dut(force=args.force)
+    except PodConflictError as exc:
+        print(f"pod dut link reprobe: {exc}", file=sys.stderr)
+        return 1
     print(result)
     return 0 if result.get("ok") else 1
 
@@ -1323,6 +1346,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--loader", default=None, choices=["native", "flm"],
                    help="Flash backend: native (per-family NVM, default) or "
                         "flm (the target's CMSIS-pack algorithm)")
+    p.add_argument("--force", action="store_true",
+                   help="Bump another caller's USB/IP session instead of refusing")
 
     # dut erase
     p = dut_sub.add_parser("erase", help="Erase the entire DUT flash via the pod")
@@ -1330,6 +1355,10 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--loader", default=None, choices=["native", "flm"],
                    help="Flash backend: native (per-family NVM, default) or "
                         "flm (the target's CMSIS-pack algorithm)")
+    p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
+                   help="Do not detach a live USB/IP session first (risks a wedge)")
+    p.add_argument("--force", action="store_true",
+                   help="Bump another caller's USB/IP session instead of refusing")
 
     # dut reset
     p = dut_sub.add_parser("reset", help="Reset the DUT via the pod")
@@ -1338,6 +1367,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    help="Reset method (default: sysreset)")
     p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
                    help="Do not detach a live USB/IP session first (risks a wedge)")
+    p.add_argument("--force", action="store_true",
+                   help="Bump another caller's USB/IP session instead of refusing")
 
     # dut reg (read-or-write; value omitted = read)
     p = dut_sub.add_parser(
@@ -1368,6 +1399,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("label")
     p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
                    help="Do not detach a live USB/IP session first (risks a wedge)")
+    p.add_argument("--force", action="store_true",
+                   help="Bump another caller's USB/IP session instead of refusing")
 
     p = dut_sub.add_parser("resume", help="Resume the DUT core over SWD")
     p.add_argument("label")
@@ -1425,6 +1458,9 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("--port", type=int, default=None,
                    help="down: vhci port from 'usbip port' (omit to detach "
                         "all for this pod)")
+    p.add_argument("--force", action="store_true",
+                   help="reprobe: bump another host's live USB/IP import "
+                        "instead of refusing")
 
     # bench (nested)
     bench_parser = sub.add_parser(

@@ -92,6 +92,29 @@ class TestHolderRecord:
         assert rec["since_s"] >= 86_400
 
 
+class TestEvict:
+    """The phase-6 anti-bump gate's audit trail: a console line, not a second
+    holder record, since the record overwrite is what tells the evicted
+    caller - this is only for whoever is watching the pod's own console."""
+
+    def test_prints_who_bumped_whom_off_what(self, holders, capsys):
+        holders.evict("usbip", "agent-a:corona@carbon", "agent-b:corona@laptop")
+        out = capsys.readouterr().out
+        assert "agent-a:corona@carbon" in out
+        assert "agent-b:corona@laptop" in out
+        assert "usbip" in out
+
+    def test_detail_is_optional(self, holders, capsys):
+        holders.evict("usbip", "a", "b")
+        out = capsys.readouterr().out
+        assert out.strip()
+
+    def test_detail_appears_when_given(self, holders, capsys):
+        holders.evict("peripherals", "a", "b", detail="spi_target, i2c_target")
+        out = capsys.readouterr().out
+        assert "spi_target, i2c_target" in out
+
+
 @pytest.fixture
 def control(holders):
     mod = _load("annealage_pod.control_test", "annealage_pod/control.py",

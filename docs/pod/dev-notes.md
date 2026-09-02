@@ -262,3 +262,22 @@ it survives host mode - `machine.USBHost().active(True)` drops the USB-CDC REPL
 while the UART REPL keeps working (used it to run `machine.reset()` and recover).
 Note `machine.USBHost().active(False)` does NOT re-enumerate the USB-CDC device;
 a `machine.reset()` is needed to return to USB-CDC dev mode.
+
+## 10. A `cp` deploy needs a reboot to reach an already-running netboot task,
+not just a `sys.modules` purge
+
+Item 1's `sys.modules.pop(...)` fix is per-exec: it makes the *next* `import`
+statement re-read the file, which is enough for a one-shot `pod_exec`/`ampremote
+exec` that imports the module fresh each call. It does **not** reach a name a
+long-running `asyncio` task already bound at import time and holds in its own
+closure - `netboot.py`'s `_repl_accept` and `control.serve()` both `import
+annealage_pod.holders` once at boot and keep using that object for the rest of
+the process's life. Overwriting `holders.py` on the filesystem and popping
+`sys.modules` changes what a *fresh* `pod_exec` sees; it does not change what
+`control.serve()` is still calling, so its `who()` answers can silently lag the
+deployed file (e.g. missing a newly-added read-through key) until the pod is
+rebooted. Confirmed 2026-09-03: after a `holders.py` cp mid-session, a fresh
+`pod_exec` of `annealage_pod.holders.who()` showed the new usbip key
+immediately, while the control port's `who` kept answering without it across
+several real usbip attach/detach cycles - only a reboot (`machine.reset()`,
+or power-cycle) makes the already-running listener pick it up.

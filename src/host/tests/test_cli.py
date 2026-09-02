@@ -180,7 +180,7 @@ class TestReprobe:
                             SimpleNamespace(from_entry=lambda entry: fake_pod))
         monkeypatch.setattr(sys, "argv", ["pod", "dut", "link", "rp", "reprobe"])
         assert main() == 0
-        fake_pod.reprobe_dut.assert_called_once_with()
+        fake_pod.reprobe_dut.assert_called_once_with(force=False)
 
     def test_reprobe_exit_1_when_not_ok(self, monkeypatch):
         monkeypatch.setattr(cli, "get_pod", lambda label: {"addr4": "10.0.0.1"})

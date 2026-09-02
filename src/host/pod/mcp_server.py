@@ -30,7 +30,7 @@ import time
 from pod.discovery import discover_pods as _discover_pods
 from pod.registry import (get_pod, update_pod, reconcile_dut,
                           dut_protect_ranges)
-from pod.client import Pod, PodExecError, DEFAULT_SWD_CLKDIV
+from pod.client import Pod, PodExecError, PodConflictError, DEFAULT_SWD_CLKDIV
 from pod.target import PodUnreachable
 from pod import enroll
 
@@ -629,10 +629,13 @@ def handle_dut_identify(label: str, adopt: bool = False) -> dict:
     return reconcile_dut(entry.get("dut"), live)
 
 
-def handle_dut_halt(label: str, keep_attached: bool = False) -> dict:
+def handle_dut_halt(label: str, keep_attached: bool = False,
+                    force: bool = False) -> dict:
     """Halt the DUT core over SWD (no auto-resume). Freezes the DUT incl. USB;
-    detaches a live USB/IP session first unless keep_attached."""
-    return _pod_for(label).halt_dut(keep_attached=keep_attached)
+    detaches a live USB/IP session first unless keep_attached. Shares the
+    usbip guard with flash/erase/reset, so it also refuses when another
+    caller holds that session, naming them, unless force=True bumps it."""
+    return _pod_for(label).halt_dut(keep_attached=keep_attached, force=force)
 
 
 def handle_dut_resume(label: str) -> dict:
@@ -755,7 +758,8 @@ def handle_dut_gdb(label: str, listen_port: int = 0) -> dict:
 
 def handle_dut_flash(label: str, image: str, target: str = None,
                      addr: int = 0, keep_attached: bool = False,
-                     mass_erase: bool = False, loader: str = None) -> dict:
+                     mass_erase: bool = False, loader: str = None,
+                     force: bool = False) -> dict:
     """Flash a firmware image to the DUT via the pod (streamed, no pod FS).
 
     Accepts a flat binary or an ELF file (detected by magic, not extension).
@@ -767,43 +771,55 @@ def handle_dut_flash(label: str, image: str, target: str = None,
     first.
 
     Detaches a live USB/IP session first (reflashing the DUT mid-forward wedges
-    the pod); keep_attached=True overrides.
+    the pod); keep_attached=True overrides. Refuses when another caller holds
+    that session, naming them, unless force=True bumps it - the result then
+    carries stole_from.
     """
     pod = _pod_for(label)
     return pod.flash_dut(image, target=target, addr=addr,
                          keep_attached=keep_attached, mass_erase=mass_erase,
-                         loader=loader)
+                         loader=loader, force=force)
 
 
 def handle_dut_erase(label: str, clkdiv: int = DEFAULT_SWD_CLKDIV,
-                     loader: str = "native") -> dict:
+                     loader: str = "native", keep_attached: bool = False,
+                     force: bool = False) -> dict:
     """Erase the entire DUT flash via the on-pod debug stack.
 
     loader: "native" (default) = nRF NVMC mass-erase fast-path; "flm" = the
     generic CMSIS path, which resolves the target's CMSIS-pack algorithm and
     installs it on the pod first.
-    Returns {ok, ms, loader, err}.
+
+    Erasing halts the core to run, same as reset/flash, so it detaches a live
+    USB/IP session first (keep_attached=True overrides) and refuses when
+    another caller holds it, naming them, unless force=True bumps it.
+    Returns {ok, ms, loader, err[, stole_from]}.
     """
-    return _pod_for(label).erase_dut(clkdiv=clkdiv, loader=loader)
+    return _pod_for(label).erase_dut(clkdiv=clkdiv, loader=loader,
+                                     keep_attached=keep_attached, force=force)
 
 
 def handle_dut_reset(label: str, mode: str = "sysreset",
-                     keep_attached: bool = False) -> dict:
+                     keep_attached: bool = False, force: bool = False) -> dict:
     """Reset the DUT via the pod ('sysreset' to run, 'halt' to catch reset).
 
     Also the first recovery step for an unresponsive/wedged DUT: a SWD system
     reset re-inits the core and peripherals (incl. USB), so a hung target
     re-enumerates cleanly without a physical power-cycle.
+
+    Detaches a live USB/IP session first; refuses when another caller holds
+    it, naming them, unless force=True bumps it (the result then carries
+    stole_from).
     """
     pod = _pod_for(label)
-    return pod.reset_dut(mode=mode, keep_attached=keep_attached)
+    return pod.reset_dut(mode=mode, keep_attached=keep_attached, force=force)
 
 
 # ── dut: USB/IP link ────────────────────────────────────────────────────────
 
 
 def handle_dut_link(label: str, action: str = "status",
-                    ensure: bool = True) -> dict:
+                    ensure: bool = True, force: bool = False) -> dict:
     """Inspect or drive the DUT's USB/IP link.
 
     action="status" (the default) is a pure read: it lists what the pod
@@ -812,9 +828,14 @@ def handle_dut_link(label: str, action: str = "status",
     up (unless ensure=False) and attaches the DUT on this host, which needs
     passwordless sudo for usbip, and returns {busid, vid, pid, tty} where tty
     is the DUT's own CDC REPL to hand to dut_open. "down" detaches every host
-    vhci port attached to this pod's DUT. "reprobe" re-seeds a stale or
+    vhci port attached to this pod's DUT - already scoped to this host's own
+    ports (usbip's single-import means there is never another host's port to
+    reach from here), so it never needs force. "reprobe" re-seeds a stale or
     unexported USB/IP slot (a DUT mounted-but-unexportable, or a warm-reset
-    connect-edge miss) without a cold power cycle.
+    connect-edge miss) without a cold power cycle; its synthesized
+    re-enumeration path would break another host's live forward, so it
+    refuses when one holds the import, naming them, unless force=True bumps
+    it (the result then carries stole_from).
 
     Only "up" can activate the pod USB host, which has been observed to
     disturb the pod's Wi-Fi link, its only management channel.
@@ -827,7 +848,7 @@ def handle_dut_link(label: str, action: str = "status",
     if action == "down":
         return pod.usbip_detach()
     if action == "reprobe":
-        return pod.reprobe_dut()
+        return pod.reprobe_dut(force=force)
     return {"label": label, "exported": pod.usbip_list(),
             "attached_ports": pod.attached_ports()}
 
@@ -878,28 +899,79 @@ def _device_release(label: str, name: str = "*") -> dict:
     return _pod_for(label).peripheral_release(name=name)
 
 
+# Instance names THIS process brought up via bench_device(action="up"), by
+# label. Peripherals carry no caller field on the pod (unlike repl/usbip/swd,
+# an instance persists regardless of which process created it), so "release
+# my own" for action="down" is tracked here instead - each pod-mcp process is
+# already a clean per-agent boundary under stdio transport. Lost across a
+# process restart, the same per-process-truth limit as pod_info's session
+# list; a reused label just re-learns it on the next action="up".
+_OWNED_PERIPHERALS: dict = {}
+
+
+def _release_peripherals(label: str, name=None, force: bool = False) -> dict:
+    """Release one named pod peripheral instance, or every instance on a
+    wildcard/omitted name.
+
+    A wildcard defaults to releasing only instances THIS process brought up
+    (see _OWNED_PERIPHERALS): peripherals have no caller field, so an
+    unscoped default would deinit another agent's live I2C/SPI target under
+    it. force=True sweeps every instance regardless of who created it, and
+    names what it swept beyond our own in stole_from. An explicit name always
+    targets that one instance directly, force or not - naming one is already
+    a stated intent, not a sweep.
+    """
+    if name not in (None, "*"):
+        return _device_release(label, name=name)
+    owned = _OWNED_PERIPHERALS.get(label, set())
+    pod = _pod_for(label)
+    if force:
+        listed = pod.peripheral_list().get("instances") or []
+        foreign = [n for n in listed if n not in owned]
+        result = _device_release(label, name="*")
+        _OWNED_PERIPHERALS.pop(label, None)
+        if foreign:
+            try:
+                pod.exec("import annealage_pod.holders as h; "
+                         "h.evict(%r, %r, %r)"
+                         % ("peripherals", pod.caller, ", ".join(foreign)))
+            except Exception:  # noqa: BLE001 - best-effort audit log
+                pass
+            result = dict(result, stole_from=foreign)
+        return result
+    if not owned:
+        return {"label": label, "released": [],
+                "note": "no instances tracked as this session's own; pass an "
+                        "explicit name, or force=True to release everyone's"}
+    released = [n for n in owned if pod.peripheral_release(name=n).get("released")]
+    _OWNED_PERIPHERALS.pop(label, None)
+    return {"label": label, "released": released}
+
+
 def handle_bench_device(label: str, bus: str = None, action: str = "up",
                         name: str = None, addr: int = 0x42, regs=None,
                         i2c_bus: int = 1, scl: int = 11, sda: int = 10,
                         size: int = None, mode: int = 0, bits: int = 8,
                         miso: int = 16, mosi: int = 19, sck: int = 18,
                         cs: int = 17, personality: str = "stream",
-                        table_size: int = 256) -> dict:
+                        table_size: int = 256, force: bool = False) -> dict:
     """Bring up, inspect, or release the pod presenting itself as a device on
     the DUT's I2C or SPI bus.
 
-    action="down" releases the named instance (name="*" sweeps every I2C and
-    SPI instance together) and ignores `bus`, since release is not
-    bus-scoped. action="up" and action="status" require bus="i2c" or
-    bus="spi". I2C has no transfer counters, so bus="i2c" action="status"
-    reports whether the named instance is up (from peripheral_list) instead
-    of the byte/transfer counts bus="spi" action="status" returns. `i2c_bus`
-    is the hardware I2C bus id (distinct from `bus`, the i2c/spi selector).
+    action="down" releases the named instance, or on a wildcard/omitted name
+    every instance THIS caller brought up (ignoring `bus`, since release is
+    not bus-scoped); force=True sweeps every I2C and SPI instance regardless
+    of who created it and reports the ones beyond our own as stole_from.
+    action="up" and action="status" require bus="i2c" or bus="spi". I2C has
+    no transfer counters, so bus="i2c" action="status" reports whether the
+    named instance is up (from peripheral_list) instead of the byte/transfer
+    counts bus="spi" action="status" returns. `i2c_bus` is the hardware I2C
+    bus id (distinct from `bus`, the i2c/spi selector).
     """
     if action not in ("up", "status", "down"):
         raise ValueError("action must be one of 'up', 'status', 'down'")
     if action == "down":
-        return _device_release(label, name=name or "*")
+        return _release_peripherals(label, name=name, force=force)
     if bus not in ("i2c", "spi"):
         raise ValueError("bus must be 'i2c' or 'spi' for action=%r" % action)
     if bus == "i2c":
@@ -909,7 +981,9 @@ def handle_bench_device(label: str, bus: str = None, action: str = "up",
                      "sda": sda, "name": iname}
             if size is not None:
                 kwargs["size"] = size
-            return _i2c_device_up(label, **kwargs)
+            result = _i2c_device_up(label, **kwargs)
+            _OWNED_PERIPHERALS.setdefault(label, set()).add(iname)
+            return result
         listed = _pod_for(label).peripheral_list()
         names = listed.get("instances") or []
         return {"label": label, "bus": "i2c", "name": iname,
@@ -923,7 +997,9 @@ def handle_bench_device(label: str, bus: str = None, action: str = "up",
                  "table_size": table_size, "name": iname}
         if size is not None:
             kwargs["size"] = size
-        return _spi_device_up(label, **kwargs)
+        result = _spi_device_up(label, **kwargs)
+        _OWNED_PERIPHERALS.setdefault(label, set()).add(iname)
+        return result
     return _spi_device_status(label, name=iname)
 
 
@@ -1395,8 +1471,10 @@ def build_server():
                     "the target where it is, including its USB, so any active "
                     "USB/IP forward stalls until dut_resume. SWD only: needs "
                     "the DUT wired + powered for SWD; unrelated to the USB/IP "
-                    "forward and the DUT's CDC REPL. Returns {ok, halted, "
-                    "dhcsr}."),
+                    "forward and the DUT's CDC REPL. Refuses when another "
+                    "caller holds that session, naming them, unless "
+                    "force=true bumps it. Returns {ok, halted, dhcsr[, "
+                    "stole_from]}."),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1405,6 +1483,11 @@ def build_server():
                             "type": "boolean",
                             "description": "Do not detach a live USB/IP session "
                                            "first (risks a forwarder wedge).",
+                            "default": False,
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Bump another caller's USB/IP session instead of refusing.",
                             "default": False,
                         },
                     },
@@ -1522,7 +1605,10 @@ def build_server():
                     "streamed into pod RAM (no pod filesystem). Accepts a flat "
                     "binary or an ELF file (detected by magic, not extension); "
                     "for ELF the DUT flash geometry must be declared in the "
-                    "registry dut block (flash_base + flash_size)."
+                    "registry dut block (flash_base + flash_size). Refuses "
+                    "when another caller holds the USB/IP session it would "
+                    "detach, naming them, unless force=true bumps it (the "
+                    "result then carries stole_from)."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1556,6 +1642,11 @@ def build_server():
                             "enum": ["native", "flm"],
                             "description": "Flash algorithm: 'native' (per-family NVM, default) or 'flm' (the target's CMSIS-pack algorithm).",
                         },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Bump another caller's USB/IP session instead of refusing. Does not force the pod's own single-import refusal if the pod itself still refuses.",
+                            "default": False,
+                        },
                     },
                     "required": ["label", "image"],
                 },
@@ -1567,7 +1658,11 @@ def build_server():
                     "loader 'native' (default) uses the nRF NVMC mass-erase "
                     "fast-path; 'flm' runs the target's CMSIS-pack algorithm, "
                     "resolved from the DUT's declared target_family and "
-                    "installed on the pod first. Returns {ok, ms, loader, err}."
+                    "installed on the pod first. Erasing halts the core, the "
+                    "same DUT-freeze reset and flash detach a live USB/IP "
+                    "session for; refuses when another caller holds it, "
+                    "naming them, unless force=true bumps it. Returns "
+                    "{ok, ms, loader, err[, stole_from]}."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1578,6 +1673,16 @@ def build_server():
                             "enum": ["native", "flm"],
                             "description": "Flash algorithm: 'native' (nRF NVMC fast-path, default) or 'flm' (generic CMSIS-pack algorithm, any target with a pack).",
                             "default": "native",
+                        },
+                        "keep_attached": {
+                            "type": "boolean",
+                            "description": "Do not detach a live USB/IP session first (risks a forwarder wedge).",
+                            "default": False,
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Bump another caller's USB/IP session instead of refusing.",
+                            "default": False,
                         },
                     },
                     "required": ["label"],
@@ -1595,7 +1700,9 @@ def build_server():
                     "needed. Use mode 'sysreset' to reset and run, 'halt' to reset "
                     "and catch the reset vector for debugging. Only fall back to a "
                     "physical power-cycle if the reset itself reports an error "
-                    "(e.g. SWD not connected)."),
+                    "(e.g. SWD not connected). Refuses when another caller holds "
+                    "the USB/IP session it would detach, naming them, unless "
+                    "force=true bumps it."),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1609,6 +1716,11 @@ def build_server():
                         "keep_attached": {
                             "type": "boolean",
                             "description": "Do not detach a live USB/IP session first (risks a forwarder wedge).",
+                            "default": False,
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Bump another caller's USB/IP session instead of refusing.",
                             "default": False,
                         },
                     },
@@ -1627,13 +1739,18 @@ def build_server():
                     "returning {busid, vid, pid, tty} (needs passwordless "
                     "sudo for usbip; NB activating the pod USB host can "
                     "disturb the pod's Wi-Fi link); \"down\" detaches every "
-                    "host vhci port attached to this pod's DUT; \"reprobe\" "
-                    "re-seeds a stale or unexported USB/IP slot without a "
-                    "cold power cycle (try this when action=\"up\" reports "
-                    "the pod exports no USB device but the DUT is wired and "
-                    "powered). dut_exec brings the link up itself; dut_open "
-                    "needs the tty this returns from action=\"up\", so run "
-                    "that first."),
+                    "host vhci port attached to this pod's DUT (already "
+                    "scoped to this host's own ports, so force is never "
+                    "needed); \"reprobe\" re-seeds a stale or unexported "
+                    "USB/IP slot without a cold power cycle (try this when "
+                    "action=\"up\" reports the pod exports no USB device but "
+                    "the DUT is wired and powered) - its synthesized "
+                    "re-enumeration would break another host's live forward, "
+                    "so it refuses when one holds the import, naming them, "
+                    "unless force=true bumps it (the result then carries "
+                    "stole_from). dut_exec brings the link up itself; "
+                    "dut_open needs the tty this returns from action=\"up\", "
+                    "so run that first."),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1649,6 +1766,11 @@ def build_server():
                             "description": "action=up only: start the pod USB "
                                            "host + usbip server first.",
                             "default": True,
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "action=reprobe only: bump another host's live USB/IP import instead of refusing.",
+                            "default": False,
                         },
                     },
                     "required": ["label"],
@@ -1718,9 +1840,14 @@ def build_server():
                     "action=\"status\" reads it back (SPI: byte/transfer "
                     "counters + captured ring; I2C: whether the named "
                     "instance is up - no transfer counters exist), "
-                    "action=\"down\" releases the named instance (name=\"*\", "
-                    "the default, sweeps every I2C and SPI instance together, "
-                    "ignoring bus). i2c_bus is the hardware I2C bus id "
+                    "action=\"down\" releases the named instance; on a "
+                    "wildcard/omitted name (ignoring bus either way) it "
+                    "releases only instances THIS caller brought up, since "
+                    "peripherals carry no caller field and an unscoped sweep "
+                    "would deinit another agent's live target - pass "
+                    "force=true to sweep every I2C and SPI instance "
+                    "regardless of who created it (the result then carries "
+                    "stole_from). i2c_bus is the hardware I2C bus id "
                     "(distinct from the bus=i2c/spi selector). Instances "
                     "persist until released."),
                 inputSchema={
@@ -1729,7 +1856,8 @@ def build_server():
                         "label": {"type": "string", "description": "Pod label."},
                         "bus": {"type": "string", "enum": ["i2c", "spi"], "description": "Which personality (required for action up/status)."},
                         "action": {"type": "string", "enum": ["up", "status", "down"], "description": "Operation to perform.", "default": "up"},
-                        "name": {"type": "string", "description": "Instance name (default: 'i2c_target'/'spi_target' by bus; '*' on action=down sweeps all)."},
+                        "name": {"type": "string", "description": "Instance name (default: 'i2c_target'/'spi_target' by bus; '*' or omitted on action=down means this caller's own, or every instance with force=true)."},
+                        "force": {"type": "boolean", "description": "action=down with a wildcard/omitted name: release every instance regardless of who created it.", "default": False},
                         "addr": {"type": "integer", "description": "i2c up: 7-bit I2C address.", "default": 66},
                         "regs": {"type": "array", "items": {"type": "integer"}, "description": "i2c up: initial register bytes from offset 0."},
                         "i2c_bus": {"type": "integer", "description": "i2c up: hardware I2C bus id.", "default": 1},
@@ -1857,7 +1985,8 @@ def build_server():
             elif name == "dut_halt":
                 result = await asyncio.to_thread(
                     handle_dut_halt, arguments["label"],
-                    arguments.get("keep_attached", False))
+                    arguments.get("keep_attached", False),
+                    arguments.get("force", False))
             elif name == "dut_resume":
                 result = await asyncio.to_thread(
                     handle_dut_resume, arguments["label"])
@@ -1880,22 +2009,26 @@ def build_server():
                     arguments.get("target"), arguments.get("addr", 0),
                     arguments.get("keep_attached", False),
                     arguments.get("mass_erase", False),
-                    arguments.get("loader"))
+                    arguments.get("loader"), arguments.get("force", False))
             elif name == "dut_erase":
                 result = await asyncio.to_thread(
                     handle_dut_erase, arguments["label"],
                     arguments.get("clkdiv", DEFAULT_SWD_CLKDIV),
-                    arguments.get("loader", "native"))
+                    arguments.get("loader", "native"),
+                    arguments.get("keep_attached", False),
+                    arguments.get("force", False))
             elif name == "dut_reset":
                 result = await asyncio.to_thread(
                     handle_dut_reset, arguments["label"],
                     arguments.get("mode", "sysreset"),
-                    arguments.get("keep_attached", False))
+                    arguments.get("keep_attached", False),
+                    arguments.get("force", False))
             elif name == "dut_link":
                 result = await asyncio.to_thread(
                     handle_dut_link, arguments["label"],
                     arguments.get("action", "status"),
-                    arguments.get("ensure", True))
+                    arguments.get("ensure", True),
+                    arguments.get("force", False))
             elif name == "bench_gpio":
                 result = await asyncio.to_thread(
                     handle_bench_gpio, arguments["label"], arguments["pin"],
@@ -1922,7 +2055,7 @@ def build_server():
                     arguments.get("bits", 8), arguments.get("miso", 16),
                     arguments.get("mosi", 19), arguments.get("sck", 18),
                     arguments.get("cs", 17), arguments.get("personality", "stream"),
-                    arguments.get("table_size", 256))
+                    arguments.get("table_size", 256), arguments.get("force", False))
             elif name == "bench_device_regs":
                 result = await asyncio.to_thread(
                     handle_bench_device_regs, arguments["label"],
@@ -1956,6 +2089,13 @@ def build_server():
                          tool=name, reason=exc.reason, retryable=exc.busy,
                          pod_stderr=exc.stderr or None, caller=exc.caller,
                          held_by=holder)
+        except PodConflictError as exc:
+            # Refused host-side, before any pod round trip that would have
+            # displaced a live session. Distinct kind from "busy": that one is
+            # REPL contention the pod itself reported; this is a pre-emptive
+            # refusal this client made from its own holder-record read.
+            return _fail("conflict", str(exc), tool=name, resource=exc.resource,
+                         held_by=exc.holder, caller=exc.caller, retryable=True)
         except PodUnreachable as exc:
             # No tier yielded an identity-confirmed target - unreachable, or a
             # DHCP-moved IPv4 whose fingerprint did not match. Distinct from a
