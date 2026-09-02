@@ -226,14 +226,14 @@ an agent drives the hardware loop with the same verbs:
 | `dut_reg` | read a core register over SWD, or write it when `value` is given (core must be halted) |
 | `dut_mem` | read DUT memory over SWD inline as hex or streamed to `out_path`, or write it when `data` is given (live MEM-AP; flash refused) |
 | `dut_gdb` | start a local GDB RSP server to the DUT and return its endpoint (supports DWT data watchpoints via gdb Z2/Z3/Z4 = write/read/access, plus FPB hardware breakpoints) |
-| `dut_flash` | flash a DUT image (streamed into pod RAM, no pod FS) |
-| `dut_erase` | erase the entire DUT flash |
-| `dut_reset` | reset the DUT (`sysreset` / `halt`) |
-| `dut_link` | `status` (pure read) lists exports and attached vhci ports; `up` attaches and returns the DUT tty; `down` detaches; `reprobe` re-seeds a stale export |
+| `dut_flash` | flash a DUT image (streamed into pod RAM, no pod FS); refuses another caller's live USB/IP session unless `force` |
+| `dut_erase` | erase the entire DUT flash; refuses another caller's live USB/IP session unless `force` |
+| `dut_reset` | reset the DUT (`sysreset` / `halt`); refuses another caller's live USB/IP session unless `force` |
+| `dut_link` | `status` (pure read) lists exports and attached vhci ports; `up` attaches and returns the DUT tty; `down` detaches (this host's own ports only); `reprobe` re-seeds a stale export, refusing another host's live import unless `force` |
 | `bench_gpio` | read or drive a pod GPIO |
 | `bench_adc` | sample a pod ADC channel |
 | `bench_la` | PIO-capture DUT pins on PIO0 (coexists with a live SWD session) and write a VCD file |
-| `bench_device` | present the pod as an I2C or SPI device on the DUT's bus (`bus`), with `action` `up` / `status` / `down` |
+| `bench_device` | present the pod as an I2C or SPI device on the DUT's bus (`bus`), with `action` `up` / `status` / `down`; `down` with no name releases only instances this caller brought up, `force` sweeps every instance |
 | `bench_device_regs` | read/write that device's register file from the host |
 | `bench_uart` | stream the DUT's UART over TCP |
 

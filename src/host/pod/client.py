@@ -230,6 +230,25 @@ class PodExecError(RuntimeError):
                (": " + last) if last else "", hint))
 
 
+class PodConflictError(RuntimeError):
+    """A displacing operation was refused because another caller holds the
+    resource it would tear down. Raised host-side, before any pod round trip
+    that would do the damage - distinct from PodExecError.busy, which is a
+    REPL contention error surfaced only after the pod has already refused a
+    connection. Carries the pod's holder record for `resource` so a caller
+    can decide whether to ask before retrying with force=True."""
+
+    def __init__(self, resource, holder, caller=None):
+        self.resource = resource
+        self.holder = holder or {}
+        self.caller = caller
+        who = self.holder.get("caller") or "another caller"
+        super().__init__(
+            "refused: %s is held by %s - this would displace a live session; "
+            "pass force=True to bump it (this client is %s)"
+            % (resource, who, caller or "unknown"))
+
+
 class Pod:
     """Control client for a single Annealage Pod over ampremote socket transport."""
 
@@ -708,19 +727,36 @@ class Pod:
         self._flm_installed = info
         return info
 
-    def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native") -> dict:
+    def _erase_all_on_pod(self, clkdiv: int = DEFAULT_SWD_CLKDIV,
+                          loader: str = "native") -> dict:
+        """Run ops.erase_all() on the pod. No usbip guard - the caller's job,
+        so an erase nested inside flash_dut's mass_erase does not re-gate and
+        re-log an eviction that the enclosing call already settled."""
+        if loader == "flm":
+            self.ensure_flm_algo()
+        out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader))
+        return _last_dict(out)
+
+    def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native",
+                  keep_attached: bool = False, force: bool = False) -> dict:
         """Erase the entire DUT flash via the on-pod debug stack.
 
         Runs ops.erase_all() on the pod over the REPL. loader selects the
         flash algorithm: "native" (default) for the nRF NVMC mass-erase
         fast-path, "flm" for the generic CMSIS path, which resolves and
         installs the target's CMSIS-pack algorithm first if the pod has none.
-        Returns the on-pod result dict {ok, ms, loader, err}.
+        Returns the on-pod result dict {ok, ms, loader, err[, stole_from]}.
+
+        erase_all() halts the core to run, the same DUT-freeze reset and flash
+        already guard against, so it goes through the same _guard_live_attach:
+        detaches a live USB/IP session first (keep_attached=True overrides),
+        and refuses when another host holds it unless force=True bumps it.
         """
-        if loader == "flm":
-            self.ensure_flm_algo()
-        out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader))
-        return _last_dict(out)
+        stolen = self._guard_live_attach(keep_attached, force=force)
+        result = self._erase_all_on_pod(clkdiv, loader)
+        if stolen:
+            result["stole_from"] = stolen
+        return result
 
     def flash_crc(self, addr: int, length: int, clkdiv: int = DEFAULT_SWD_CLKDIV) -> dict:
         """CRC32 of a DUT flash region, read back over SWD (the pod-side
@@ -801,7 +837,8 @@ class Pod:
                   addr: int = 0, verify: bool = True, port: int = 3333,
                   keep_attached: bool = False,
                   mass_erase: bool = False,
-                  loader: Optional[str] = None) -> dict:
+                  loader: Optional[str] = None,
+                  force: bool = False) -> dict:
         """Flash a firmware image to the DUT, streamed into pod RAM (no pod FS).
 
         The pod runs a TCP receiver that double-buffers the image into two RAM
@@ -840,11 +877,13 @@ class Pod:
         backward compatibility. Returns {ok, addr, bytes, err}.
 
         Detaches a live USB/IP session first (re-enumerating the DUT mid-forward
-        wedges the pod); pass keep_attached=True to override.
+        wedges the pod); pass keep_attached=True to override. Refuses when
+        another host holds that attachment, naming it, unless force=True bumps
+        it; a forced bump adds stole_from to the result.
         """
         from pod.elf_loader import is_elf
 
-        self._guard_live_attach(keep_attached)
+        stolen = self._guard_live_attach(keep_attached, force=force)
 
         if is_elf(image):
             flash_ranges = getattr(self, "_elf_flash_ranges", None)
@@ -858,26 +897,38 @@ class Pod:
             elf_loader = loader if loader is not None else "native"
             if elf_loader == "flm":
                 self.ensure_flm_algo(addr=flash_ranges[0][0])
-            return self._flash_dut_elf(
+            result = self._flash_dut_elf(
                 image, flash_ranges=flash_ranges, port=port, verify=verify,
                 mass_erase=mass_erase, loader=elf_loader)
+        else:
+            # Flat binary path - default "native" preserves prior behaviour.
+            bin_loader = loader if loader is not None else "native"
+            if bin_loader == "flm":
+                self.ensure_flm_algo(addr=addr)
+            if mass_erase:
+                # No further gate: the guard above already settled whether this
+                # call may proceed at all, and re-checking here would refuse a
+                # forced bump the caller already paid for.
+                erase_result = self._erase_all_on_pod(loader=bin_loader)
+                if not erase_result.get("ok"):
+                    result = erase_result
+                else:
+                    result = None
+            else:
+                result = None
+            if result is None:
+                # Flash in <=64KB page-aligned sub-flashes (#35 loop-starvation)
+                # and end-to-end verify the whole image (a mid-stream drop the
+                # per-chunk verify misses). Read the image whole - flash images
+                # are small, and the verify reads it anyway.
+                with open(image, "rb") as f:
+                    data = f.read()
+                result = self._flash_region_chunked(addr, data, port, verify,
+                                                    bin_loader)
 
-        # Flat binary path - default "native" preserves prior behaviour.
-        bin_loader = loader if loader is not None else "native"
-        if bin_loader == "flm":
-            self.ensure_flm_algo(addr=addr)
-        if mass_erase:
-            erase_result = self.erase_dut(loader=bin_loader)
-            if not erase_result.get("ok"):
-                return erase_result
-
-        # Flash in <=64KB page-aligned sub-flashes (#35 loop-starvation) and
-        # end-to-end verify the whole image (a mid-stream drop the per-chunk
-        # verify misses). Read the image whole - flash images are small, and the
-        # verify reads it anyway.
-        with open(image, "rb") as f:
-            data = f.read()
-        return self._flash_region_chunked(addr, data, port, verify, bin_loader)
+        if stolen:
+            result = dict(result, stole_from=stolen)
+        return result
 
     def _flash_dut_elf(self, image: str, flash_ranges: list,
                        port: int = 3333, verify: bool = True,
@@ -888,7 +939,8 @@ class Pod:
         loader is used for both the mass_erase (if requested) and every flash
         segment, so erase and program always use the same algorithm backend.
         RAM segments use write_mem_stream regardless of loader (no flash algo
-        involved). Returns an aggregated dict {ok, segments, bytes}.
+        involved). Returns an aggregated dict {ok, segments, bytes}. Assumes
+        the caller (flash_dut) already ran the usbip guard; does not re-gate.
         """
         from pod.elf_loader import parse_load_segments
 
@@ -897,7 +949,7 @@ class Pod:
             raise ValueError("ELF has no PT_LOAD segments with data to program")
 
         if mass_erase:
-            erase_result = self.erase_dut(loader=loader)
+            erase_result = self._erase_all_on_pod(loader=loader)
             if not erase_result.get("ok"):
                 return {"ok": False, "segments": [], "bytes": 0,
                         "err": erase_result.get("err", "erase_all failed")}
@@ -938,14 +990,53 @@ class Pod:
         return {"ok": all_ok, "segments": seg_results, "bytes": total_bytes,
                 "err": err}
 
-    def _guard_live_attach(self, keep_attached: bool) -> list:
-        """Before an SWD op, detach any live usbip session to this pod.
+    def _gate_usbip(self, force: bool) -> Optional[dict]:
+        """Refuse a displacing SWD op when another host holds the USB/IP import.
 
-        Resetting/reflashing the DUT while it is attached over USB/IP wedges the
-        forwarder (it submits to the vanished endpoint and starves Wi-Fi). So by
-        default detach first; keep_attached=True overrides (you accept the risk).
-        Returns the ports that were attached.
+        Raises PodConflictError naming the holder unless force=True. A pod that
+        cannot say who holds it (predates the control port, or is otherwise
+        unreachable) fails open, matching behaviour from before this gate
+        existed - the gate adds a precaution on top of the pre-existing detach,
+        not a new requirement for using the pod.
+
+        force does not add a pod-side eviction capability: the pod's usbip
+        server already enforces single-import on its own (see
+        conflict-legibility.md "Current state, verified"), so a genuinely live
+        cross-host import that this host cannot reach still refuses there
+        regardless of this check. force's effect is local: it skips this
+        host's own pre-emptive refusal and logs the bump on the pod for
+        whoever is watching its console, so operators who know better are not
+        blocked by a check that is advisory rather than authoritative.
+
+        Returns the pod's holder record for "usbip" when force actually
+        bypassed a real conflict, so the caller can report stole_from; None
+        when nobody else holds it, or the pod could not say.
         """
+        if not self.usbip_held_by_other():
+            return None
+        info = (self.who() or {}).get("usbip") or {}
+        if not force:
+            raise PodConflictError("usbip", info, caller=self.caller)
+        victim = info.get("caller") or "unknown"
+        try:
+            self.exec("import annealage_pod.holders as h; "
+                      "h.evict(%r, %r, %r)" % ("usbip", self.caller, victim))
+        except Exception:  # noqa: BLE001 - best-effort audit log, never fatal
+            pass
+        return info
+
+    def _guard_live_attach(self, keep_attached: bool, force: bool = False):
+        """Before an SWD op, refuse or detach a live usbip session to this pod.
+
+        Resetting/reflashing/erasing the DUT while it is attached over USB/IP
+        wedges the forwarder (it submits to the vanished endpoint and starves
+        Wi-Fi), so by default detach first; keep_attached=True overrides (you
+        accept the risk on your own attachment). First checks whether another
+        host holds it (see _gate_usbip) and refuses naming them rather than
+        silently tearing their session down; force=True bumps it. Returns the
+        pod's holder record if a forced bump displaced someone, else None.
+        """
+        stolen = self._gate_usbip(force)
         ports = self.attached_ports()
         if ports and not keep_attached:
             print("pod: detaching live USB/IP attach (ports %s) before the SWD "
@@ -953,10 +1044,12 @@ class Pod:
                   "forwarder. Pass keep_attached=True to override."
                   % ports, file=sys.stderr)
             self.usbip_detach()
-        return ports
+        return stolen
 
-    def reset_dut(self, mode: str = "sysreset", keep_attached: bool = False) -> dict:
-        """Reset the DUT via the pod.
+    def reset_dut(self, mode: str = "sysreset", keep_attached: bool = False,
+                  force: bool = False) -> dict:
+        """Reset the DUT: 'sysreset'/'halt' over the on-pod debug probe, or
+        'nrst' over the dedicated reset wire.
 
         mode: 'sysreset' (reset and run) or 'halt' (reset and halt at the
         vector), both over SWD; or 'nrst' to pulse the dedicated DUT reset wire
@@ -968,13 +1061,18 @@ class Pod:
         ('power') does need carrier hardware and is not available here.
 
         Detaches a live USB/IP session first (resetting the DUT mid-forward
-        wedges the pod); pass keep_attached=True to override.
+        wedges the pod); pass keep_attached=True to override. Refuses when
+        another host holds that attachment, naming it, unless force=True bumps
+        it; a forced bump adds stole_from to the result.
         """
-        self._guard_live_attach(keep_attached)
+        stolen = self._guard_live_attach(keep_attached, force=force)
         out = self.exec(
             "import annealage_pod.debug.ops as o; print(o.reset(%r))" % mode
         )
-        return _last_dict(out)
+        result = _last_dict(out)
+        if stolen:
+            result["stole_from"] = stolen
+        return result
 
     def recover_dut_repl(self, device: str, *, settle: float = 0.4,
                          read_wait: float = 0.6) -> dict:
@@ -1200,17 +1298,22 @@ class Pod:
     # from the USB/IP forward. Registers need the core halted (halt_dut /
     # reset_dut mode='halt'); memory is a live MEM-AP access.
 
-    def halt_dut(self, keep_attached: bool = False) -> dict:
+    def halt_dut(self, keep_attached: bool = False, force: bool = False) -> dict:
         """Halt the DUT core over SWD and hold it (no auto-resume).
 
         Required before read_reg/write_reg. Freezes the target, including its
         USB - any active USB/IP forward stalls. Detaches a live USB/IP session
         first (a frozen DUT mid-forward wedges the pod, same as reset/flash);
-        keep_attached=True overrides. Returns {ok, halted, dhcsr}.
+        keep_attached=True overrides. Shares _guard_live_attach with the other
+        SWD ops, so it also refuses when another host holds that attachment
+        unless force=True bumps it. Returns {ok, halted, dhcsr[, stole_from]}.
         """
-        self._guard_live_attach(keep_attached)
-        return _last_dict(self.exec(
+        stolen = self._guard_live_attach(keep_attached, force=force)
+        result = _last_dict(self.exec(
             "import annealage_pod.debug.ops as o; print(o.halt())"))
+        if stolen:
+            result["stole_from"] = stolen
+        return result
 
     def resume_dut(self) -> dict:
         """Resume the DUT core over SWD after halt_dut / reset_dut mode='halt'."""
@@ -1689,7 +1792,7 @@ class Pod:
         from pod import usbip as _u
         return _u.list_remote(self._usbip_host())
 
-    def reprobe_dut(self) -> dict:
+    def reprobe_dut(self, force: bool = False) -> dict:
         """Recover a DUT the pod host is not exporting, without a cold power cycle.
 
         Runs usbhost.reprobe() on the pod. Two cases it covers:
@@ -1700,10 +1803,15 @@ class Pod:
           - warm-reset connect-edge miss: the DUT re-presented D+ with no 0->1
             edge, so the host never enumerated it; reprobe synthesizes the attach
             to re-enumerate, then re-seeds.
-        Non-destructive to a working forward. Returns {ok, mounted[, err]} where
-        mounted is the tuh_mounted address bitmask. ok=False if the pod firmware
-        predates the reprobe verb.
+        Non-destructive to a working forward held by THIS host. The synthesized
+        re-enumeration in the second case would break one held by another host,
+        so this refuses when another host holds the usbip import, naming it,
+        unless force=True bumps it; a forced bump adds stole_from to the result.
+        Returns {ok, mounted[, err, stole_from]} where mounted is the
+        tuh_mounted address bitmask. ok=False if the pod firmware predates the
+        reprobe verb.
         """
+        stolen = self._gate_usbip(force)
         out = self.exec(
             "import usbhost\n"
             "if hasattr(usbhost, 'reprobe'):\n"
@@ -1712,7 +1820,10 @@ class Pod:
             "else:\n"
             "    print({'ok': False, 'err': 'pod firmware has no usbhost.reprobe'})\n"
         )
-        return _last_dict(out)
+        result = _last_dict(out)
+        if stolen:
+            result["stole_from"] = stolen
+        return result
 
     def usbip_attach(self, ensure: bool = True) -> dict:
         """Export the DUT over USB/IP and attach it on this host.

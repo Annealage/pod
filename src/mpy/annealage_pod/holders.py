@@ -107,3 +107,15 @@ def who(resource=None):
 def clear():
     """Forget every directly-held record. For tests and a clean re-init."""
     _HELD.clear()
+
+
+def evict(resource, caller, victim, detail=""):
+    """Console record that `caller` force-bumped `victim` off `resource`.
+
+    Not a wire-queryable log: the mechanism that tells the evicted caller is
+    note()/the read-through registry itself changing to no longer name them on
+    their next operation. This is the audit trail for whoever is watching the
+    pod's own console (UART or REPL) while it happens.
+    """
+    print("annealage-pod: %s force-bumped %s off %s%s"
+          % (caller, victim, resource, (" (%s)" % detail) if detail else ""))
