@@ -97,7 +97,9 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
 - `bench-lease.md` - a time-boxed, named lease over the DUT so multiple agents
   sharing one pod do not collide on the SWD singleton / usbip / peripherals
   (a host-tooling CLI/MCP gate over a small pod-side firmware authority).
-  Conditional: build only if the phases before it leave a gap.
+  Conditional: build only if the phases before it leave a gap - assessed
+  2026-09-03, deferred (see `conflict-legibility.md` § Relationship to
+  bench-lease.md).
 - `conflict-legibility.md` - naming the holder of each contended pod resource and
   refusing the host-side operations that displace an incumbent (caller identity, a
   pod-side holder record on a control port, an anti-bump gate, and an SWD
@@ -139,7 +141,7 @@ and gate live in the doc named beside it.
 | 5 | Pod-side holder record on the 8267 control port, surfaced through `pod_info` | `conflict-legibility.md` |
 | 6 | Anti-bump gate: the host-side operations that displace an incumbent are refused, with `force` | `conflict-legibility.md` |
 | 7 | SWD re-entrancy guard + the sticky-holder window for one-shot sequences | `conflict-legibility.md` |
-| 8 | Bench lease (conditional): reservation ahead of use, only if 1-7 leave a gap | `bench-lease.md` |
+| 8 | Bench lease (conditional): reservation ahead of use, only if 1-7 leave a gap - **assessed 2026-09-03: deferred, see `conflict-legibility.md` § Relationship to bench-lease.md** | `bench-lease.md` |
 
 Phases 2 and 5-7 need the live pod; 1, 3, 4 and most of 6 are host-side. Phase 4 is
 name-independent and can move earlier if the busy-versus-dead confusion bites before
