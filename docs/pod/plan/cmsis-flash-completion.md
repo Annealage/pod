@@ -141,6 +141,13 @@ Steps 1 to 4 are worth doing as one branch; step 5 depends on hardware that is n
 
 ## Conventions for whoever picks this up
 
-Flash is pure SWD, so the pod alone is enough for most of this. Run host commands from `src/host` (the `pod` console script is installed editable against the main checkout, so running from a worktree root silently executes the wrong code). The host suite baseline at the time of writing is 661 passed, 1 skipped.
+Flash is pure SWD, so the pod alone is enough for most of this. Run host commands from `src/host`, and make sure the `pod` console script is actually installed editable against the checkout you are working in, not a stale copy:
+
+```
+cd src/host
+uv tool install --editable ".[zeroconf,mcp]" --force
+```
+
+The extras matter: `mcp` is capped below 2.0 in `pyproject.toml`, because 2.x drops the decorator API `build_server` uses and `pod-mcp` then dies at startup with `AttributeError: 'Server' object has no attribute 'list_tools'`. Installing `mcp` via `--with` instead of the extra keeps that resolution out of version control, which is how a `--force` reinstall can silently pick up the broken version. Confirm with `python3 -c "import pod; print(pod.__file__)"` and check it resolves into the `src/host` you meant, not another checkout or worktree. The host suite baseline at the time of writing is 661 passed, 1 skipped.
 
 Before any destructive recovery on the pod or the DUT, capture the state that explains the fault: for the DUT that means `DHCSR`, `DFSR`, `DEMCR`, `FP_CTRL` and PC/LR/SP over SWD. Reset and power-cycle destroy exactly the evidence that distinguishes a parked flash algorithm from a genuine fault, and the parked case is the likely one while gap 1 is open.
