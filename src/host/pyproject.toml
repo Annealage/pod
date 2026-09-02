@@ -44,13 +44,24 @@ dependencies = [
   "pyelftools",
 ]
 
+# mcp is capped below 2.0 deliberately. build_server() registers its handlers
+# with the decorator API (@server.list_tools(), @server.call_tool()), which
+# mcp 2.x removed: installing 2.1.1 makes pod-mcp abort at startup with
+# AttributeError: 'Server' object has no attribute 'list_tools'. An unpinned
+# install resolves to 2.x, so the cap is what keeps a fresh install working;
+# lifting it means porting build_server to the 2.x API.
+#
+# Install the tool with these extras rather than passing the same packages as
+# `uv tool install --with` arguments, which leaves the resolution outside
+# version control and lets a reinstall silently pick up an incompatible major:
+#   uv tool install --editable ".[zeroconf,mcp]" --force
 [project.optional-dependencies]
 zeroconf = ["zeroconf"]
-mcp = ["mcp"]
+mcp = ["mcp<2"]
 dev = [
   "pytest",
   "zeroconf",
-  "mcp",
+  "mcp<2",
   "ampremote @ git+https://github.com/andrewleech/micropython@54a3b1ea5e8259eef7c7cc9c017ce06ecb0ac499#subdirectory=tools/mpremote",
 ]
 
