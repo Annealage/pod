@@ -1172,8 +1172,10 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     # reset
     p = sub.add_parser("reset", help="Reset the DUT via the pod")
     p.add_argument("label")
-    p.add_argument("--mode", default="sysreset", choices=["sysreset", "halt"],
-                   help="Reset method (default: sysreset)")
+    p.add_argument("--mode", default="sysreset",
+                   choices=["sysreset", "halt", "nrst"],
+                   help="Reset method: sysreset/halt over SWD, or nrst to pulse "
+                        "the dedicated reset wire (default: sysreset)")
     p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
                    help="Do not detach a live USB/IP session first (risks a wedge)")
 

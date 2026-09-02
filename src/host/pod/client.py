@@ -652,10 +652,16 @@ class Pod:
         return ports
 
     def reset_dut(self, mode: str = "sysreset", keep_attached: bool = False) -> dict:
-        """Reset the DUT via the on-pod debug probe.
+        """Reset the DUT via the pod.
 
         mode: 'sysreset' (reset and run) or 'halt' (reset and halt at the
-        vector). nRST and power-cycle reset need carrier hardware not present.
+        vector), both over SWD; or 'nrst' to pulse the dedicated DUT reset wire
+        (pod GP13, see hardware-setup.md section 5g). 'nrst' needs that one wire
+        but no carrier hardware, and is the path of last resort because it does
+        not need a working SWD session. Its result carries "level", the reset
+        line after release: 0 means the line did not come back up, so the DUT
+        has no reset pull-up or is holding its own reset. Power-cycle reset
+        ('power') does need carrier hardware and is not available here.
 
         Detaches a live USB/IP session first (resetting the DUT mid-forward
         wedges the pod); pass keep_attached=True to override.

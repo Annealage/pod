@@ -10,7 +10,8 @@ Tools:
   dut_exec        execute MicroPython code on a pod
   mount_dir       mount a local directory on a pod
   flash_dut       flash a DUT image (streamed into pod RAM, no pod FS)
-  reset_dut       reset the DUT (sysreset to run, halt to catch the vector)
+  reset_dut       reset the DUT (sysreset to run, halt to catch the vector,
+                  nrst to pulse the dedicated reset wire)
   read_dut        read DUT memory to a host file (streamed, no pod FS)
   gdb_dut         start a local GDB RSP server to the DUT and return its endpoint
   tail_uart       stream DUT UART output (tail, bounded duration) over TCP
@@ -216,6 +217,10 @@ def handle_reset_dut(label: str, mode: str = "sysreset",
     Also the first recovery step for an unresponsive/wedged DUT: a SWD system
     reset re-inits the core and peripherals (incl. USB), so a hung target
     re-enumerates cleanly without a physical power-cycle.
+
+    'nrst' pulses the dedicated reset wire instead, which works without a SWD
+    session; its result carries "level", the line after release (0 = the line
+    stayed low, so the DUT has no reset pull-up or holds its own reset).
     """
     entry = get_pod(label)
     if entry is None:
@@ -824,17 +829,21 @@ def build_server():
                     "AND peripherals (incl. USB), so a target whose USB-CDC/REPL "
                     "wedged re-enumerates cleanly - no physical replug/power-cycle "
                     "needed. Use mode 'sysreset' to reset and run, 'halt' to reset "
-                    "and catch the reset vector for debugging. Only fall back to a "
-                    "physical power-cycle if the reset itself reports an error "
-                    "(e.g. SWD not connected)."),
+                    "and catch the reset vector for debugging. Use 'nrst' to pulse "
+                    "the dedicated DUT reset wire instead of going over SWD - it "
+                    "needs that wire but no working SWD session, so it is the path "
+                    "to try when SWD itself is unavailable (target unpowered, "
+                    "wedged, or access-port locked). Only fall back to a physical "
+                    "power-cycle if the reset itself reports an error."),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "mode": {
                             "type": "string",
-                            "enum": ["sysreset", "halt"],
-                            "description": "sysreset = reset and run; halt = reset and halt.",
+                            "enum": ["sysreset", "halt", "nrst"],
+                            "description": ("sysreset = reset and run; halt = reset and halt; "
+                                            "nrst = pulse the dedicated reset wire (no SWD needed)."),
                             "default": "sysreset",
                         },
                         "keep_attached": {

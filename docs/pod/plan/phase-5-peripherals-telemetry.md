@@ -330,12 +330,27 @@ forward + REPL held together, confirming Wi-Fi RX does not wedge).
 - Integrate the reset paths (Phase 3 D3.3) into the unified
   `annealage_pod.dut.reset(mode=...)` API: `swd` and `nrst` on the bare Pico 2 W;
   `power` when custom carrier hardware is available.
-- Scheduling note (2026-07): `nrst` validation is one wire (pod GP13
-  open-drain to DUT nRESET, `hardware-setup.md` section 5g; `_pinmap.NRST` is
-  already 13 on the RP2350) and one test (`pod reset --mode nrst`). It is the
-  reset path of last resort when SWD is unavailable and an exit-gate item for
-  this phase, so it is scheduled, not cut: it rides the next DUT wiring
-  session (the second-DUT-family bring-up) rather than a dedicated session.
+- Status (2026-09-02): `nrst` is **landed and hardware-validated** on the
+  second-DUT-family bring-up (RP2350B pod, i.MX RT1052 Arch Mix), as scheduled.
+  It is implemented in `annealage_pod.debug.nrst` and reached through
+  `ops.reset(mode="nrst")` / `pod reset --mode nrst` / the `reset_dut` MCP tool,
+  driving the GPIO directly rather than through `annealage_pod.dut` - that module
+  is the ESP32-S3 carrier's four-path API and depends on carrier hardware a bare
+  pod does not have. A pulse was confirmed to set the target's
+  `DHCSR.S_RESET_ST`, so the core really is reset.
+- Bring-up found a defect this task would otherwise have inherited: nothing
+  configured GP13, and an RP2350 pad powers up with its internal pull-down
+  enabled, so the pod was holding any DUT with a weaker reset pull-up in reset
+  from power-on. `netboot.main()` now parks the line via `nrst.park()` before
+  anything else touches the DUT. "Unhandled" was not neutral here - it asserted
+  reset - so the park is part of the deliverable, not a tidy-up.
+- The "unified `annealage_pod.dut.reset(mode=...)`" this task names is the
+  ESP32-S3 carrier API and is NOT the RP2350 entry point. Its `swd` path calls
+  the `dapprobe` C module, which the RP2350 firmware does not build, so it
+  reports the gap and returns False there. That module now lives at
+  `annealage_pod.esp32.dut` behind the ESP32-S3 quarantine, and the unified
+  reset surface on the RP2350 is `ops.reset(mode="sysreset"|"halt"|"nrst")`,
+  which the host `pod reset --mode` and the `reset_dut` MCP tool drive.
 
 ### F5.5 RP_INFRA API mimicry
 - Provide the RP_INFRA-equivalent surface (S3 spec §7.1, appendix B) so

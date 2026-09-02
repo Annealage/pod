@@ -236,22 +236,40 @@ GP4 = TX / GP5 = RX):
 So one pico-probe gives both SWD programming and a backup console. Details:
 `src/boards/ANNEALAGE_POD_RP2350/README.md` and `dev-notes.md`.
 
-### 5g. DUT reset (nRST) - GP13 (assigned in code, untested)
+### 5g. DUT reset (nRST) - GP13 (VERIFIED)
 
-The RP2350 DUT-reset pin is **GP13 (header pin 17)**, set in `_pinmap.NRST` on the
-RP2350. It is free and sits next to the SWD cluster (GP14/GP15) at the bottom-left
-of the header, so SWDIO/SWCLK/RESET form one tidy 3-wire debug group. It has not
-been exercised on hardware yet.
+The RP2350 DUT-reset pin is **GP13 (header pin 17)**, from
+`_rp2_pinmap.NRST`. It is free and sits next to the SWD cluster (GP14/GP15) at
+the bottom-left of the header, so SWDIO/SWCLK/RESET form one tidy 3-wire debug
+group.
 
 | Pod | DUT |
 |---|---|
 | GP13 (open-drain) | nRESET |
 | GND | GND |
 
-Drive it open-drain with a pull-up, pulse low to reset. `_pinmap.NRST` resolves to
-GP13 on the RP2350 (`sys.platform == "rp2"`) and stays GP14 on the ESP32-S3
-carrier, so the earlier collision (the ESP32-S3 value 14 equals SWDIO on this
-board) is fixed; see Open decisions.
+The pod drives the line open-drain: it pulls low to assert reset and releases to
+high-Z, so **the DUT must provide its own reset pull-up** - the pod never drives
+the line high and cannot deassert a reset on a line nothing pulls up. Reset it
+with `pod reset --mode nrst <pod>`, which reports `level`, the line after
+release; a `level` of 0 means the line stayed low, i.e. no DUT pull-up or the DUT
+is holding its own reset.
+
+Unlike the SWD paths, this one needs no debug session, so it is the reset of last
+resort when SWD is unavailable - target unpowered, wedged, or access-port locked.
+
+> **The pod parks this line at boot, and that is load-bearing.** An RP2350 pad
+> powers up with its internal pull-down enabled, so a GPIO no code has configured
+> is not high-impedance: it actively pulls its net down. On a DUT whose reset
+> pull-up is weaker than the pad's (roughly 50-80k) the pull-down wins and holds
+> the DUT in reset from the moment the pod powers on, with nothing having asked
+> for a reset. `netboot.main()` therefore calls `annealage_pod.debug.nrst.park()`
+> before anything else touches the DUT. If you port this boot path, keep the park.
+
+Verified on hardware 2026-09-02 (RP2350B pod, i.MX RT1052 Arch Mix DUT): asserting
+drove the line to 0 and releasing returned it to 1, and a pulse set the target's
+`DHCSR.S_RESET_ST` sticky bit and cleared `C_DEBUGEN`, confirming the core really
+was reset rather than merely the wire wiggled.
 
 ### 5h. DUT UART bridge - SUGGESTED (untested)
 

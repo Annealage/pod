@@ -52,6 +52,16 @@ _POLL_DEAD = select.POLLHUP | select.POLLERR | 0x20
 _REPL_RESTART_MS = const(100)
 
 
+# The DUT reset GPIO, duplicated from annealage_pod._rp2_pinmap.NRST. netboot is
+# frozen into firmware but annealage_pod is deployed to the pod filesystem, so on
+# a freshly flashed pod the package is not there yet - and that is exactly the
+# window in which a wired DUT would otherwise sit held in reset (see the park
+# note in main()). The fallback park below needs the pin number without the
+# package, so it is repeated here; test_netboot_nrst_pin.py pins the two values
+# together so they cannot drift.
+_NRST_PIN = const(13)
+
+
 def _pm_none(wlan):
     # Disable CYW43 Wi-Fi power-save so the radio stays active. Without this the
     # link drops on idle and re-associates with a new DHCP IP - the source of the
@@ -269,6 +279,27 @@ async def main():
     # accept loop as background tasks, then runs the asyncio REPL as the long-lived
     # foreground task. Returns only if stdin closes (it does not, while UART is the
     # primary), at which point boot falls through to the normal UART REPL.
+    #
+    # Park the DUT reset line first, before anything else. An RP2350 pad powers up
+    # with its internal pull-down enabled, so until this runs the pod is pulling
+    # the DUT's reset input down and can hold the DUT in reset without any code
+    # having asked for a reset (see annealage_pod.debug.nrst). It comes before the
+    # config import so a pod with no config.py still releases its DUT.
+    try:
+        from annealage_pod.debug import nrst
+
+        print("netboot: DUT reset line parked, level", nrst.park())
+    except Exception:
+        # annealage_pod is not on the filesystem yet (freshly flashed pod). Park
+        # the pin directly, to the same open-drain idle nrst.park() would set, so
+        # the DUT is released even before the package is deployed.
+        try:
+            from machine import Pin
+
+            print("netboot: DUT reset line parked (no annealage_pod yet), level",
+                  Pin(_NRST_PIN, Pin.OPEN_DRAIN, value=1).value())
+        except Exception as e:
+            sys.print_exception(e)
     try:
         import config
     except ImportError:

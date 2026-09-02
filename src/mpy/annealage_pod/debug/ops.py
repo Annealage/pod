@@ -426,6 +426,17 @@ def flash_crc(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
 
 
 def reset(mode="sysreset", clkdiv=swd_pio.DEFAULT_CLKDIV):
+    # "nrst" is handled before _ensure() because it is the reset path of last
+    # resort: it drives the dedicated reset wire and must work when SWD does not
+    # (unpowered, wedged, or locked target), so it must not require a debug
+    # session. "level" reports the line after release - 0 means it did not come
+    # back up, i.e. the DUT has no reset pull-up or is holding its own reset.
+    if mode == "nrst":
+        from . import nrst as _nrst
+
+        return {"ok": True, "mode": mode, "level": _nrst.pulse()}
+    if mode not in ("sysreset", "halt"):
+        raise ValueError("ops.reset() unknown mode: {!r}".format(mode))
     dp, ap, cm, fl = _ensure(clkdiv)
     if mode == "halt":
         cm.reset_and_halt()

@@ -98,7 +98,20 @@ the per-family native path (the validated nRF52 NVMC loader, `flash_nrf52`);
   Open a short-lived TCP sender on `port`; reads the target in bounded blocks
   and streams them to the host. The only path that returns target contents.
 - `reset(mode="sysreset") -> {ok, mode}` - `sysreset` resets and runs; `halt`
-  resets and catches the reset vector.
+  resets and catches the reset vector. Both go over SWD.
+- `reset(mode="nrst") -> {ok, mode, level}` - pulses the dedicated DUT reset wire
+  (pod GP13, `hardware-setup.md` section 5g) instead of going over SWD, so it
+  needs no debug session and is the path to try when SWD itself is unavailable:
+  target unpowered, wedged, or access-port locked. The pod drives the line
+  open-drain, so the **DUT must supply the reset pull-up**; `level` is the line
+  after release and a 0 means it stayed low (no DUT pull-up, or the DUT is
+  holding its own reset). Implemented in `annealage_pod.debug.nrst`, which also
+  exposes `park()` / `assert_reset()` / `release()` / `pulse()` for finer control.
+
+  `nrst.park()` runs from `netboot.main()` at boot and is not optional: an
+  RP2350 pad powers up with its internal pull-down enabled, so an unconfigured
+  GP13 actively pulls the DUT's reset line down and can hold a DUT in reset from
+  power-on. Parking is what makes "nobody is using nRST" mean inert.
 - `close() -> {ok}` - resume the target and drop the cached session.
 
 Single-shot register/memory peek-poke (the host `read_reg`/`write_reg`/
