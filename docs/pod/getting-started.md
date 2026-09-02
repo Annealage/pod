@@ -45,10 +45,15 @@ From source (the repo is private pre-launch; the `ampremote` dependency is a
 git-only fork, so this needs network and git):
 
 ```bash
-pip install ./src/host[mcp,zeroconf]
+cd src/host
+uv tool install --editable ".[zeroconf,mcp]" --force
 ```
 
-This installs the `pod` CLI and the `pod-mcp` server. Usage, the `Pod` Python
+This installs the `pod` CLI and the `pod-mcp` server. Install it **editable**: a
+plain install copies the package into site-packages, so the `pod` on your PATH
+silently keeps running that snapshot as the checkout moves on. Keep the `mcp`
+extra rather than installing `mcp` yourself, since it carries the `mcp<2` cap the
+MCP server needs. (`pip install -e ./src/host[mcp,zeroconf]` is equivalent.) Usage, the `Pod` Python
 client, and the MCP tool list:
 [../../src/host/README.md](../../src/host/README.md).
 

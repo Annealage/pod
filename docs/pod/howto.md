@@ -108,8 +108,19 @@ because the `ampremote` dependency is a git-only fork (not on PyPI, pulled at th
 commit pinned in `pyproject.toml`):
 
 ```bash
-pip install ./src/host[mcp,zeroconf]    # console scripts: pod, pod-mcp
+cd src/host
+uv tool install --editable ".[zeroconf,mcp]" --force   # console scripts: pod, pod-mcp
 ```
+
+Install it **editable**. A plain (non-editable) install copies the package into
+site-packages, so the `pod` on your PATH keeps running that copy while the
+checkout moves on: new CLI options are rejected and new modules appear missing,
+with nothing to indicate the code being run is stale. Keep the `mcp` extra rather
+than installing `mcp` separately - it carries an `mcp<2` cap, and 2.x drops the
+decorator API the MCP server is built on, so an uncapped resolve leaves `pod-mcp`
+failing at startup with `AttributeError: 'Server' object has no attribute
+'list_tools'`. `pip install -e ./src/host[mcp,zeroconf]` works the same way if you
+prefer pip.
 
 **USB/IP (Linux host, for the USB/IP recipe):** the standard `usbip` client and
 the `vhci_hcd` kernel module, and passwordless `sudo` for `usbip` so `pod attach`

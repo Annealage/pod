@@ -262,3 +262,40 @@ it survives host mode - `machine.USBHost().active(True)` drops the USB-CDC REPL
 while the UART REPL keeps working (used it to run `machine.reset()` and recover).
 Note `machine.USBHost().active(False)` does NOT re-enumerate the USB-CDC device;
 a `machine.reset()` is needed to return to USB-CDC dev mode.
+
+## 10. Install the host `pod` tooling editable, or you debug a stale copy
+
+A non-editable install of `src/host` copies the package into site-packages. The
+`pod` on your PATH then keeps running that copy while the checkout moves on, and
+nothing says so. The failure looks like the code is wrong rather than old:
+
+- a CLI option you just added is rejected as an invalid choice, while the same
+  command run from `src/host` accepts it;
+- a module you just added is missing at import;
+- tool names are the ones from whenever the install happened.
+
+Two sessions hit this from opposite directions on the same afternoon (2026-09-02),
+one via a missing module and one via a rejected `--mode` choice, before either
+connected it to the install. Check it first, not last:
+
+```bash
+python3 -c "import pod; print(pod.__file__)"   # must resolve into src/host
+```
+
+Install with:
+
+```bash
+cd src/host
+uv tool install --editable ".[zeroconf,mcp]" --force
+```
+
+Keep the `mcp` extra rather than passing `mcp` yourself. The extra carries an
+`mcp<2` cap; 2.x drops the decorator API `build_server` uses, so an uncapped
+resolve leaves `pod-mcp` dying at startup with `AttributeError: 'Server' object
+has no attribute 'list_tools'`. Passing dependencies as `--with` arguments keeps
+the resolution out of version control entirely, which is how an unrelated
+`--force` reinstall silently picked up the broken version.
+
+Editable resolves against one checkout, so `pod` run from a git worktree still
+executes the main checkout's code. That is a separate trap and the reinstall does
+not fix it.
