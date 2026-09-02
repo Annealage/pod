@@ -20,6 +20,9 @@ set, lease semantics, and steal protocol below are unaffected. Revisit this plan
 once conflict-legibility stage D is done, and only if holding the bench across
 gaps in activity turns out to be needed.
 
+**Assessed 2026-09-03: gate not met, deferred** - see `conflict-legibility.md`
+§ Relationship to bench-lease.md for the reasoning.
+
 ## Why
 
 The pod is a single shared DUT rig that several agents already reach at once
