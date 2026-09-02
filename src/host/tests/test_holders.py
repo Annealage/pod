@@ -92,33 +92,37 @@ class TestHolderRecord:
         assert rec["since_s"] >= 86_400
 
 
-class TestRecent:
-    """recent() is the one deliberate exception to "no TTL, no expiry": it
-    answers who last held a resource, surviving drop(), so a caller built on
-    top of this module (ops.py's SWD guard) can apply its own sticky window
-    without holders.py tracking that policy itself."""
+class TestHeld:
+    """held() is who()'s single-resource case done directly against _HELD -
+    no read-through registries, no work for any resource but the one asked
+    about - for a hot-path caller (ops.py's guard, on every guarded call)."""
 
-    def test_empty_before_anything_is_ever_noted(self, holders):
-        assert holders.recent("swd") == {}
+    def test_empty_when_unheld(self, holders):
+        assert holders.held("swd") == {}
 
-    def test_survives_a_drop_that_clears_who(self, holders):
+    def test_matches_who_for_a_directly_held_resource(self, holders):
+        holders.note("swd", "agent-a", "reset")
+        assert holders.held("swd") == holders.who("swd")["swd"]
+
+    def test_empty_after_drop(self, holders):
         holders.note("swd", "agent-a")
         holders.drop("swd")
-        assert holders.who("swd") == {}
-        rec = holders.recent("swd")
-        assert rec["caller"] == "agent-a"
-        assert rec["since_s"] >= 0
+        assert holders.held("swd") == {}
 
-    def test_the_next_note_overwrites_it_like_who(self, holders):
-        holders.note("swd", "agent-a")
-        holders.drop("swd")
-        holders.note("swd", "agent-b")
-        assert holders.recent("swd")["caller"] == "agent-b"
 
-    def test_clear_wipes_recent_too(self, holders):
-        holders.note("swd", "agent-a")
-        holders.clear()
-        assert holders.recent("swd") == {}
+class TestAgeSAndNowMs:
+    """Exposed so a module built on top of this one (ops.py's SWD guard) can
+    stamp and age its own timestamps on the same clock this module uses,
+    without reimplementing ticks_diff() wraparound arithmetic."""
+
+    def test_age_s_of_now_is_zero(self, holders):
+        assert holders.age_s(holders.now_ms()) == 0
+
+    def test_age_s_advances_with_the_clock(self, holders):
+        stamp = holders.now_ms()
+        now = holders.time.ticks_ms()
+        holders.time.ticks_ms = lambda: now + 3000
+        assert holders.age_s(stamp) == 3
 
 
 class TestEvict:

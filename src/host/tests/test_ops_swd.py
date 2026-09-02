@@ -51,8 +51,8 @@ def fake_clock(monkeypatch):
     """holders.py calls time.ticks_ms()/ticks_diff(), MicroPython-only names
     CPython's time module lacks. Stands in a controllable monotonic pair so
     the SWD guard tests below can advance "now" deterministically, and clears
-    holders state before/after so a guard claim in one test cannot leak into
-    the next.
+    both holders state and the guard's own sticky-window record before/after
+    so a guard claim in one test cannot leak into the next.
     """
     now = types.SimpleNamespace(ms=0)
     monkeypatch.setattr(
@@ -60,8 +60,10 @@ def fake_clock(monkeypatch):
         types.SimpleNamespace(ticks_ms=lambda: now.ms,
                               ticks_diff=lambda a, b: a - b))
     ops.holders.clear()
+    ops._last = None
     yield now
     ops.holders.clear()
+    ops._last = None
 
 
 class _FakeCM:

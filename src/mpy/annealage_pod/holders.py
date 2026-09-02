@@ -23,21 +23,20 @@
 # (pio_arbiter._claims, peripherals._INST) and who() reads through to those, so
 # each fact lives in exactly one place.
 #
-# recent() is the one deliberate exception to "no TTL, no expiry": it answers
-# who last held a resource and how long ago, surviving drop(), so a caller
-# built on top of this module (ops.py's SWD guard) can apply its own short
-# sticky window without this module tracking time-based policy itself.
+# age_s()/now_ms() are exposed (not just used internally) so a module built on
+# top of this one - ops.py's SWD guard keeps a sticky record of its own - can
+# stamp and age a timestamp on the same clock this module uses, without
+# reimplementing MicroPython's wraparound-safe time.ticks_diff() arithmetic or
+# risking a second, unrelated time source. The retained-past-drop() state
+# itself stays out of here deliberately: this module's one invariant is that
+# nothing it tracks outlives an explicit drop(), and a resource-keyed "last
+# known holder" cache would hand every resource here (including repl/usbip) a
+# TTL-adjacent mechanism only the SWD guard's sticky window actually wants.
 
 import time
 
 # resource -> (caller, since_ms, detail)
 _HELD = {}
-
-# resource -> (caller, since_ms, detail) of the last note(), regardless of any
-# drop() since. Powers a caller-scoped sticky window (see ops.py's SWD guard):
-# who() answers "is it held RIGHT NOW", this answers "who used it last, and
-# how long ago", which a plain drop() would otherwise erase.
-_RECENT = {}
 
 # Cumulative call counts, for diagnosing a record that appears to come and go:
 # they distinguish "drop is firing" from "the reader is racing".
@@ -49,36 +48,42 @@ RESOURCES = ("repl", "usbip", "swd")
 
 def note(resource, caller, detail=""):
     """Record that `caller` now holds `resource`. Idempotent for the same caller."""
-    rec = (caller, time.ticks_ms(), detail)
-    _HELD[resource] = rec
-    _RECENT[resource] = rec
+    _HELD[resource] = (caller, time.ticks_ms(), detail)
     _STATS["note"] += 1
     return True
 
 
 def drop(resource):
-    """Clear `resource`. Returns True if something was held.
-
-    Leaves _RECENT untouched: a resource that is no longer held right now was
-    still held a moment ago, and recent() answers exactly that question.
-    """
+    """Clear `resource`. Returns True if something was held."""
     gone = _HELD.pop(resource, None) is not None
     if gone:
         _STATS["drop"] += 1
     return gone
 
 
-def recent(resource):
-    """The last caller to note() `resource`, even if it has since been
-    dropped. {} if `resource` has never been noted since the last clear()."""
-    rec = _RECENT.get(resource)
+def held(resource):
+    """Whether `resource` is held right now, straight from _HELD.
+
+    Unlike who(), no read-through registries and no work done for any
+    resource other than the one asked about - the direct-lookup form who()'s
+    single-resource case doesn't need but a hot-path caller (ops.py's guard,
+    on every guarded call) does. {} if unheld.
+    """
+    rec = _HELD.get(resource)
     if rec is None:
         return {}
-    return {"caller": rec[0], "since_s": _age_s(rec[1]), "detail": rec[2]}
+    return {"caller": rec[0], "since_s": age_s(rec[1]), "detail": rec[2]}
 
 
-def _age_s(since_ms):
+def age_s(since_ms):
+    """Seconds elapsed since a ticks_ms() timestamp, wraparound-safe."""
     return time.ticks_diff(time.ticks_ms(), since_ms) // 1000
+
+
+def now_ms():
+    """This module's current ticks_ms(), for stamping a timestamp elsewhere
+    that will later be aged with age_s() - same clock, not a second one."""
+    return time.ticks_ms()
 
 
 def _read_through():
@@ -122,7 +127,7 @@ def who(resource=None):
     """
     direct = {}
     for key, rec in _HELD.items():
-        direct[key] = {"caller": rec[0], "since_s": _age_s(rec[1]),
+        direct[key] = {"caller": rec[0], "since_s": age_s(rec[1]),
                        "detail": rec[2]}
     if resource is not None:
         return {resource: direct[resource]} if resource in direct else {}
@@ -131,10 +136,8 @@ def who(resource=None):
 
 
 def clear():
-    """Forget every directly-held record, live and recent. For tests and a
-    clean re-init."""
+    """Forget every directly-held record. For tests and a clean re-init."""
     _HELD.clear()
-    _RECENT.clear()
 
 
 def evict(resource, caller, victim, detail=""):
