@@ -1,208 +1,157 @@
-# Upstream plan: the socket REPL raw-mode disconnect fix
+# The socket-REPL park, and what happened to the fix for it
 
-Composition and submission plan for the `src/micropython` work behind the pod's
-socket-REPL wedge. Two commits, split along a dependency seam, staged on fork
-branches so each can travel at its own pace.
+**Status: on hold. Neither branch in this document should be pushed.** The
+upstream author reworked their own fix in a way that supersedes one of the two
+branches here and breaks the mechanism of the other. What remains open is a
+scope decision for Andrew, described below.
 
-## The fault
+## Two faults, not one
 
-A client that disconnected from the pod's socket REPL **while still in raw mode**
-stopped the pod's single-core asyncio loop outright. The accept loop, Wi-Fi
-supervisor and UART bridge all stopped being scheduled; the listener stayed
-bound, so connections still completed their TCP handshake and were then never
-served. From the host that looks like a pod that answers and says nothing, and
-only a reset cleared it. `mpremote` and `ampremote` never trigger it because they
-send Ctrl-B before closing.
+They were conflated for a long time and the distinction matters, because one is
+fixed upstream and the other is by design.
 
-The mechanism is a circular dependency between two pieces that are each correct
-alone:
+**Fault A, the park.** A client that disconnects from the pod's socket REPL
+stops the pod's single-core asyncio loop outright. The accept loop, Wi-Fi
+supervisor and UART bridge all stop being scheduled; the listener stays bound, so
+connections still complete their TCP handshake and are then never served. From
+the host that looks like a pod that answers and says nothing, and only a reset
+clears it. `mpremote` and `ampremote` never trigger it because they send Ctrl-B
+before closing.
 
-```mermaid
-flowchart TD
-    A[client disconnects<br/>still in raw mode] --> B[slot is dead<br/>but still attached]
-    B --> C[mp_os_dupterm_poll masks it<br/>so it cannot mark stdin ready]
-    C --> D[poll reports nothing to read]
-    D --> E[nothing ever reads or writes the slot]
-    E --> F[mp_os_deactivate never runs<br/>slot never torn down]
-    F --> B
-    D --> G[arepl blocks in the raw-mode read<br/>single-core loop stops]
-```
+**Fault B, the uninterruptible synchronous line.** A busy device cannot be
+interrupted over the socket REPL at all. The same Ctrl-C that aborts a
+`time.sleep(12)` over the probe UART in 1.8s is ignored over the socket and the
+sleep runs to completion. The interrupt-char check lives inside the dupterm
+read, so it only runs when something reads stdin; a busy synchronous statement
+never reads stdin, so its Ctrl-C is never seen. UART and USB-CDC do not have that
+dependency because their RX path schedules the interrupt directly whatever the VM
+is doing.
 
-The masking (`86213f47a7`) exists to stop a closed slot wedging a poll-driven
-reader by falsely marking stdin ready. It does that, and in doing so makes the
-slot invisible: nothing reads it, so it is never deactivated, so nothing can tell
-the reader its source is gone.
+Fault B is a property of a synchronous blocking stdin read over a socket-only
+console. It is not an arepl bug, no change in `arepl.py` can reach it, and it
+stays after fault A is fixed. Anyone reading only about fault A would expect a
+runaway `while True: pass` to become recoverable. It does not.
 
-## The split
+## The mechanism of fault A, as finally established
 
-The fix is two commits with a real dependency between them, which is why they are
-staged separately rather than as one change.
+The author's account, which supersedes the model this document previously
+carried:
 
-| Branch | Base | Contains |
-|---|---|---|
-| `os-dupterm-generation` | `86213f47a7` | The C half: publish `os.dupterm_generation()`, bumped on teardown and when a slot is seen dead during a poll. |
-| `arepl-raw-mode-disconnect` | `native_async_repl` | The above, plus the arepl consumer: bounded wait in the raw-mode read, consult the counter, leave raw mode when the source is gone. |
+arepl's main loop is `await StreamReader(sys.stdin).read(1)`. asyncio's
+`Stream.read` assumes a non-blocking stream, but `sys.stdin.read` goes to
+`stdio_read`, which is fully blocking via `mp_hal_stdin_rx_chr`. A dupterm socket
+at EOF or RST makes `modlwip` poll report `POLL_RD`, so the StreamReader wakes,
+calls the blocking read, that read consumes the EOF, deactivates the slot, has no
+byte to return, and parks the whole loop in `mp_event_wait` forever. There is no
+other stdin source, and the frozen accept task cannot dup a new client in to wake
+it.
 
-`tessera` merges `arepl-raw-mode-disconnect`; that is what the pod's firmware
-builds from, and the superproject gitlink tracks it.
+So the park is in the **outer poll-driven read**, not in the raw-mode branch. An
+earlier model held that the outer loop awaits and therefore survives, and that
+the park was specific to raw mode. That was wrong in a way that mattered: it
+pointed the fix at the wrong layer.
 
-The pod also needs a change outside this submodule: `netboot` must restart the
-REPL task when it returns, because `main()` awaits it last and would otherwise
-unwind the whole runtime. That half lives in `src/boards/common/netboot.py`.
-**Both halves are required.** The arepl change alone converts a park into a clean
-unwind that still takes the management plane down.
+## What happened to the two branches
 
-## Submission order and constraints
+| branch | status |
+| --- | --- |
+| `os-dupterm-generation` | **Dead.** Superseded by the author's rework. Do not push. |
+| `arepl-raw-mode-disconnect` | **On hold.** Fixes a real gap, but its detection no longer fires. Do not push. |
 
-`86213f47a7` is fork-only. The counter sits directly on top of it and is
-meaningless without it, so the C half cannot go upstream on its own: it travels
-either with that commit or with the async REPL feature as a whole.
+`os-dupterm-generation` published a counter so a blocked reader could tell "no
+byte yet" from "source gone". Its whole premise was that the author's fix
+*masked* a dead slot's poll flags while leaving the slot attached, so nothing read
+it, so it was never deactivated, so nothing could report it. The author has since
+rewritten that commit to drop the slot outright rather than mask it. The blind
+spot the counter existed to report no longer exists.
 
-`extmod/asyncio/arepl.py` does not exist upstream at v1.29.0, nor does
-`micropython.repl_event` or `MICROPY_COMP_ALLOW_TOP_LEVEL_AWAIT`. The arepl
-commit therefore reaches upstream only when `native_async_repl` does, and should
-be reviewed as part of it rather than proposed separately.
+`arepl-raw-mode-disconnect` bounded the raw-mode read and consulted that counter.
+The gap it addresses is real and still open: the author's fix stops a
+*poll-driven* reader being woken into the stranding read, but arepl's raw branch
+calls `sys.stdin.read(1)` with nothing polled first, so the fix never engages
+there and a raw-mode disconnect still parks. The author verified this
+independently: `stdio_read` never returns short, so the `if not ch: return` below
+that read is dead code and arepl has no EOF path at all, and rp2's
+`mp_hal_stdin_rx_chr` is a `for(;;)` around `mp_event_wait_indefinite`.
 
-Order:
+But the branch cannot ship as written. Against the reworked base the drop path
+nulls the slot directly and never reaches `mp_os_deactivate`, so any generation
+counter stays put. The bounded loop would poll every 500 ms forever without
+yielding, which is worse than the park because it looks alive.
 
-1. `os-dupterm-generation` reviewed against `86213f47a7` as its parent. Small
-   enough to review on its own, and the seam is a genuine one, so it is worth
-   keeping distinct even if the two land together.
-2. `arepl-raw-mode-disconnect` folded into the `native_async_repl` submission.
+## What is open
 
-## Validation
+Whether fault A's raw-mode half gets a real fix or is grouped into the fault B
+limitation note. That is Andrew's scope call, and it shapes the upstream PR
+framing, which is why the author declined to fold anything on their own
+initiative.
 
-On the RP2350 pod, nRF52840 DUT attached, both halves in place: fifteen
-consecutive abrupt raw-mode disconnects (`SO_LINGER 0` while in raw mode), each
-recovered with no reset. A host tool killed with SIGTERM mid-exec likewise. The
-DUT SWD link was healthy throughout.
+If it is fixed, it wants designing rather than bolting a generation check onto a
+loop that is synchronous on purpose. The raw loop feeds input with no await
+precisely so a concurrent task's stdout cannot corrupt a raw or raw-paste
+transfer, and that property has to survive whatever replaces the unbounded read.
 
-Reproduction, for anyone re-testing: connect, send Ctrl-A, then close with
-`SO_LINGER 0` without sending Ctrl-B. Note that a probe which enters raw mode and
-closes politely will not reproduce it, and that any probe driving the CLI will
-repair the device it is measuring, because the prompt-poll preamble writes before
-it reads. Drive a command to completion as the health check instead of looking
-for a prompt: a leftover raw-mode session answers a prompt probe while being
-unusable.
+The smallest thing that would work in the author's current shape is publishing
+the drop from inside their own drop branch, so a synchronous reader can observe
+it. Whether that is a counter or routing the drop through `mp_os_deactivate` (
+avoided deliberately, to keep the poll path cheap) is the author's call.
 
-## Not addressed here
+## SHAs here are volatile
 
-A busy device cannot be interrupted over the socket REPL at all. Measured: the
-same Ctrl-C that aborts a `time.sleep(12)` over the probe UART in 1.8s is ignored
-over the socket, and the sleep runs to completion. The interrupt char is armed
-correctly around execution by `pyexec`; the byte simply never arrives, because
-nothing services a dupterm socket slot during synchronous execution. That is a
-port-level question about the event-poll hook, not an arepl one, and no change in
-`arepl.py` can reach it. Routing work through top-level `await` does not help
-either: raw mode rejects it outright (`'await' outside function`, since the
-compiler flag is only set by the friendly-REPL line executor), and in the friendly
-REPL where it does run, the cancel still needs the same byte to arrive.
+`native_async_repl` has been force-pushed at least twice during this work, and
+the dupterm fix has carried a different SHA each time while the file content
+stayed byte-identical. Compare by blob id or by subject, not by commit SHA, and
+re-resolve before building anything. Do not cherry-pick from it; see the
+composition note below.
 
----
+## How a fix would reach the pod
 
-## Draft PR: `os-dupterm-generation`
+Not by cherry-pick. `tessera` is composed by `mbm` from the branches registered
+in `mbm.toml` at the repository root, and a cherry-pick would give the fix once
+and then be dropped by the next recompose. The action is a recompose, after
+`native_async_repl` is updated.
 
-**Title:** `extmod/os_dupterm: Report when a dupterm slot is seen dead.`
+Two things gate that, both verified:
 
-### Summary
+**The `lib/tinyusb` pointer is behind what tessera runs.** A recompose today
+moves it backwards past the shared-EPX double-arm degrade fix, which is the #74
+pod-kill: the usbip forwarder re-arms an endpoint TinyUSB still owns, TinyUSB
+panics, and the pod drops off the network needing an SWD reset. Neither candidate
+source rescues it:
 
-Chasing a wedge on a network-attached board, I found a dead dupterm slot can sit
-attached and completely invisible. The masking added in the parent commit stops a
-closed slot marking stdin ready, which is what keeps it from wedging a poll-driven
-reader. The side effect is that nothing then reads or writes that slot, so it is
-never deactivated either, and a reader waiting on stdin has no way to tell "no
-byte has arrived yet" from "the source I am reading is gone and never coming
-back".
+| source | `lib/tinyusb` |
+| --- | --- |
+| default, `origin/tinyusb-rp2-host-abort` | `b414cc7d87` |
+| `--local`, `tinyusb-rp2-host-abort` | `482039b9f8` |
+| what `tessera` runs today | `6250fe7d09` |
 
-On a single-threaded asyncio runtime that difference decides whether the event
-loop keeps running. The detection already existed inside the masking branch; it
-just was not published.
+Bump the branch pointer to `6250fe7d09` before recomposing. That also retires the
+direct `lib/tinyusb` bump currently sitting on `tessera`, which is a stopgap not
+present in any registered branch and which any recompose drops.
 
-This adds a counter, bumped both when a slot is torn down and when one is seen
-dead during a poll, exposed as `os.dupterm_generation()`. A reader snapshots it
-before a blocking wait and compares afterwards. Monotonic, never reset, so a wrap
-takes 2^32 tear-downs.
+**The base.** `mbm rebase` targets `upstream/master` by default, which is 307
+commits past tessera's base of `562d6be365`. On a board whose only management
+channel is the thing under test, that is worth keeping separate from a
+composition change: `--target 562d6be365` keeps the recompose to composition
+only. Use `--dry-run` first.
 
-### Testing
+After recomposing, check by content rather than trusting the merge list: a marker
+per registered branch, `lib/tinyusb` landing on `6250fe7d09` rather than either
+candidate source, and the merge-base still being `562d6be365` if the conservative
+target was used.
 
-Built and run on RP2350 (Pico 2 W) with a socket REPL over Wi-Fi. Verified the
-counter increments both on a clean disconnect and on an abrupt reset, and that a
-reader blocked on stdin observes the change. The consumer that uses it lives on
-`arepl-raw-mode-disconnect`; fifteen consecutive abrupt disconnects recovered
-without a reset with both in place.
+## Reproduction, with the traps
 
-Not tested on ports without `MICROPY_PY_OS_DUPTERM`, where the accessor is
-compiled out along with the rest of dupterm.
+Connect, send Ctrl-A, then close with `SO_LINGER 0` without sending Ctrl-B.
 
-### Trade-offs and Alternatives
-
-Four bytes of BSS and a branch already on the poll path, so the cost is
-negligible. The counter is global rather than per-slot, which means a reader
-learns that *some* slot died rather than that *its* slot died. Per-slot would be
-more precise, but a reader on `sys.stdin` is reading the aggregate of all slots
-and has no slot identity to compare against, so the extra precision would not be
-usable from Python without also exposing which slot feeds a given read.
-
-I first tried bumping only in `mp_os_deactivate`. That does not work, and the
-reason is the point of the change: with the slot masked, deactivation never
-happens, so a counter that only moves there never moves at all.
-
-### Generative AI
-
-I used generative AI tools when creating this PR, but a human has checked the
-code and is responsible for the description above.
-
----
-
-## Draft PR: `arepl-raw-mode-disconnect`
-
-**Title:** `extmod/asyncio/arepl: Leave raw mode when the input source disappears.`
-
-### Summary
-
-A client that disconnects from a socket REPL without leaving raw mode used to
-take the whole event loop with it. In raw mode input is fed synchronously, with
-no await, so a concurrent task's stdout cannot corrupt a raw or raw-paste
-transfer. The read backing that was unbounded, which is fine while stdin is a
-UART but not when it is a dupterm slot that can vanish: no further byte can
-arrive, and on a single-threaded runtime nothing else runs again. On a board
-whose only management channel is that REPL, this strands it until a reset.
-
-The wait is now bounded, and `os.dupterm_generation()` is consulted on each pass;
-a change means the source is gone, so it takes the same path as a clean EOF. The
-bound is not load-bearing for correctness, only for how quickly this is noticed,
-so it stays generous and a slow paste is unaffected. It still does not await, so
-the property the synchronous feed exists to protect is preserved.
-
-The check runs on every pass rather than only on a timeout, because a slot can be
-dead while still attached: nothing has read it, so it has not been deactivated.
-
-### Testing
-
-RP2350 (Pico 2 W), socket REPL over Wi-Fi, nRF52840 attached over SWD. Fifteen
-consecutive abrupt raw-mode disconnects (`SO_LINGER 0` after Ctrl-A, no Ctrl-B),
-each recovered with no reset; previously the first one wedged the board. A host
-tool killed with SIGTERM mid-exec also recovers. Normal `mpremote` sessions,
-raw-paste transfers and mounts are unaffected, as they leave raw mode before
-closing.
-
-Needs the application side to restart the REPL task when it returns; if
-`arepl.task()` is the last await in a `main()`, returning ends `asyncio.run()`
-and cancels everything else with it.
-
-### Trade-offs and Alternatives
-
-A poll every 500ms while idle in raw mode instead of a blocking read. That window
-only decides detection latency, not correctness, so it can be raised if the wakeups
-matter on a battery target.
-
-The obvious cheaper change is to await on poll timeout instead of bounding the
-wait. I avoided that deliberately: it reintroduces exactly the interleaving the
-synchronous feed prevents, and on a board with concurrent writers to stdout a
-task's output can land mid-transfer. Trading a hang for silent protocol
-corruption is a bad deal, since the hang at least announces itself.
-
-### Generative AI
-
-I used generative AI tools when creating this PR, but a human has checked the
-code and is responsible for the description above.
+- A probe that enters raw mode and closes politely will not reproduce it.
+- Any probe driving the CLI repairs the device it is measuring, because the
+  prompt-poll preamble writes before it reads.
+- Drive a command to completion as the health check rather than looking for a
+  prompt: a leftover raw-mode session answers a prompt probe while being
+  unusable.
+- The pod also needs `netboot` to restart the REPL task when it returns. If
+  `arepl.task()` is the last await in a `main()`, returning ends `asyncio.run()`
+  and cancels everything else with it, turning a park into a clean unwind that
+  still takes the management plane down. That half is in
+  `src/boards/common/netboot.py` and is independent of whatever happens upstream.
