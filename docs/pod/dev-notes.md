@@ -319,3 +319,30 @@ rebooted. Confirmed 2026-09-03: after a `holders.py` cp mid-session, a fresh
 immediately, while the control port's `who` kept answering without it across
 several real usbip attach/detach cycles - only a reboot (`machine.reset()`,
 or power-cycle) makes the already-running listener pick it up.
+
+## 12. `sys.modules.pop()` alone does not force a `from package import name`
+site to see a redeployed submodule - pop the submodule and re-import it
+BEFORE popping/re-importing whatever does `from .. import name`
+
+`from package import name` resolves via `getattr(package, name)` first and
+only falls through to a real `sys.modules` lookup if that attribute is
+missing; deleting `sys.modules["package.name"]` does not clear `package`'s
+own `name` attribute, so a module that reached its dependency with `from ..
+import name` keeps its **already-bound** reference even after the dependency
+is popped and reimported by someone else. `ops.py`'s `from .. import
+_rp2_pinmap, holders` hit exactly this while hardware-validating the phase-7
+SWD guard (2026-09-03): after redeploying both `holders.py` and `ops.py` and
+popping both from `sys.modules`, importing `ops` FIRST (so its `from ..
+import holders` line ran) then explicitly `import annealage_pod.holders as
+h` SECOND left two live objects answering to "annealage_pod.holders" -
+`ops.holders is h` was `False`, and `ops.holders` (the stale one, still
+carrying whatever `annealage_pod`'s `holders` attribute pointed to before
+either pop) was missing the just-added `recent()`. Reimporting `holders`
+*before* reimporting `ops` fixed it (`ops.holders is h` then `True`) -
+package-attribute assignment happens as a side effect of finishing an
+`import package.name` statement, so `annealage_pod.holders` only points at
+the fresh module once that statement has actually run, and anything
+`from`-importing it needs to run afterward, not before. A reboot sidesteps
+the ordering question entirely (see item 10) and is the reliable fix when a
+redeploy touches more than one module with a `from .. import` relationship
+between them.

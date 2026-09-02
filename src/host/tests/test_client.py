@@ -30,8 +30,16 @@ def fake_runner():
 
 @pytest.fixture
 def pod_fake(fake_runner):
-    """Pod instance with injected fake runner."""
-    return Pod(address=ADDRESS, repl_port=PORT, runner=fake_runner)
+    """Pod instance with injected fake runner.
+
+    caller is pinned rather than left to the real resolve_caller() (which
+    depends on the environment running the tests), so any test asserting on
+    the caller= the SWD guard sees embedded in a generated exec is
+    deterministic.
+    """
+    p = Pod(address=ADDRESS, repl_port=PORT, runner=fake_runner)
+    p.caller = "test-caller"
+    return p
 
 
 def _norm(argv):
@@ -234,14 +242,14 @@ class TestDutDebugPeek:
             stdout="{'ok': True, 'halted': True, 'dhcsr': 131072}\n",
             returncode=0)
         result = pod_fake.halt_dut()
-        assert "o.halt()" in self._code(fake_runner)
+        assert "o.halt(caller='test-caller')" in self._code(fake_runner)
         assert result["ok"] is True and result["halted"] is True
 
     def test_resume_code(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(
             stdout="{'ok': True, 'halted': False}\n", returncode=0)
         result = pod_fake.resume_dut()
-        assert "o.resume()" in self._code(fake_runner)
+        assert "o.resume(caller='test-caller')" in self._code(fake_runner)
         assert result["halted"] is False
 
     def test_read_reg_by_name_resolves_regsel(self, pod_fake, fake_runner):
@@ -249,14 +257,14 @@ class TestDutDebugPeek:
             stdout="{'ok': True, 'regsel': 15, 'value': 268439552}\n",
             returncode=0)
         result = pod_fake.read_reg("pc")
-        assert "o.read_reg(15)" in self._code(fake_runner)
+        assert "o.read_reg(15, caller='test-caller')" in self._code(fake_runner)
         assert result["value"] == 268439552
 
     def test_read_reg_by_int(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(
             stdout="{'ok': True, 'regsel': 0, 'value': 1}\n", returncode=0)
         pod_fake.read_reg(0)
-        assert "o.read_reg(0)" in self._code(fake_runner)
+        assert "o.read_reg(0, caller='test-caller')" in self._code(fake_runner)
 
     def test_read_reg_not_halted(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(
@@ -271,14 +279,15 @@ class TestDutDebugPeek:
             returncode=0)
         pod_fake.write_reg("sp", 0x20004000)
         code = self._code(fake_runner)
-        assert "o.write_reg(13, %d)" % 0x20004000 in code
+        assert "o.write_reg(13, %d, caller='test-caller')" % 0x20004000 in code
 
     def test_read_mem_code_and_hex(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(
             stdout="{'ok': True, 'addr': 536870912, 'length': 4, "
                    "'hex': 'deadbeef'}\n", returncode=0)
         result = pod_fake.read_mem(0x20000000, 4)
-        assert "o.read_mem(%d, 4)" % 0x20000000 in self._code(fake_runner)
+        assert ("o.read_mem(%d, 4, caller='test-caller')" % 0x20000000
+                in self._code(fake_runner))
         assert result["hex"] == "deadbeef"
 
     def test_write_mem_from_bytes_hexlifies(self, pod_fake, fake_runner):
@@ -287,15 +296,16 @@ class TestDutDebugPeek:
             returncode=0)
         pod_fake.write_mem(0x20000000, b"\xde\xad\xbe\xef")
         code = self._code(fake_runner)
-        assert "o.write_mem(%d, 'deadbeef', protect=None)" % 0x20000000 in code
+        assert ("o.write_mem(%d, 'deadbeef', protect=None, caller='test-caller')"
+                % 0x20000000 in code)
 
     def test_write_mem_accepts_hex_string(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(
             stdout="{'ok': True, 'addr': 536870912, 'length': 2}\n",
             returncode=0)
         pod_fake.write_mem(0x20000000, "beef")
-        assert ("o.write_mem(%d, 'beef', protect=None)" % 0x20000000
-                in self._code(fake_runner))
+        assert ("o.write_mem(%d, 'beef', protect=None, caller='test-caller')"
+                % 0x20000000 in self._code(fake_runner))
 
 
 class TestMcpDutDebugPeek:
@@ -1209,7 +1219,7 @@ class TestFlashChunking:
         p = Pod(address=ADDRESS, repl_port=PORT)
         subs = []
 
-        def fake_cmd(a, n, port, verify, loader="native"):
+        def fake_cmd(a, n, port, verify, loader="native", caller=None):
             subs.append((a, n))
             return "CMD"
 

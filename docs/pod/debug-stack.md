@@ -71,6 +71,18 @@ machines). All functions take an optional `clkdiv` (default `swd_pio.DEFAULT_CLK
 = 16). Passing a different `clkdiv` than the live session rebuilds the SWD
 transport at the new clock (the target's halt/breakpoint state is preserved).
 
+Every function below except `stage_flm_blob`/`set_flm_algo`/`flm_algo_info`
+also takes an optional `caller` keyword: a label the `Pod` client always
+passes, naming whoever asked for the call. Two callers interleaving on the
+shared session return wrong data rather than an error, so these entry points
+are wrapped in a re-entrancy guard (`ops._guarded`, see
+`plan/conflict-legibility.md` item 5): a second caller is refused with
+`SwdBusy` while the first genuinely holds it, and for a few seconds after
+(`ops.STICKY_S`) even once it has released, closing the gap a multi-call
+`pod_exec` sequence opens between calls. `caller=None` (the default when
+calling `ops.*` directly, e.g. from a human at the REPL) is never gated -
+deliberate god-mode, not an oversight.
+
 - `info() -> {dpidr, cpuid, part, flash_kb, ram_kb}` - identify the target.
 - `flash_stream(addr, total_len, port=3333, chunk=4096, verify=True, loader="native") -> {ok, addr, bytes, err}`
   Open a short-lived TCP receiver on `port`; the host connects and streams the
