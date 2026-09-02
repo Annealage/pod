@@ -337,8 +337,9 @@ import holders` line ran) then explicitly `import annealage_pod.holders as
 h` SECOND left two live objects answering to "annealage_pod.holders" -
 `ops.holders is h` was `False`, and `ops.holders` (the stale one, still
 carrying whatever `annealage_pod`'s `holders` attribute pointed to before
-either pop) was missing the just-added `recent()`. Reimporting `holders`
-*before* reimporting `ops` fixed it (`ops.holders is h` then `True`) -
+either pop) was missing the just-added `held()`/`age_s()`/`now_ms()`.
+Reimporting `holders` *before* reimporting `ops` fixed it (`ops.holders is h`
+then `True`) -
 package-attribute assignment happens as a side effect of finishing an
 `import package.name` statement, so `annealage_pod.holders` only points at
 the fresh module once that statement has actually run, and anything

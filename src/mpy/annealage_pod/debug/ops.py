@@ -57,19 +57,30 @@ class SwdBusy(Exception):
 # lock an idle pod against everyone else (conflict-legibility.md item 5).
 STICKY_S = 5
 
+# (caller, since_ms, op) of the last guarded call, regardless of any
+# _guard_exit since - the sticky window above. Private to this guard rather
+# than a holders.py primitive: holders.py's one invariant is that nothing it
+# tracks outlives an explicit drop(), and "swd" is the only resource that
+# wants a retained-past-drop record, so that state lives here instead of
+# generalising a TTL-adjacent mechanism onto repl/usbip too.
+_last = None
+
 
 def _guard_enter(caller, op):
+    global _last
     if caller is None:
         # No caller means a human at the REPL, or ops.* called directly with
         # no client wrapper: deliberate god-mode, never gated (Non-goals).
         return
-    held = holders.who("swd").get("swd")
+    held = holders.held("swd")
     if held and held["caller"] != caller:
         raise SwdBusy(held)
-    last = holders.recent("swd")
-    if last and last["caller"] != caller and last["since_s"] < STICKY_S:
-        raise SwdBusy(last)
+    if _last is not None:
+        last_caller, last_ms, _op = _last
+        if last_caller != caller and holders.age_s(last_ms) < STICKY_S:
+            raise SwdBusy({"caller": last_caller, "since_s": holders.age_s(last_ms)})
     holders.note("swd", caller, op)
+    _last = (caller, holders.now_ms(), op)
 
 
 def _guard_exit(caller):
