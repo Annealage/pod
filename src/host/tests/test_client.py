@@ -666,13 +666,18 @@ class TestMcpPodExec:
 
 
 class TestDutExecTurnkey:
-    """The rebuild path. Each test pins forwarded_tty to None: without that these
-    read the real host's vhci state, so they would pass or fail depending on
-    whether a DUT happens to be attached to the machine running them."""
+    """The rebuild path. Each test pins forwarded_tty to None and attached_ports
+    to []: dut_exec calls attached_ports() unconditionally before forwarded_tty
+    ever sees its result, so pinning forwarded_tty alone still leaves a real
+    `sudo usbip port` subprocess call in every test - pinning attached_ports
+    too removes it, which is faster and (unlike pinning forwarded_tty alone)
+    is not just "the result no longer depends on real host state" but "no real
+    subprocess runs at all"."""
 
     @pytest.fixture(autouse=True)
     def _nothing_attached(self, monkeypatch):
         monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
+        monkeypatch.setattr(Pod, "attached_ports", lambda self: [])
 
     def test_flow_runs_mpremote_on_tty(self, monkeypatch):
         import pod.usbip as u
@@ -1651,6 +1656,17 @@ class TestForwardedLinkIsReused:
             return SimpleNamespace(returncode=0, stdout="54\n", stderr="")
 
         p = self._pod(runner)
+        # Unmocked, this calls attached_ports() -> usbip.ports() -> a real
+        # `sudo usbip port` subprocess. That alone was a pre-existing flake:
+        # time.sleep is patched process-wide below (pod.client.time IS the
+        # shared time module, not a copy), so CPython's own subprocess.Popen
+        # timeout-poll loop (Lib/subprocess.py's _wait, exponential-backoff
+        # time.sleep calls while reaping the child) got swept into `slept`
+        # whenever the real subprocess took a few OS-scheduler ticks longer to
+        # reap under load on a shared machine - intermittent, and nothing to
+        # do with the code under test. forwarded_tty is already faked to
+        # ignore its argument, so the value here is arbitrary.
+        monkeypatch.setattr(p, "attached_ports", lambda: [0])
         monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: "/dev/ttyACM6")
         slept = []
         monkeypatch.setattr("pod.client.time.sleep", lambda s: slept.append(s))
@@ -1671,6 +1687,10 @@ class TestForwardedLinkIsReused:
             return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
 
         p = self._pod(runner)
+        # Same gap as the sibling test above: unmocked, this calls a real
+        # `sudo usbip port` subprocess for a result forwarded_tty ignores
+        # anyway (it is faked to always report nothing attached).
+        monkeypatch.setattr(p, "attached_ports", lambda: [])
         monkeypatch.setattr("pod.usbip.forwarded_tty", lambda *a, **k: None)
         monkeypatch.setattr("pod.usbip.list_remote", lambda *a, **k: [{"busid": "1-1"}])
         monkeypatch.setattr("pod.client.time.sleep", lambda s: None)
