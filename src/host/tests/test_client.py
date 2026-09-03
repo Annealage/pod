@@ -1475,6 +1475,62 @@ class TestFlmAlgoInstall:
         p.ensure_flm_algo()
         assert len(calls) == before, "cached install still talked to the pod"
 
+    def test_ensure_re_resolves_when_a_named_device_disagrees_with_the_cache(
+            self, monkeypatch):
+        # Gap 7's own failure mode surviving inside the fix meant to close it:
+        # a device= that disagrees with what is cached/installed must not be
+        # silently ignored (naming a device is a request for that one, not a
+        # hint the caller thinks force= might be needed) - otherwise a fresh
+        # `pod dut flash --target X --loader flm` process can flash a real DUT
+        # with the wrong part's algorithm with no error.
+        p = Pod(addr4="10.0.0.1")
+        p._flm_installed = {"installed": True, "name": "nRF52840_xxAA"}
+        monkeypatch.setattr(
+            p, "exec", lambda code: pytest.fail("should not ask the pod - "
+                                                "the client's own cache disagreed"))
+        resolved = {}
+        monkeypatch.setattr(
+            p, "resolve_flm_algo",
+            lambda **k: resolved.update(k) or {"name": k.get("device")})
+        monkeypatch.setattr(p, "install_flm_algo",
+                            lambda algo: {"installed": True, **algo})
+
+        result = p.ensure_flm_algo(device="STM32F407VG")
+
+        assert resolved.get("device") == "STM32F407VG"
+        assert result["name"] == "STM32F407VG"
+
+    def test_ensure_reuses_the_cache_when_the_named_device_matches(
+            self, monkeypatch):
+        p = Pod(addr4="10.0.0.1")
+        p._flm_installed = {"installed": True, "name": "nRF52840_xxAA"}
+        monkeypatch.setattr(
+            p, "resolve_flm_algo",
+            lambda **k: pytest.fail("should have reused the matching cache"))
+
+        result = p.ensure_flm_algo(device="nRF52840_xxAA")
+
+        assert result == {"installed": True, "name": "nRF52840_xxAA"}
+
+    def test_ensure_always_resolves_fresh_when_an_explicit_pack_is_named(
+            self, monkeypatch):
+        # An explicit pack has no comparable field in the installed summary
+        # to check for a match, so naming one always resolves fresh rather
+        # than risk silently reusing an unrelated cached algorithm.
+        p = Pod(addr4="10.0.0.1")
+        p._flm_installed = {"installed": True, "name": "nRF52840_xxAA"}
+        resolved = {}
+        monkeypatch.setattr(
+            p, "resolve_flm_algo",
+            lambda **k: resolved.update(k) or {"name": "from-pack"})
+        monkeypatch.setattr(p, "install_flm_algo",
+                            lambda algo: {"installed": True, **algo})
+
+        result = p.ensure_flm_algo(pack="/path/to/x.pack")
+
+        assert resolved.get("pack") == "/path/to/x.pack"
+        assert result["name"] == "from-pack"
+
     def test_resolve_needs_a_declared_device(self, monkeypatch):
         p = Pod(addr4="10.0.0.1")
         with pytest.raises(ValueError, match="no CMSIS device name"):
@@ -1526,6 +1582,30 @@ class TestFlmAlgoInstall:
         algo = p.resolve_flm_algo()
 
         assert algo["flash_size"] == 0x200000
+
+    def test_resolve_leaves_a_different_base_algorithm_untouched(
+            self, monkeypatch):
+        # A sub-region algorithm at a different base than the registry's main
+        # flash (UICR, OTP, a second bank picked via addr=) describes memory
+        # the registry's single declared range has no opinion on. Clamping it
+        # anyway (as the first version of this fix did) rewrote a 4 KB UICR
+        # algorithm to claim 1 MB of main flash on the real nRF52840 pack,
+        # and would index its own sector map against the wrong origin on any
+        # part where the map is non-uniform.
+        from pod import cmsis_pack
+        p = Pod.from_entry({"address": "10.0.0.1",
+                            "dut": {"target_family": "nRF52840_xxAA",
+                                    "flash_base": "0x0", "flash_size": "0x100000"}})
+        monkeypatch.setattr(
+            cmsis_pack, "algo_for_device",
+            lambda device, **kw: {"name": device, "flash_base": 0x10001000,
+                                  "flash_size": 0x1000,
+                                  "sectors": [(0, 0x1000)]})
+
+        algo = p.resolve_flm_algo(addr=0x10001000)
+
+        assert algo["flash_base"] == 0x10001000
+        assert algo["flash_size"] == 0x1000
 
 
 def _b64_of(algo):

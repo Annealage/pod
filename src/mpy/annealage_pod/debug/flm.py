@@ -206,6 +206,13 @@ class FLMFlasher:
                 # meets the declared timeout (observed on the live nRF52840:
                 # the pack declares 3000ms, comfortably covering one ~85ms
                 # sector erase, nowhere near enough for all 256 back to back).
+                # Deliberately uncapped rather than clamped to a fixed ceiling:
+                # a cap sized for the nRF52840's ~13-minute worst case could
+                # cut off a legitimately slower device this has not run against
+                # yet, and the SWD holder record (ops._guard_enter) already
+                # ages a live claim for the duration, so another caller sees
+                # "busy, held by X for Ns" rather than a wedge - the failure
+                # mode a fixed cap would be trying to prevent.
                 n_sectors = max(1, self._sector_count(a["flash_base"], a["flash_size"]))
                 r = self._call(a["pc_eraseAll"],
                                timeout_ms=(a.get("timeout_erase_ms") or 8000) * n_sectors)
