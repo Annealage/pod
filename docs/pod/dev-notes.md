@@ -309,3 +309,31 @@ the fresh module once that statement has actually run, and anything
 the ordering question entirely (see item 10) and is the reliable fix when a
 redeploy touches more than one module with a `from .. import` relationship
 between them.
+
+## 12. Driving `FLMFlasher` directly (outside `ops.py`'s entry points) needs
+`reload()`, not `load()`, after any op that resumed the DUT
+
+`FLMFlasher.load()` is deliberately idempotent - it no-ops once `_loaded` is
+set, so a multi-page `program()` does not re-upload the algorithm blob per
+page. That cache is only valid while the DUT's SRAM at `load_address` still
+holds what was last uploaded there. `ops._flm_restore` (the gap-1 fix,
+cmsis-flash-completion.md) ends every FLM operation with `cm.sysreset()`, which
+reboots the DUT into its own firmware - and that firmware runs over the same
+low-SRAM region the algorithm was loaded into, so the blob is gone the moment
+the DUT's own code starts running. `ops.py`'s three entry points
+(`flash_file`/`flash_stream`/`erase_all`) are safe because each calls
+`_flm_begin()` -> `reload()` at the start of its own operation regardless of
+what `_select_loader("flm")` handed back (a fresh instance or last
+operation's cached one), forcing a re-upload every time.
+
+A script driving `_select_loader("flm")` directly - `flm_validate.py`, or
+anything at a REPL - does not get that for free, and `_select_loader` may
+return the **same cached `FLMFlasher`** from an earlier operation in the same
+pod session with `_loaded` still `True`. Calling `.load()` on it trusts that
+stale flag and skips the re-upload; the algorithm's entry points then run
+against whatever the DUT's own firmware left in that SRAM, which produces
+nonsense - hit hardware-validating gap 2 (2026-09-03) as an `Init()` call
+hanging with PC wandered off to `0x20000170` (deep inside neither the
+algorithm nor the BKPT trampoline) until `_call`'s timeout fired. Call
+`.reload()` instead of `.load()` whenever driving `_select_loader("flm")`'s
+result directly.

@@ -768,7 +768,9 @@ def handle_dut_flash(label: str, image: str, target: str = None,
 
     loader selects the flash backend: "native" (default) is the per-family NVM
     path; "flm" runs the target's CMSIS-pack algorithm, installed on the pod
-    first.
+    first. target names the CMSIS device (e.g. "nRF52840_xxAA") to resolve that
+    algorithm for with loader="flm", overriding the registry's declared
+    target_family; ignored otherwise.
 
     Detaches a live USB/IP session first (reflashing the DUT mid-forward wedges
     the pod); keep_attached=True overrides. Refuses when another caller holds
