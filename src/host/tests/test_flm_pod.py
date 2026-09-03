@@ -224,9 +224,28 @@ def test_program_page_uses_the_algorithms_program_timeout():
     assert f._call.calls == [(_UNIFORM["pc_program_page"], 750)]
 
 
-def test_erase_all_uses_the_erase_timeout_for_erasechip():
+def test_erase_all_scales_the_sector_timeout_by_sector_count_for_erasechip():
+    # timeout_erase_ms (CMSIS FlashDevice's toErase) is documented as a single
+    # sector's erase timeout; EraseChip erases every sector in one algorithm
+    # call, so the timeout passed to it must scale by sector count rather than
+    # reusing the per-sector value verbatim - found hardware-validating this
+    # against the real nRF52840 (2026-09-03): the pack declares 3000ms, easily
+    # covering one sector, nowhere near enough for all 256 sequentially.
     algo = dict(_UNIFORM, pc_eraseAll=0x200000A1, timeout_erase_ms=9000)
     f = _flasher(algo)
     f._call = _RecordingCall()
     f.erase_all()
-    assert (algo["pc_eraseAll"], 9000) in f._call.calls
+    n_sectors = _UNIFORM["flash_size"] // _UNIFORM["page_size"]
+    assert (algo["pc_eraseAll"], 9000 * n_sectors) in f._call.calls
+
+
+def test_erase_all_erasechip_timeout_scales_by_the_non_uniform_sector_count():
+    algo = dict(_NON_UNIFORM, pc_eraseAll=0x200000A1, timeout_erase_ms=100)
+    f = _flasher(algo)
+    f._call = _RecordingCall()
+    f.erase_all()
+    # 4x16K + 1x64K + the rest in 128K sectors, per _NON_UNIFORM's map, over
+    # its 1 MB flash_size: 4 + 1 + ((0x100000 - 0x30000) // 0x20000) = 4+1+13.
+    n_sectors = f._sector_count(algo["flash_base"], algo["flash_size"])
+    assert (algo["pc_eraseAll"], 100 * n_sectors) in f._call.calls
+    assert n_sectors > 1        # exercises the non-uniform stepping, not a fluke
