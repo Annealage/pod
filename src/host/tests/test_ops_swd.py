@@ -388,6 +388,106 @@ class TestFlmRestore:
         assert result["ok"] is True
         assert cm.sysreset_called is True
 
+    def test_erase_all_does_not_restore_when_no_algorithm_is_installed(
+            self, monkeypatch):
+        # _select_loader raising (no algorithm installed) means nothing has
+        # touched the DUT yet - the finally must not sysreset a DUT that was
+        # never halted. Reproduces a real bug: _select_loader used to be
+        # called inside the try, so this refusal still triggered a restore.
+        monkeypatch.setattr(ops, "time", types.SimpleNamespace(
+            ticks_ms=lambda: 0, ticks_diff=lambda a, b: 0))
+        cm = _patch_session(monkeypatch, cm=_FakeCM())
+        ops._flm_algo = None
+
+        with pytest.raises(ValueError, match="no CMSIS flash algorithm installed"):
+            ops.erase_all(loader="flm")
+
+        assert cm.sysreset_called is False
+        assert cm.is_halted() is True     # neither sysreset nor resume ran
+
+    def test_erase_all_erase_and_restore_both_failing_reports_the_erase_error(
+            self, monkeypatch):
+        # The finally's "if err is None" guard must keep the erase's own
+        # error rather than let a subsequent restore failure overwrite it -
+        # the caller needs to know the erase failed, not just that the
+        # restore afterward also failed.
+        monkeypatch.setattr(ops, "time", types.SimpleNamespace(
+            ticks_ms=lambda: 0, ticks_diff=lambda a, b: 0))
+        cm = _FakeCM()
+
+        def _boom():
+            raise RuntimeError("sysreset failed too")
+        cm.sysreset = _boom
+        _patch_session(monkeypatch, cm=cm)
+
+        def _erase_boom():
+            raise RuntimeError("erase failed")
+        fake_flasher = types.SimpleNamespace(
+            reload=lambda: None, erase_all=_erase_boom)
+        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+
+        result = ops.erase_all(loader="flm")
+
+        assert result["ok"] is False
+        assert "erase failed" in result["err"]
+        assert "sysreset failed too" not in result["err"]
+
+    def test_flash_file_restores_even_when_programming_raises(
+            self, monkeypatch, tmp_path):
+        # The bug this closes: _flm_restore used to sit after the try/finally
+        # that only closed the file, so a raising program left the DUT parked
+        # on the algorithm's own breakpoint with no restore attempt at all.
+        monkeypatch.setattr(ops, "time", types.SimpleNamespace(
+            ticks_ms=lambda: 0, ticks_diff=lambda a, b: 0))
+        cm = _patch_session(monkeypatch, cm=_FakeCM())
+        img = tmp_path / "img.bin"
+        img.write_bytes(b"\x00" * 16)
+        fake_flasher = types.SimpleNamespace()
+        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+
+        def _boom(fl, addr, f, verify):
+            raise RuntimeError("program failed")
+        monkeypatch.setattr(ops, "_flm_program_file", _boom)
+
+        with pytest.raises(RuntimeError, match="program failed"):
+            ops.flash_file(0x1000, str(img), loader="flm")
+
+        assert cm.sysreset_called is True
+
+    def test_flash_stream_restore_failure_is_reported_not_swallowed(
+            self, monkeypatch):
+        # Mirrors erase_all's equivalent test: flash_stream's restore call was
+        # unguarded, so a restore failure would replace the {"ok": ..., "err":
+        # ...} result with a raw exception instead of surfacing in it.
+        # netutil is an empty stub module for these tests (see the top of this
+        # file) - fake its accept/recv_into/send_all rather than driving real
+        # sockets, so a bind to an ephemeral port is the only real I/O needed.
+        cm = _FakeCM()
+
+        def _boom():
+            raise RuntimeError("sysreset failed")
+        cm.sysreset = _boom
+        _patch_session(monkeypatch, cm=cm)
+        fake_flasher = types.SimpleNamespace(
+            page_size=64, program=lambda addr, data, erase, verify: None)
+        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+        monkeypatch.setattr(ops, "_flm_begin", lambda fl: None)
+        monkeypatch.setattr(ops, "_flm_erase_range", lambda fl, a, n: None)
+        monkeypatch.setattr(
+            ops.netutil, "accept",
+            lambda srv, timeout: (types.SimpleNamespace(close=lambda: None), None),
+            raising=False)
+        # A full read (== the requested length), so the transfer itself
+        # succeeds and err is still None when the finally's restore runs.
+        monkeypatch.setattr(ops.netutil, "recv_into", lambda cl, buf: len(buf),
+                            raising=False)
+        monkeypatch.setattr(ops.netutil, "send_all", lambda *a, **k: None,
+                            raising=False)
+
+        result = ops.flash_stream(0x1000, 4, port=0, loader="flm")
+
+        assert "sysreset failed" in result["err"]
+
 
 class TestSwdGuard:
     """The phase-7 re-entrancy guard (conflict-legibility.md item 5): a plain

@@ -1245,6 +1245,18 @@ class TestForceArgReachesTheHandler:
             "lab", None, None, True, "NordicSemiconductor",
             "nRF_DeviceFamilyPack", False)
 
+    def test_dut_flm_device_and_pack_land_in_the_right_slots(self, monkeypatch):
+        # device and pack are adjacent string arguments in both the dispatch
+        # call and handle_dut_flm's signature - distinct values in both here
+        # so a positional swap between them would fail this, not just leave
+        # None in place of None.
+        fake = MagicMock(return_value={"installed": True})
+        monkeypatch.setattr(m, "handle_dut_flm", fake)
+        self._call("dut_flm", {
+            "label": "lab", "device": "STM32F407VG", "pack": "/path/to/x.pack"})
+        assert fake.call_args[0] == (
+            "lab", "STM32F407VG", "/path/to/x.pack", False, None, None, False)
+
     def test_dut_flm_force_true(self, monkeypatch):
         fake = MagicMock(return_value={"installed": True})
         monkeypatch.setattr(m, "handle_dut_flm", fake)

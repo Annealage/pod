@@ -105,9 +105,10 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   pod-side holder record on a control port, an anti-bump gate, and an SWD
   re-entrancy guard). The layer beneath `bench-lease.md`.
 - `mcp-surface.md` - reorganising the 40-tool MCP surface into three subject-first
-  namespaces (`pod_` / `dut_` / `bench_`) at 27 tools, with the persistent DUT
-  session as the default path and the one-shot named as such. A single pre-announcement
-  cutover with no aliases; the CLI nests onto the same taxonomy in the same pass.
+  namespaces (`pod_` / `dut_` / `bench_`) at 27 tools (28 as of `dut_flm`,
+  2026-09-04), with the persistent DUT session as the default path and the
+  one-shot named as such. A single pre-announcement cutover with no aliases;
+  the CLI nests onto the same taxonomy in the same pass.
 - `carrier-hardware.md` - the desirable-features spec for a future custom carrier
   PCB (power switching + remote power-cycle recovery, INA228 telemetry, DUT-USB
   power control/measurement, level translation, connectors). Draft, gated on the

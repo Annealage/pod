@@ -686,11 +686,16 @@ class Pod:
         Downloading a pack is opt-in; see pod.cmsis_pack.
 
         The registry's declared flash geometry (dut.flash_base/flash_size), when
-        present, overrides the pack's: it describes the actual part on the
-        bench, while the pack's geometry only lays out the algorithm and
-        supplies the sector map. This is what keeps erase_all's sector sweep
-        (used when an algorithm has no EraseChip) from erasing past the end of
-        real flash on a part whose pack over-declares its size.
+        present, overrides the pack's declared *size* for the algorithm that
+        covers that same base: it describes the actual part on the bench,
+        while the pack's geometry only lays out the algorithm and supplies the
+        sector map. This is what keeps erase_all's sector sweep (used when an
+        algorithm has no EraseChip) from erasing past the end of real flash on
+        a part whose pack over-declares its size. It never touches flash_base
+        itself or the sector map: a sub-region algorithm at a different base
+        (UICR, OTP, a second bank picked via addr=) describes memory the
+        registry's single declared range has no opinion on, and rebasing it
+        would index its own sector map against the wrong origin.
         """
         from pod import cmsis_pack
 
@@ -705,8 +710,8 @@ class Pod:
         flash_ranges = getattr(self, "_elf_flash_ranges", None)
         if flash_ranges:
             fb, fb_end = flash_ranges[0]
-            algo["flash_base"] = fb
-            algo["flash_size"] = fb_end - fb
+            if algo["flash_base"] == fb:
+                algo["flash_size"] = fb_end - fb
         return algo
 
     def ensure_flm_algo(self, addr=None, force: bool = False, **kwargs) -> dict:
@@ -714,15 +719,36 @@ class Pod:
 
         Free once this client has installed one, so a mass-erase followed by
         several flashes does not re-ship the image or even re-query the pod.
-        Falls back to asking the pod (a pod may already carry one from an
-        earlier session) before resolving a pack. force=True reinstalls: use it
-        after changing DUT, or to select an algorithm for a different flash
-        region.
+        With no device/pack named, falls back to asking the pod (a pod may
+        already carry one from an earlier session) before resolving a pack.
+
+        Naming a device or pack is a request for that one, not a hint the
+        caller thinks force= might be needed: if it disagrees with what this
+        client has cached, that is a cache miss, resolved and installed fresh
+        without consulting the pod first (a real, hit-on-real-hardware
+        footgun this closes: a caller naming a different device for a fresh
+        flash_dut would otherwise get the previous device's algorithm run
+        against the new target with no error). An explicit pack has no
+        comparable field in the installed summary to check, so naming one
+        always resolves fresh. force=True reinstalls unconditionally: use it
+        to select a different flash region on the *same* device (e.g. a
+        different addr), which a device-name comparison cannot detect.
         """
+        device = kwargs.get("device")
+        pack = kwargs.get("pack")
+        named = device is not None or pack is not None
+
+        def _matches(info):
+            if pack is not None:
+                return False
+            if device is not None:
+                return info.get("name") == device
+            return True
+
         installed = getattr(self, "_flm_installed", None)
-        if installed and not force:
+        if installed and not force and _matches(installed):
             return installed
-        if not force:
+        if not force and not named:
             info = self.flm_algo_info()
             if info.get("installed"):
                 self._flm_installed = info
@@ -886,9 +912,10 @@ class Pod:
         target names the CMSIS device to resolve a "flm" algorithm for (e.g.
         "nRF52840_xxAA"), overriding the registry's declared target_family for
         this flash; a device with several algorithms may need this to pick a
-        different one than addr alone would. Ignored for loader="native" and
-        ignored if an algorithm is already installed and cached (see
-        ensure_flm_algo's force=True to force a fresh resolve first).
+        different one than addr alone would. Ignored for loader="native".
+        Naming a different device than whatever is cached/installed resolves
+        and installs fresh (ensure_flm_algo treats the mismatch as a cache
+        miss); naming the same one reuses the cache as usual.
 
         Detaches a live USB/IP session first (re-enumerating the DUT mid-forward
         wedges the pod); pass keep_attached=True to override. Refuses when

@@ -345,7 +345,11 @@ def flash_file(addr, path, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True, chunk_wor
         dt = time.ticks_diff(time.ticks_ms(), t0)
     finally:
         f.close()
-    _flm_restore(loader, cm)
+        # In the finally, not after it: a failed program must not skip the
+        # restore and leave the DUT parked on the algorithm's own breakpoint -
+        # exactly the state gap 1 exists to eliminate, and the one most likely
+        # to be misread as a dead DUT rather than a failed flash.
+        _flm_restore(loader, cm)
     return {"ok": True, "addr": addr, "bytes": n, "ms": dt, "loader": loader}
 
 
@@ -414,7 +418,11 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
                 pass
             cl.close()
         srv.close()
-        _flm_restore(loader, cm)
+        try:
+            _flm_restore(loader, cm)
+        except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+            if err is None:
+                err = repr(e)
     return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err,
             "loader": loader}
 
@@ -425,15 +433,19 @@ def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
     # (default) uses NRF52Flash.mass_erase() directly through the NVMC; loader="flm"
     # runs the generic CMSIS FLMFlasher.erase_all() against the algorithm installed
     # by set_flm_algo(), using its EraseChip entry point if it has one and a sector
-    # sweep otherwise. The core is always restored in the finally (see
-    # _flm_restore for why the FLM path needs a system reset rather than a plain
-    # resume); a restore failure is reported rather than swallowed, since it means
-    # the DUT was left in whatever state the erase attempt left it in.
+    # sweep otherwise. _select_loader runs before the try (matching
+    # flash_stream): raising there (no algorithm installed) means nothing has
+    # touched the DUT yet, and the finally's restore must not run in that case
+    # - it would sysreset a DUT that was never halted. Once past it, the core
+    # is always restored in the finally (see _flm_restore for why the FLM path
+    # needs a system reset rather than a plain resume); a restore failure is
+    # reported rather than swallowed, since it means the DUT was left in
+    # whatever state the erase attempt left it in.
     dp, ap, cm, fl = _ensure(clkdiv)
+    fl = _select_loader(loader)
     err = None
     t0 = time.ticks_ms()
     try:
-        fl = _select_loader(loader)
         if loader == "native":
             fl.prepare()     # halt the core
             fl.mass_erase()
