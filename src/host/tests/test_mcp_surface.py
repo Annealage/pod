@@ -1,5 +1,5 @@
 """Locks down the MCP/CLI surface contract (docs/pod/plan/mcp-surface.md):
-exactly 27 namespaced MCP tools with one dispatch branch each, the
+exactly 28 namespaced MCP tools with one dispatch branch each, the
 multiplexed tools (dut_reg, dut_mem, dut_link, bench_device) routing on
 their read/write/action/bus arguments, and the CLI's nested `pod dut <verb>`
 / `pod bench <verb>` tree, with nothing outside that contract reachable on
@@ -67,7 +67,7 @@ EXPECTED_TOOLS = {
     "pod_discover", "pod_register", "pod_info", "pod_exec", "pod_mount", "pod_open",
     "dut_open", "session_send", "session_read", "session_close",
     "dut_exec", "dut_identify", "dut_halt", "dut_resume", "dut_reg", "dut_mem",
-    "dut_gdb", "dut_flash", "dut_erase", "dut_reset", "dut_link",
+    "dut_gdb", "dut_flash", "dut_erase", "dut_flm", "dut_reset", "dut_link",
     "bench_gpio", "bench_adc", "bench_la", "bench_device", "bench_device_regs",
     "bench_uart",
 }
@@ -87,15 +87,15 @@ REMOVED_TOOLS = {
 
 
 class TestMcpToolListExact:
-    """The tool list is exactly the 27 named tools, no more and no fewer."""
+    """The tool list is exactly the 28 named tools, no more and no fewer."""
 
     def test_tool_list_has_no_duplicates(self):
         names = _tool_list_names()
         assert len(names) == len(set(names))
 
-    def test_tool_list_is_exactly_the_27_named_tools(self):
+    def test_tool_list_is_exactly_the_28_named_tools(self):
         assert set(_tool_list_names()) == EXPECTED_TOOLS
-        assert len(_tool_list_names()) == 27
+        assert len(_tool_list_names()) == 28
 
 
 class TestMcpDispatchParity:
@@ -603,7 +603,7 @@ class TestDutOpenRecover:
 
 
 class TestHandlerNamesMirrorTools:
-    """Every public handle_* function is one of the 27 tools and every tool has
+    """Every public handle_* function is one of the 28 tools and every tool has
     one, so the importable Python API and the MCP surface name the same set of
     operations. Helpers that are not tools are private."""
 
@@ -1229,6 +1229,28 @@ class TestForceArgReachesTheHandler:
         self._call("dut_link", {"label": "lab", "action": "reprobe", "force": True})
         assert fake.call_args[0][-1] is True
 
+    def test_dut_flm_defaults_to_report_only(self, monkeypatch):
+        fake = MagicMock(return_value={"installed": False})
+        monkeypatch.setattr(m, "handle_dut_flm", fake)
+        self._call("dut_flm", {"label": "lab"})
+        assert fake.call_args[0] == ("lab", None, None, False, None, None, False)
+
+    def test_dut_flm_threads_download_vendor_and_pack_name(self, monkeypatch):
+        fake = MagicMock(return_value={"installed": True})
+        monkeypatch.setattr(m, "handle_dut_flm", fake)
+        self._call("dut_flm", {
+            "label": "lab", "download": True, "vendor": "NordicSemiconductor",
+            "pack_name": "nRF_DeviceFamilyPack"})
+        assert fake.call_args[0] == (
+            "lab", None, None, True, "NordicSemiconductor",
+            "nRF_DeviceFamilyPack", False)
+
+    def test_dut_flm_force_true(self, monkeypatch):
+        fake = MagicMock(return_value={"installed": True})
+        monkeypatch.setattr(m, "handle_dut_flm", fake)
+        self._call("dut_flm", {"label": "lab", "force": True})
+        assert fake.call_args[0][-1] is True
+
     def test_bench_device_force_true(self, monkeypatch):
         fake = MagicMock(return_value={"ok": True})
         monkeypatch.setattr(m, "handle_bench_device", fake)
@@ -1240,6 +1262,59 @@ class TestForceArgReachesTheHandler:
         monkeypatch.setattr(m, "handle_dut_halt", fake)
         self._call("dut_halt", {"label": "lab", "force": True})
         assert fake.call_args[0][-1] is True
+
+
+class TestHandleDutFlm:
+    """handle_dut_flm mirrors the CLI's cmd_flm exactly: report-only with no
+    options, resolve+install given any of device/pack/download/force."""
+
+    def _pod(self, monkeypatch):
+        fake_pod = MagicMock()
+        fake_pod.flm_algo_info.return_value = {"installed": False}
+        fake_pod.resolve_flm_algo.return_value = {"name": "resolved"}
+        fake_pod.install_flm_algo.return_value = {"installed": True}
+        monkeypatch.setattr(m, "_pod_for", lambda label: fake_pod)
+        return fake_pod
+
+    def test_no_options_only_reports_what_is_installed(self, monkeypatch):
+        pod = self._pod(monkeypatch)
+        result = m.handle_dut_flm("lab")
+        assert result == {"installed": False}
+        pod.resolve_flm_algo.assert_not_called()
+        pod.install_flm_algo.assert_not_called()
+
+    def test_device_alone_resolves_and_installs(self, monkeypatch):
+        pod = self._pod(monkeypatch)
+        result = m.handle_dut_flm("lab", device="nRF52840_xxAA")
+        pod.resolve_flm_algo.assert_called_once_with(device="nRF52840_xxAA")
+        pod.install_flm_algo.assert_called_once_with({"name": "resolved"})
+        assert result == {"installed": True}
+
+    def test_pack_reaches_resolve_flm_algo(self, monkeypatch):
+        pod = self._pod(monkeypatch)
+        m.handle_dut_flm("lab", pack="/path/to/x.pack")
+        pod.resolve_flm_algo.assert_called_once_with(
+            device=None, pack="/path/to/x.pack")
+
+    def test_download_with_vendor_and_pack_name(self, monkeypatch):
+        pod = self._pod(monkeypatch)
+        m.handle_dut_flm("lab", download=True, vendor="NordicSemiconductor",
+                         pack_name="nRF_DeviceFamilyPack")
+        pod.resolve_flm_algo.assert_called_once_with(
+            device=None, allow_download=True, vendor="NordicSemiconductor",
+            pack_name="nRF_DeviceFamilyPack")
+
+    def test_download_without_vendor_or_pack_name_omits_them(self, monkeypatch):
+        pod = self._pod(monkeypatch)
+        m.handle_dut_flm("lab", download=True)
+        pod.resolve_flm_algo.assert_called_once_with(
+            device=None, allow_download=True)
+
+    def test_force_alone_still_resolves_and_installs(self, monkeypatch):
+        pod = self._pod(monkeypatch)
+        m.handle_dut_flm("lab", force=True)
+        pod.resolve_flm_algo.assert_called_once_with(device=None)
+        pod.install_flm_algo.assert_called_once()
 
 
 class TestBusyNamesTheHolder:

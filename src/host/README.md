@@ -206,7 +206,7 @@ filesystem, and the prior DUT contents are only read by the explicit
 The `pod-mcp` console script starts an MCP stdio server over the same library, so
 an agent drives the hardware loop with the same verbs:
 
-27 tools in the same three groups as the CLI.
+28 tools in the same three groups as the CLI.
 
 | Tool | Action |
 |---|---|
@@ -228,6 +228,7 @@ an agent drives the hardware loop with the same verbs:
 | `dut_gdb` | start a local GDB RSP server to the DUT and return its endpoint (supports DWT data watchpoints via gdb Z2/Z3/Z4 = write/read/access, plus FPB hardware breakpoints) |
 | `dut_flash` | flash a DUT image (streamed into pod RAM, no pod FS); refuses another caller's live USB/IP session unless `force` |
 | `dut_erase` | erase the entire DUT flash; refuses another caller's live USB/IP session unless `force` |
+| `dut_flm` | report the DUT's installed CMSIS flash algorithm, or resolve and install one (`device`/`pack`/`download`+`vendor`+`pack_name`/`force`) - the only way to fetch a pack from the vendor index; `dut_flash`/`dut_erase`'s `loader="flm"` only resolves from the local cache |
 | `dut_reset` | reset the DUT (`sysreset` / `halt`); refuses another caller's live USB/IP session unless `force` |
 | `dut_link` | `status` (pure read) lists exports and attached vhci ports; `up` attaches and returns the DUT tty; `down` detaches (this host's own ports only); `reprobe` re-seeds a stale export, refusing another host's live import unless `force` |
 | `bench_gpio` | read or drive a pod GPIO |
