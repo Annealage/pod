@@ -10,6 +10,16 @@ The two blocks that are off PIO0 stay put and are untouched by this work: SWD on
 PIO1, CYW43 Wi-Fi on PIO2 (reserved, building a SM there wedges the chip). See
 `annealage_pod.debug.pio_arbiter.PIO_MAP`.
 
+**Phases A-D landed and hardware-validated (`4ff1b77`, 2026-08-04):** per-SM
+arbiter claims, per-program teardown, distinct SMs (SPI target sm0, LA sm1), and
+runtime coexistence are all in `pio_arbiter.py`, `spi_target.py`, and
+`logic_analyser.py` today. Hardware confirmed both build together, teardown is
+leak-free (PIO0 idle, no leaked program or claim). Phase E's structural half
+(bring-up/teardown ordering) is covered by that same validation; the SWD-puppet
+byte-pattern cross-check specifically (LA-recovered bytes vs. the pattern a real
+SPI transaction carried) has not been separately confirmed done - check before
+treating Phase E as fully closed.
+
 ## Why bother
 
 The payoff is watching the bus the pod is driving. When the pod is an SPI

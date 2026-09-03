@@ -112,12 +112,12 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   PCB (power switching + remote power-cycle recovery, INA228 telemetry, DUT-USB
   power control/measurement, level translation, connectors). Draft, gated on the
   software reaching GA; the counterpart to the deferred-capabilities list above.
-- `resume-after-power-cycle.md` - the brick-recovery runbook: XIP-wedge / flash
-  power-on-reset recovery and the forward plan it unblocks.
+- `resume-after-power-cycle.md` - the XIP-wedge brick-recovery runbook from the
+  2026-06 incident. Resolved; kept as historical reference, not an active plan.
 - `spi-la-concurrency.md` - making the SPI target and the logic analyser coexist on
   PIO0 (per-SM arbiter claims + per-program PIO teardown), so an agent can watch the
-  bus the pod is driving. The risky premise (MicroPython selective `remove_program`)
-  is hardware-validated up front; phased A-E with a cross-check gate.
+  bus the pod is driving. Phases A-D landed and hardware-validated (`4ff1b77`);
+  Phase E's SWD-puppet byte-pattern cross-check is the one piece left to confirm.
 - `cmsis-flash-completion.md` - finishing the generic CMSIS-FLM flash path and
   deleting the hand-written native nRF52 driver it was a stand-in for. Covers the
   FLM resume bug that leaves the DUT parked on the algorithm's breakpoint, the
