@@ -179,6 +179,17 @@ class FLMFlasher:
             self.erase_sector(p)
             p += self.sector_size(p)
 
+    def _sector_count(self, addr, length):
+        # Number of erase sectors covering [addr, addr+length), walking the
+        # sector map exactly like erase_range does but only counting.
+        p = self.sector_base(addr)
+        end = addr + length
+        n = 0
+        while p < end:
+            n += 1
+            p += self.sector_size(p)
+        return n
+
     def erase_all(self):
         # Erase the entire flash: load the blob, bracket with Init/UnInit(1),
         # call EraseChip if the algo supplies it, otherwise sweep every sector.
@@ -187,8 +198,17 @@ class FLMFlasher:
         self.init(1)                                  # operation 1 = erase
         try:
             if "pc_eraseAll" in a:
+                # timeout_erase_ms is CMSIS FlashDevice's toErase, documented as
+                # a single sector's erase timeout - EraseChip erases every
+                # sector in one algorithm call, so scale by sector count rather
+                # than reusing it verbatim. Unscaled, a real multi-sector chip
+                # erase times out even though every individual sector easily
+                # meets the declared timeout (observed on the live nRF52840:
+                # the pack declares 3000ms, comfortably covering one ~85ms
+                # sector erase, nowhere near enough for all 256 back to back).
+                n_sectors = max(1, self._sector_count(a["flash_base"], a["flash_size"]))
                 r = self._call(a["pc_eraseAll"],
-                               timeout_ms=a.get("timeout_erase_ms") or 8000)
+                               timeout_ms=(a.get("timeout_erase_ms") or 8000) * n_sectors)
                 if r:
                     raise FLMError("EraseChip returned %d" % r)
             else:
