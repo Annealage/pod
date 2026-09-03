@@ -1,10 +1,19 @@
-# RP2350 pod: resume plan after the power-cycle
+# RP2350 pod: resume plan after the power-cycle (resolved, historical reference)
 
-The pod is bricked and waiting on a physical power-cycle (the operator is remote).
-This is the ordered runbook to pick up the moment it is back, plus the forward
-plan it unblocks. It is the live counterpart to the auto-memory
-`pod-rp2350-wifi-fix-plan` and `pod-rp2350-flash-xip-wedge`; where they disagree,
-trust this doc and tell the maintainer.
+**Resolved 2026-06-16; kept as reference only, no action needed.** The pod
+recovered from the power-cycle and has run normally since, including the
+extensive hardware validation across `conflict-legibility.md` as recently as
+2026-09-03. Section 2's flash-safety fix and section 5's single-core asyncio
+runtime are both confirmed landed (`netboot.py` runs a single
+`asyncio.run(main())` on core0, no `_thread` supervisor). Stages 2-4 (section 6)
+were not independently re-checked when this was retired - treat their status as
+unconfirmed, not done, if picking this back up. Section 7's "state of the tree"
+describes a pause on the `rp2350-pivot` branch, since promoted to `main`.
+
+This was the ordered runbook to pick up once the pod came back from a physical
+power-cycle, plus the forward plan it unblocked. It is the historical
+counterpart to the auto-memory `pod-rp2350-wifi-fix-plan` and
+`pod-rp2350-flash-xip-wedge`; where they disagree, trust this doc.
 
 ## 0. Why the pod is down (context)
 

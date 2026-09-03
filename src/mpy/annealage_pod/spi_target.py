@@ -19,10 +19,10 @@
 #     _regtable.py for the pure reg_ptr/wrap protocol logic.
 #
 # PIO budget: PIO0 is the free block (annealage_pod.debug.pio_arbiter.PIO_MAP);
-# PIO1 is the SWD transport, PIO2 is CYW43 Wi-Fi and must never be touched.
-# The SPI target and the logic analyser are mutually exclusive on PIO0 - both
-# claim PIO0 through pio_arbiter, so a live one blocks the other (PioConflict)
-# rather than silently sharing the block.
+# PIO1 is the SWD transport, PIO2 is CYW43 Wi-Fi and must never be touched. The
+# SPI target and the logic analyser coexist on PIO0 on distinct state machines
+# (sm0 here, sm1 for the analyser), each claiming only its own (block, sm)
+# through pio_arbiter and tearing down only its own program.
 #
 # DMA register facts, validated on this silicon (RP2350; same facts as the
 # logic analyser, extended with the TX FIFO peers):
