@@ -1022,6 +1022,47 @@ class TestFlashDutLoaderConsistency:
 
         assert stream_cmds and "loader='native'" in stream_cmds[0]
 
+    def test_flat_binary_target_reaches_flm_resolution(self, monkeypatch,
+                                                        fake_runner):
+        # Gap 7 of cmsis-flash-completion.md: flash_dut(target=...) used to be
+        # accepted and silently read nowhere. It belongs in the pack lookup.
+        import pod.usbip as u
+        import tempfile, os
+
+        monkeypatch.setattr(u, "ports", lambda: [])
+        p = Pod(addr4="10.0.0.1", runner=fake_runner)
+        seen = {}
+        monkeypatch.setattr(
+            p, "ensure_flm_algo",
+            lambda **kw: seen.update(kw) or {"installed": True})
+        monkeypatch.setattr(
+            p, "_flash_region_chunked",
+            lambda *a, **k: {"ok": True, "addr": 0, "bytes": 0, "err": None})
+
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"\x00" * 16)
+            tmp = f.name
+        try:
+            p.flash_dut(tmp, target="STM32F407VG", loader="flm")
+        finally:
+            os.unlink(tmp)
+
+        assert seen.get("device") == "STM32F407VG"
+
+    def test_elf_target_reaches_flm_resolution(self, monkeypatch, fake_runner):
+        p = self._make_elf_pod(monkeypatch, fake_runner)
+        seen = {}
+        monkeypatch.setattr(
+            p, "ensure_flm_algo",
+            lambda **kw: seen.update(kw) or {"installed": True})
+        monkeypatch.setattr(
+            p, "_flash_dut_elf",
+            lambda *a, **k: {"ok": True, "segments": [], "bytes": 0, "err": None})
+
+        p.flash_dut("fake.elf", target="STM32F407VG", loader="flm")
+
+        assert seen.get("device") == "STM32F407VG"
+
 
 class TestRecoverDutRepl:
     """recover_dut_repl drives the DUT tty (Ctrl-C then Ctrl-B) via a ReplSession;
@@ -1451,6 +1492,40 @@ class TestFlmAlgoInstall:
         assert seen["device"] == "nRF52840_xxAA"
         assert seen["addr"] == 0x1000
         assert seen["allow_download"] is False
+
+    def test_resolve_clamps_flash_geometry_to_the_registry_when_declared(
+            self, monkeypatch):
+        # Gap 4 of cmsis-flash-completion.md: the registry describes the actual
+        # part on the bench, the pack's own geometry only lays out the
+        # algorithm - a pack that over-declares its size must not let
+        # erase_all's sector sweep run past the end of real flash.
+        from pod import cmsis_pack
+        p = Pod.from_entry({"address": "10.0.0.1",
+                            "dut": {"target_family": "nRF52840_xxAA",
+                                    "flash_base": "0x0", "flash_size": "0x100000"}})
+        monkeypatch.setattr(
+            cmsis_pack, "algo_for_device",
+            lambda device, **kw: {"name": device, "flash_base": 0x0,
+                                  "flash_size": 0x200000})
+
+        algo = p.resolve_flm_algo()
+
+        assert algo["flash_base"] == 0x0
+        assert algo["flash_size"] == 0x100000     # the registry's 1 MB, not the pack's 2 MB
+
+    def test_resolve_leaves_pack_geometry_alone_without_a_registry_range(
+            self, monkeypatch):
+        from pod import cmsis_pack
+        p = Pod.from_entry({"address": "10.0.0.1",
+                            "dut": {"target_family": "nRF52840_xxAA"}})
+        monkeypatch.setattr(
+            cmsis_pack, "algo_for_device",
+            lambda device, **kw: {"name": device, "flash_base": 0x0,
+                                  "flash_size": 0x200000})
+
+        algo = p.resolve_flm_algo()
+
+        assert algo["flash_size"] == 0x200000
 
 
 def _b64_of(algo):

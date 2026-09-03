@@ -72,6 +72,7 @@ class _FakeCM:
         self._reg = reg
         self._dhcsr = dhcsr
         self.written = {}
+        self.sysreset_called = False
 
     def is_halted(self):
         return self._halted
@@ -80,6 +81,10 @@ class _FakeCM:
         self._halted = True
 
     def resume(self):
+        self._halted = False
+
+    def sysreset(self):
+        self.sysreset_called = True
         self._halted = False
 
     def read_dhcsr(self):
@@ -313,6 +318,75 @@ class TestFlmAlgoInstall:
     def test_select_unknown_loader_refuses(self):
         with pytest.raises(ValueError, match="unknown loader"):
             ops._select_loader("nope")
+
+
+class TestFlmRestore:
+    """Gap 1 of cmsis-flash-completion.md: an FLM operation ends with the core
+    parked on the algorithm's own BKPT trampoline, and a plain resume cannot
+    move it past that (the halt is the BKPT instruction, not a debug C_HALT
+    request) - only a system reset restarts the DUT's own firmware. The native
+    path halts the core plainly via NRF52Flash.prepare(), so it keeps a plain
+    resume."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_algo(self):
+        saved = (ops._flm_algo, ops._flm)
+        yield
+        ops._flm_algo, ops._flm = saved
+
+    def test_flm_loader_resets_before_resuming(self):
+        cm = _FakeCM()
+        ops._flm_restore("flm", cm)
+        assert cm.sysreset_called is True
+        assert cm.is_halted() is False
+
+    def test_native_loader_only_resumes(self):
+        cm = _FakeCM()
+        ops._flm_restore("native", cm)
+        assert cm.sysreset_called is False
+        assert cm.is_halted() is False
+
+    def test_erase_all_flm_restore_failure_is_reported_not_swallowed(
+            self, monkeypatch):
+        # The bug this closes: erase_all's finally used to swallow a restore
+        # failure with a bare `except Exception: pass`, so a DUT left parked on
+        # the algorithm's breakpoint looked like a clean {"ok": True} erase.
+        # ops.py's own `import time` is CPython's real module here, which lacks
+        # ticks_ms/ticks_diff (MicroPython-only names); stub them for the
+        # elapsed-time bookkeeping erase_all does around the operation.
+        monkeypatch.setattr(ops, "time", types.SimpleNamespace(
+            ticks_ms=lambda: 0, ticks_diff=lambda a, b: 0))
+        cm = _FakeCM()
+
+        def _boom():
+            raise RuntimeError("sysreset failed")
+        cm.sysreset = _boom
+        _patch_session(monkeypatch, cm=cm)
+        fake_flasher = types.SimpleNamespace(
+            reload=lambda: None, erase_all=lambda: None)
+        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+
+        result = ops.erase_all(loader="flm")
+
+        assert result["ok"] is False
+        assert "sysreset failed" in result["err"]
+
+    def test_flash_file_flm_loader_resets_before_resuming(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setattr(ops, "time", types.SimpleNamespace(
+            ticks_ms=lambda: 0, ticks_diff=lambda a, b: 0))
+        cm = _patch_session(monkeypatch, cm=_FakeCM())
+        img = tmp_path / "img.bin"
+        img.write_bytes(b"\x00" * 16)
+        fake_flasher = types.SimpleNamespace()
+        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+        monkeypatch.setattr(
+            ops, "_flm_program_file", lambda fl, addr, f, verify: len(f.read()))
+
+        result = ops.flash_file(0x1000, str(img), loader="flm")
+
+        assert result["ok"] is True
+        assert cm.sysreset_called is True
 
 
 class TestSwdGuard:

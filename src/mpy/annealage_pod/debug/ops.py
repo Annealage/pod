@@ -250,6 +250,20 @@ def _flm_erase_range(flm_fl, addr, length):
         flm_fl.uninit(1)
 
 
+def _flm_restore(loader, cm):
+    # An FLM operation ends with the core parked on the algorithm's own BKPT
+    # trampoline (LR = load_address|1, see flm.py's calling convention): the
+    # halt is the BKPT instruction itself, not a debug C_HALT request, so a
+    # plain resume re-traps on it immediately rather than continuing past it.
+    # A system reset bypasses PC entirely and restarts the DUT's own firmware,
+    # which is also the right outcome after a fresh flash or erase. The native
+    # path halts the core plainly via NRF52Flash.prepare(), so a plain resume
+    # is correct there and unchanged.
+    if loader == "flm":
+        cm.sysreset()
+    cm.resume()
+
+
 def _flm_program_file(flm_fl, addr, fileobj, verify):
     # Program target flash from an open binary file through the FLM backend,
     # holding only one page in RAM at a time. Erases the covered region once,
@@ -331,7 +345,7 @@ def flash_file(addr, path, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True, chunk_wor
         dt = time.ticks_diff(time.ticks_ms(), t0)
     finally:
         f.close()
-    cm.resume()
+    _flm_restore(loader, cm)
     return {"ok": True, "addr": addr, "bytes": n, "ms": dt, "loader": loader}
 
 
@@ -400,7 +414,7 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
                 pass
             cl.close()
         srv.close()
-        cm.resume()
+        _flm_restore(loader, cm)
     return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err,
             "loader": loader}
 
@@ -409,10 +423,12 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
 def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
     # Erase the entire DUT flash, returning timing and loader info. loader="native"
     # (default) uses NRF52Flash.mass_erase() directly through the NVMC; loader="flm"
-    # runs the generic CMSIS FLMFlasher.erase_all() (halts core, runs the algorithm,
-    # resumes) against the algorithm installed by set_flm_algo(), using its EraseChip
-    # entry point if it has one and a sector sweep otherwise. The core is always
-    # resumed in the finally.
+    # runs the generic CMSIS FLMFlasher.erase_all() against the algorithm installed
+    # by set_flm_algo(), using its EraseChip entry point if it has one and a sector
+    # sweep otherwise. The core is always restored in the finally (see
+    # _flm_restore for why the FLM path needs a system reset rather than a plain
+    # resume); a restore failure is reported rather than swallowed, since it means
+    # the DUT was left in whatever state the erase attempt left it in.
     dp, ap, cm, fl = _ensure(clkdiv)
     err = None
     t0 = time.ticks_ms()
@@ -430,9 +446,10 @@ def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
         err = repr(e)
     finally:
         try:
-            cm.resume()
-        except Exception:
-            pass
+            _flm_restore(loader, cm)
+        except Exception as e:  # noqa: BLE001 - return as a result, not a raise
+            if err is None:
+                err = repr(e)
     dt = time.ticks_diff(time.ticks_ms(), t0)
     return {"ok": err is None, "ms": dt, "loader": loader, "err": err}
 

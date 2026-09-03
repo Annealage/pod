@@ -242,6 +242,27 @@ def test_build_algo_rejects_unaligned_ram_start():
         img.build_algo(0x20000002, 0x10000)
 
 
+def test_build_algo_forwards_the_devices_declared_timeouts():
+    # Gap 3 of cmsis-flash-completion.md: _decode_device already parses these,
+    # but build_algo dropped them, so the on-pod runner always fell back to its
+    # hardcoded default regardless of what the pack declared.
+    img = flm.parse_flm(_build_flm())  # _flash_device() default: to_prog=100, to_erase=3000
+    algo = img.build_algo(0x20000000, 0x10000)
+    assert algo["timeout_prog_ms"] == 100
+    assert algo["timeout_erase_ms"] == 3000
+
+
+def test_build_algo_reports_unset_timeouts_as_none_not_zero():
+    dev = struct.pack(
+        "<H128sHIIIIB3xII",
+        0x0101, b"TestDev".ljust(128, b"\x00"), 1, 0x08000000, 0x100000, 0x400,
+        0, 0xFF, 0, 0) + struct.pack("<II", 0x4000, 0x0) + struct.pack(
+            "<II", 0xFFFFFFFF, 0xFFFFFFFF)
+    algo = flm.parse_flm(_build_flm(device=dev)).build_algo(0x20000000, 0x10000)
+    assert algo["timeout_prog_ms"] is None
+    assert algo["timeout_erase_ms"] is None
+
+
 def test_ram_needed_matches_the_built_layout():
     img = flm.parse_flm(_build_flm())
     need = img.ram_needed()
@@ -280,6 +301,38 @@ def test_real_vendor_flm(request):
     img = flm.parse_flm(open(path, "rb").read())
     assert img.name
     assert img.image and len(img.image) <= os.path.getsize(path)
+    assert img.sectors and all(s > 0 for _, s in img.sectors)
+    assert img.page_size > 0
+
+    algo = img.build_algo(0x20000000, img.ram_needed())
+    for key in ("pc_init", "pc_unInit", "pc_erase_sector", "pc_program_page"):
+        assert algo[key] % 2 == 0, "%s must be an even PC" % key
+        assert algo["load_address"] <= algo[key] < algo["begin_stack"]
+
+
+def test_real_vendor_flm_from_the_local_pack_cache():
+    """Parse the real nRF52840 algorithm out of whatever CMSIS pack this
+    machine already has cached, catching what the synthetic fixtures above
+    cannot: real algorithms are built by armlink, whose symbol values carry
+    the Thumb bit, and are far larger than their loadable image (debug
+    sections dominate the file). No vendor binary is committed to this repo -
+    the cache is machine-local, so this skips rather than fails when it is
+    empty (e.g. a fresh checkout or CI).
+    """
+    from pod import cmsis_pack
+    try:
+        pack, info = cmsis_pack.find_device("nRF52840_xxAA")
+    except cmsis_pack.PackError:
+        pytest.skip("no nRF52840 CMSIS pack cached locally")
+    try:
+        algorithm = info.flash_algorithm()
+        data = pack.read(algorithm["file"])
+    finally:
+        pack.close()
+
+    img = flm.parse_flm(data)
+    assert img.name
+    assert img.image and len(img.image) <= len(data)
     assert img.sectors and all(s > 0 for _, s in img.sectors)
     assert img.page_size > 0
 

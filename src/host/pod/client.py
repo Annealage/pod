@@ -708,6 +708,13 @@ class Pod:
         which is the CMSIS device name (e.g. "nRF52840_xxAA"). addr picks the
         algorithm covering that flash address when a device has several.
         Downloading a pack is opt-in; see pod.cmsis_pack.
+
+        The registry's declared flash geometry (dut.flash_base/flash_size), when
+        present, overrides the pack's: it describes the actual part on the
+        bench, while the pack's geometry only lays out the algorithm and
+        supplies the sector map. This is what keeps erase_all's sector sweep
+        (used when an algorithm has no EraseChip) from erasing past the end of
+        real flash on a part whose pack over-declares its size.
         """
         from pod import cmsis_pack
 
@@ -716,9 +723,15 @@ class Pod:
             raise ValueError(
                 "no CMSIS device name: declare the DUT's target_family in the "
                 "registry (pod dut identify --dut-family <name>) or pass device=")
-        return cmsis_pack.algo_for_device(
+        algo = cmsis_pack.algo_for_device(
             device, addr=addr, pack=pack, allow_download=allow_download,
             **kwargs)
+        flash_ranges = getattr(self, "_elf_flash_ranges", None)
+        if flash_ranges:
+            fb, fb_end = flash_ranges[0]
+            algo["flash_base"] = fb
+            algo["flash_size"] = fb_end - fb
+        return algo
 
     def ensure_flm_algo(self, addr=None, force: bool = False, **kwargs) -> dict:
         """Make sure the pod has an algorithm installed for loader="flm".
@@ -894,6 +907,13 @@ class Pod:
         issues ops.erase_all() before streaming. Defaults to "native" for
         backward compatibility. Returns {ok, addr, bytes, err}.
 
+        target names the CMSIS device to resolve a "flm" algorithm for (e.g.
+        "nRF52840_xxAA"), overriding the registry's declared target_family for
+        this flash; a device with several algorithms may need this to pick a
+        different one than addr alone would. Ignored for loader="native" and
+        ignored if an algorithm is already installed and cached (see
+        ensure_flm_algo's force=True to force a fresh resolve first).
+
         Detaches a live USB/IP session first (re-enumerating the DUT mid-forward
         wedges the pod); pass keep_attached=True to override. Refuses when
         another host holds that attachment, naming it, unless force=True bumps
@@ -914,7 +934,7 @@ class Pod:
             # backend so they agree on the flash layout.
             elf_loader = loader if loader is not None else "native"
             if elf_loader == "flm":
-                self.ensure_flm_algo(addr=flash_ranges[0][0])
+                self.ensure_flm_algo(addr=flash_ranges[0][0], device=target)
             result = self._flash_dut_elf(
                 image, flash_ranges=flash_ranges, port=port, verify=verify,
                 mass_erase=mass_erase, loader=elf_loader)
@@ -922,7 +942,7 @@ class Pod:
             # Flat binary path - default "native" preserves prior behaviour.
             bin_loader = loader if loader is not None else "native"
             if bin_loader == "flm":
-                self.ensure_flm_algo(addr=addr)
+                self.ensure_flm_algo(addr=addr, device=target)
             if mass_erase:
                 # No further gate: the guard above already settled whether this
                 # call may proceed at all, and re-checking here would refuse a

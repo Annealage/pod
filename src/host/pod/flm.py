@@ -160,6 +160,8 @@ class FlmImage:
             "page_size": self.page_size,
             "sectors": self.sectors,
             "erased_byte": self.device["erased_byte"],
+            "timeout_prog_ms": self.device["timeout_prog_ms"] or None,
+            "timeout_erase_ms": self.device["timeout_erase_ms"] or None,
         }
         if "EraseChip" in self.symbols:
             algo["pc_eraseAll"] = _entry("EraseChip")

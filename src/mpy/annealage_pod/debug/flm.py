@@ -28,6 +28,8 @@
 #                   [(offset_from_flash_base, sector_size), ...]; each entry
 #                   applies until the next one's offset. Absent means uniform
 #                   sectors of page_size.
+#   timeout_prog_ms, timeout_erase_ms   optional, from the pack's FlashDevice;
+#                   None/absent falls back to _call's default.
 #
 # page_size is the *program* granularity (FlashDevice.szPage) and the sector map
 # is the *erase* granularity; they differ on most parts outside the nRF52, so
@@ -162,7 +164,8 @@ class FLMFlasher:
             self._call(self.algo["pc_unInit"], fnc)
 
     def erase_sector(self, addr):
-        r = self._call(self.algo["pc_erase_sector"], addr)
+        r = self._call(self.algo["pc_erase_sector"], addr,
+                       timeout_ms=self.algo.get("timeout_erase_ms") or 8000)
         if r:
             raise FLMError("EraseSector(0x%08x) returned %d" % (addr, r))
 
@@ -184,7 +187,8 @@ class FLMFlasher:
         self.init(1)                                  # operation 1 = erase
         try:
             if "pc_eraseAll" in a:
-                r = self._call(a["pc_eraseAll"])
+                r = self._call(a["pc_eraseAll"],
+                               timeout_ms=a.get("timeout_erase_ms") or 8000)
                 if r:
                     raise FLMError("EraseChip returned %d" % r)
             else:
@@ -199,7 +203,8 @@ class FLMFlasher:
         words = [int.from_bytes(data[i:i + 4], "little")
                  for i in range(0, len(data), 4)]
         self.ap.write_block32(a["begin_data"], words)
-        r = self._call(a["pc_program_page"], addr, len(data), a["begin_data"])
+        r = self._call(a["pc_program_page"], addr, len(data), a["begin_data"],
+                       timeout_ms=a.get("timeout_prog_ms") or 8000)
         if r:
             raise FLMError("ProgramPage(0x%08x) returned %d" % (addr, r))
 

@@ -188,3 +188,45 @@ def test_load_halts_a_running_core():
     f = flm.FLMFlasher(_FakeAP(), _FakeCM(halted=False), _UNIFORM)
     f.load()
     assert f.cm.halts == 1
+
+
+# ── per-operation timeouts (gap 3) ───────────────────────────────────────
+# _call itself needs MicroPython's time.ticks_ms (see module docstring), so
+# these stand in for it to check what timeout_ms each caller passes.
+
+class _RecordingCall:
+    def __init__(self):
+        self.calls = []          # [(pc, timeout_ms), ...]
+
+    def __call__(self, pc, r0=0, r1=0, r2=0, r3=0, timeout_ms=8000):
+        self.calls.append((pc, timeout_ms))
+        return 0
+
+
+def test_erase_sector_uses_the_algorithms_erase_timeout():
+    f = _flasher(dict(_UNIFORM, timeout_erase_ms=5000))
+    f._call = _RecordingCall()
+    f.erase_sector(0x1000)
+    assert f._call.calls == [(_UNIFORM["pc_erase_sector"], 5000)]
+
+
+def test_erase_sector_falls_back_to_8s_when_the_pack_declares_none():
+    f = _flasher(_UNIFORM)
+    f._call = _RecordingCall()
+    f.erase_sector(0x1000)
+    assert f._call.calls == [(_UNIFORM["pc_erase_sector"], 8000)]
+
+
+def test_program_page_uses_the_algorithms_program_timeout():
+    f = _flasher(dict(_UNIFORM, timeout_prog_ms=750))
+    f._call = _RecordingCall()
+    f.program_page(0x1000, b"\x00" * 16)
+    assert f._call.calls == [(_UNIFORM["pc_program_page"], 750)]
+
+
+def test_erase_all_uses_the_erase_timeout_for_erasechip():
+    algo = dict(_UNIFORM, pc_eraseAll=0x200000A1, timeout_erase_ms=9000)
+    f = _flasher(algo)
+    f._call = _RecordingCall()
+    f.erase_all()
+    assert (algo["pc_eraseAll"], 9000) in f._call.calls
