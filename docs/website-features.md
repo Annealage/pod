@@ -98,9 +98,10 @@ quickstart does not require USB/IP.
 Per-DUT-family status of the SWD debug / flash path. The on-pod debugger
 speaks SWD to ARM Cortex-M targets only. Any Cortex-M with a CMSIS pack is
 reachable in principle through the generic FLM runner (the host supplies the
-algo from the target's CMSIS Device Family Pack, downloaded on demand; that
-pack lookup is not built yet), but a family is listed validated only
-after the operations were exercised on that silicon.
+algo from the target's CMSIS Device Family Pack, resolved from a local cache
+or downloaded from the vendor index on demand via `dut_flm`/`pod flm`), but a
+family is listed validated only after the operations were exercised on that
+silicon.
 
 | DUT family | Status | Flash path | Validated operations | Known limits |
 |---|---|---|---|---|
@@ -200,7 +201,7 @@ should be replaced. An agent adds it with, for example:
 claude mcp add pod -- pod-mcp
 ```
 
-The server wraps the `pod` client and exposes **27 tools** in three subject-first groups,
+The server wraps the `pod` client and exposes **28 tools** in three subject-first groups,
 named so that a tool and its CLI invocation are derivable from each other (`dut_flash` is
 `pod dut flash`, `bench_la` is `pod bench la`):
 
@@ -220,7 +221,9 @@ named so that a tool and its CLI invocation are derivable from each other (`dut_
   reconcile the wired DUT's SWD identity), `dut_halt`, `dut_resume`, `dut_reg` (reads, or
   writes when `value` is given), `dut_mem` (reads inline or to `out_path`, writes when `data`
   is given), `dut_gdb`. The register tools additionally require a halted core.
-- **`dut_` flash and link:** `dut_flash`, `dut_erase`, `dut_reset`, and `dut_link` with
+- **`dut_` flash and link:** `dut_flash`, `dut_erase`, `dut_flm` (report or install the CMSIS
+  flash algorithm `loader="flm"` uses, including fetching one from the vendor index on
+  demand), `dut_reset`, and `dut_link` with
   `action=status|up|down|reprobe`. `status` is a pure read and starts nothing;
   `up` brings the pod USB host + usbip server up and attaches, and is the only action that
   can activate the pod USB host, which has been observed to disturb the pod's Wi-Fi;
@@ -230,13 +233,15 @@ named so that a tool and its CLI invocation are derivable from each other (`dut_
   `bench_la`, `bench_device` (present the pod as an I2C or SPI device on the DUT's bus via
   `bus=`, with `action=up|status|down`), `bench_device_regs` (that device's register file),
   `bench_uart` (read-only tail of the DUT UART over TCP). The SPI device personality and the
-  logic analyser are mutually exclusive, both being PIO0 consumers.
+  logic analyser coexist on PIO0's distinct state machines.
 
 Read vs write: `pod_discover`, `pod_info`, `dut_identify`, `session_read`, `bench_adc`,
 `bench_uart`, and `dut_link(action="status")` are read/query. `dut_flash`, `dut_erase`,
 `dut_reset`, `pod_mount`, `bench_gpio` (drive), `bench_device`, `bench_device_regs`, and
 `dut_link` with `up`/`down`/`reprobe` mutate state. `dut_reg` and `dut_mem` read or write
-depending on whether a value is supplied. The SWD group is meaningful only when a DUT is
+depending on whether a value is supplied, and `dut_flm` likewise reports with no options
+and installs given any of `device`/`pack`/`download`/`force`. The SWD group is meaningful
+only when a DUT is
 attached for debug; the register tools need the core halted first.
 
 To un-stick a silent forwarded DUT REPL, `dut_open(recover=true)` is the first,
@@ -261,7 +266,7 @@ The real command names and ports (the current page invents `annealage-pod flash`
 5. **Drive the DUT:** `pod dut flash <label> firmware.bin`, `pod dut reset <label>`,
    `pod dut gdb <label>` (prints a `target extended-remote host:port` for your gdb),
    `pod bench la <label> --pins 16-19 --out cap.vcd`, `pod open <label>` (live streaming REPL).
-6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 27 tools above are
+6. **For an agent:** `claude mcp add pod -- pod-mcp`, then the 28 tools above are
    available over Wi-Fi.
 
 Ports in use: socket REPL `8266`, USB/IP `3240`, GDB/DAP RPC `3335`, flash-in `3333`,
@@ -359,7 +364,7 @@ the older ESP32-S3 design. Specific fixes:
   `pod <verb>` for the pod itself and `pod dut <verb>` / `pod bench <verb>` for the DUT and the
   instruments (`pod dut flash`, `pod dut reset`, `pod dut gdb`, `pod open`, `pod bench la`, ...).
   The DUT UART tap is `pod bench uart`.
-- **No MCP action list** - the page has none; use the 27-tool list above.
+- **No MCP action list** - the page has none; use the 28-tool list above.
 - **Missing the actual differentiators** - the on-pod debugger, GDB-through-pod, the PIO
   logic analyser, IPv6-first discovery, and the 27-tool MCP surface are the strongest,
   validated capabilities and are absent from the page.

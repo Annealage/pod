@@ -801,6 +801,38 @@ def handle_dut_erase(label: str, clkdiv: int = DEFAULT_SWD_CLKDIV,
                                      keep_attached=keep_attached, force=force)
 
 
+def handle_dut_flm(label: str, device: str = None, pack: str = None,
+                   download: bool = False, vendor: str = None,
+                   pack_name: str = None, force: bool = False) -> dict:
+    """Report or install the DUT's generic CMSIS flash algorithm.
+
+    With no options beyond label, returns what the pod currently has
+    installed. Given any of device/pack/download/force, resolves the
+    algorithm from the target's CMSIS pack and installs it. Flashing with
+    loader="flm" installs one automatically from the local pack cache only;
+    this is for pointing at an explicit pack, fetching one that is not
+    cached, or checking what is loaded.
+
+    download=True permits fetching the pack from the vendor index when
+    nothing local matches; vendor/pack_name select which pack, required with
+    download when nothing local matches the device.
+    """
+    pod = _pod_for(label)
+    if not any((device, pack, download, force)):
+        return pod.flm_algo_info()
+    kwargs = {}
+    if pack:
+        kwargs["pack"] = pack
+    if download:
+        kwargs["allow_download"] = True
+        if vendor:
+            kwargs["vendor"] = vendor
+        if pack_name:
+            kwargs["pack_name"] = pack_name
+    algo = pod.resolve_flm_algo(device=device, **kwargs)
+    return pod.install_flm_algo(algo)
+
+
 def handle_dut_reset(label: str, mode: str = "sysreset",
                      keep_attached: bool = False, force: bool = False) -> dict:
     """Reset the DUT via the pod ('sysreset' to run, 'halt' to catch reset).
@@ -1730,6 +1762,57 @@ def build_server():
                 },
             ),
             Tool(
+                name="dut_flm",
+                description=(
+                    "Report or install the DUT's generic CMSIS flash algorithm, "
+                    "used by dut_flash/dut_erase with loader=\"flm\". With no "
+                    "options beyond label, reports what the pod currently has "
+                    "installed. Given any of device/pack/download/force, "
+                    "resolves the algorithm from the target's CMSIS pack and "
+                    "installs it. Flashing with loader=\"flm\" installs one "
+                    "automatically from the local pack cache only; this is the "
+                    "only way to point at an explicit pack file, fetch one that "
+                    "is not cached, or check what is currently loaded. "
+                    "download=true permits fetching the pack from the vendor "
+                    "index when nothing local matches; vendor and pack_name "
+                    "select which one, required with download when nothing "
+                    "local matches the device."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Pod label."},
+                        "device": {
+                            "type": "string",
+                            "description": "CMSIS device name (e.g. \"nRF52840_xxAA\"), overriding the registry's declared target_family.",
+                        },
+                        "pack": {
+                            "type": "string",
+                            "description": "Explicit .pack or .FLM file path, bypassing the local cache and vendor index.",
+                        },
+                        "download": {
+                            "type": "boolean",
+                            "description": "Allow fetching the pack from the vendor index when nothing local matches.",
+                            "default": False,
+                        },
+                        "vendor": {
+                            "type": "string",
+                            "description": "Pack vendor, with download=true (e.g. \"NordicSemiconductor\").",
+                        },
+                        "pack_name": {
+                            "type": "string",
+                            "description": "Pack name, with download=true (e.g. \"nRF_DeviceFamilyPack\").",
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Resolve and reinstall even with no device/pack/download given.",
+                            "default": False,
+                        },
+                    },
+                    "required": ["label"],
+                },
+            ),
+            Tool(
                 name="dut_link",
                 description=(
                     "Inspect or drive the DUT's USB/IP link. action=\"status\" "
@@ -2024,6 +2107,13 @@ def build_server():
                     handle_dut_reset, arguments["label"],
                     arguments.get("mode", "sysreset"),
                     arguments.get("keep_attached", False),
+                    arguments.get("force", False))
+            elif name == "dut_flm":
+                result = await asyncio.to_thread(
+                    handle_dut_flm, arguments["label"],
+                    arguments.get("device"), arguments.get("pack"),
+                    arguments.get("download", False),
+                    arguments.get("vendor"), arguments.get("pack_name"),
                     arguments.get("force", False))
             elif name == "dut_link":
                 result = await asyncio.to_thread(

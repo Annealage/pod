@@ -9,6 +9,12 @@ rebuilding one. `src/host/README.md` and `docs/website-features.md` document the
 result, and `src/host/tests/test_mcp_surface.py` holds the contract as tests.
 Validated against a live pod and a forwarded nRF52840 DUT.
 
+**28 tools as of 2026-09-04**: `dut_flm` was added to the "dut image" group
+(`cmsis-flash-completion.md`), reporting or installing the DUT's CMSIS flash
+algorithm - the MCP surface previously had no way to trigger a vendor-pack
+download or point at an explicit pack, unlike the CLI's `pod flm`, which
+already could. Same contract, same test file, count updated throughout.
+
 Phase 3, the doc sweep, was done for phase 1 and needs a second pass over what
 phase 2 changed. The pre-cutover names below are retained deliberately: this
 document is the mapping from the old surface to the new one, and it stops being
@@ -93,12 +99,13 @@ Mount is how files reach the DUT, and it is a `dut_open` argument rather than a 
 | `dut_mem` | `dut_read_mem`, `dut_write_mem`, `read_dut` | `data` given writes; otherwise reads, inline by default or streamed to `out_path` when given. Kills the `read_dut`/`dut_read_mem` collision |
 | `dut_gdb` | `gdb_dut` | rename only |
 
-### dut image (3)
+### dut image (4)
 
 | new | replaces | change |
 | --- | --- | --- |
 | `dut_flash` | `flash_dut` | rename only |
 | `dut_erase` | `erase_dut` | rename only. Kept separate from `dut_flash` because it is independently destructive and deserves its own name in a permission prompt |
+| `dut_flm` | (new, 2026-09-04) | report or install the DUT's CMSIS flash algorithm, mirroring the CLI's `pod flm`: no options beyond `label` reports what is installed, `device`/`pack`/`download`/`force` resolve and install one. `download` (+`vendor`/`pack_name`) is the only way this surface can fetch a pack from the vendor index - `dut_flash`/`dut_erase`'s `loader="flm"` only ever resolves from the local pack cache |
 | `dut_reset` | `reset_dut` | rename only |
 
 ### dut link (1)
