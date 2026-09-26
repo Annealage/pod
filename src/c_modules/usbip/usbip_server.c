@@ -309,13 +309,13 @@ static bool send_op_common(int fd, uint16_t code, uint32_t status)
 
 static bool send_device_with_interfaces(int fd, const usbip_dev_record_t *device)
 {
-    usbip_device_desc_t wire;
+    usbip_usb_device_t wire;
     usbip_proto_pack_device_desc(device, &wire);
     if (!write_all(fd, &wire, sizeof(wire))) {
         return false;
     }
     for (uint8_t i = 0; i < device->num_interfaces; i++) {
-        usbip_interface_desc_t iface;
+        usbip_usb_interface_t iface;
         if (!usbip_proto_pack_interface_desc(device, i, &iface)) {
             break;
         }
@@ -1709,7 +1709,7 @@ static bool handle_import_request(int fd, size_t *slot_idx, bool *slot_held)
         return false;
     }
 
-    usbip_device_desc_t wire;
+    usbip_usb_device_t wire;
     usbip_proto_pack_device_desc(&device, &wire);
     if (!write_all(fd, &wire, sizeof(wire))) {
         return false;

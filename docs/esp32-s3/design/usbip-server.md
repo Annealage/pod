@@ -23,44 +23,40 @@ multiplexer specified in `docs/esp32-s3/spec.md` §4.4 and
 
 ## 2. Vendoring
 
-The single-device USB/IP server in
-`referencea/esp-usbip-bridge/main/` was the starting point.
-Material reused, after rewrite for the multiplexer shape:
+The single-device USB/IP server in Scott Shawcroft's
+[adafruit/esp-usbip-bridge](https://github.com/adafruit/esp-usbip-bridge)
+(checked out locally under `referencea/esp-usbip-bridge/`) was the
+starting point for the ESP32-S3 server, `usbip_server.c`. Carried
+over from it, adapted for the multiplexer shape:
 
-- `usbip_protocol.h`: wire structs, constants, USBIP_VERSION = 0x0111,
-  the 0x138-byte device-descriptor layout. Verbatim layout, our
-  copy adds `_Static_assert`s on the struct sizes and renames the
-  header guard.
 - The accept-loop topology (one accept task spawning one
   per-connection worker per fd, plus a per-URB socket watchdog).
   Implementation rewritten; the shape is preserved.
-- `read_exact` / `write_all` / `discard_exact` byte-stream helpers
-  are functionally equivalent.
-- `make_devid` is unchanged: `(busnum << 16) | (devnum & 0xFFFF)`.
+- The `read_exact` / `write_all` / `discard_exact` byte-stream
+  helpers and the `handle_devlist_request` /
+  `send_device_with_interfaces` decomposition, with some lines
+  unchanged.
+- `make_devid`: `(busnum << 16) | (devnum & 0xFFFF)`.
 - The `virtual_device_t` ops table shape: `control_transfer` and
   `data_transfer`. Two additions over the reference: optional
   `on_attach` and `on_detach` hooks for per-import lifecycle.
 
-### License headers
+`usbip_protocol.h` is not taken from the reference. It is written
+from the kernel's protocol specification,
+[`Documentation/usb/usbip_protocol.rst`](https://docs.kernel.org/usb/usbip_protocol.html),
+uses the spec's field names and the kernel's structure names, and
+asserts every struct against the spec's offset tables.
 
-`referencea/esp-usbip-bridge/` ships without a LICENSE file or
-SPDX-License-Identifier comments in any source file. Asked the
-upstream repo's README, CMakeLists.txt and main/CMakeLists.txt;
-no licence statement is present. The repo is public on GitHub
-under `windowsair/esp-usbip-bridge` (mirror under referencea/).
-We chose the conservative path: do not copy any source file
-verbatim. Each file under `src/c_modules/usbip/` is a re-write
-of the algorithmic shape with our own implementation, comments
-attribute the design influence, and the wire-format struct
-definitions in `usbip_protocol.h` derive from the Linux kernel
-USB/IP documentation (GPLv2 with the kernel's syscall-headers
-exemption that explicitly permits userspace use of the wire-format
-constants and structs). This is the same posture the Linux usbip
-userspace tool takes towards `linux/usbip.h`.
+### License
 
-If `referencea/esp-usbip-bridge/` later publishes an MIT or BSD
-licence, any files we want to vendor verbatim can be re-imported
-with the upstream licence header preserved.
+esp-usbip-bridge has no licence: no LICENSE file, no SPDX headers,
+and no statement in its README or build files. The ESP32-S3 server's
+adapted portions therefore carry no licence grant from their author.
+The RP2350 server, `usbip_server_rp2.c`, was written separately and
+shares only idioms with the reference.
+
+If esp-usbip-bridge publishes a licence, record it here and put the
+upstream copyright and licence on `usbip_server.c` in `REUSE.toml`.
 
 ## 3. Deviations from the reference
 
@@ -232,7 +228,7 @@ resolutions for those that fall in scope:
 
 1. **OP_REP_IMPORT carrying interface descriptors**. Confirmed
    not to. `handle_import_request` writes only
-   `sizeof(usbip_device_desc_t)`; the unit test
+   `sizeof(usbip_usb_device_t)`; the unit test
    `test_device_desc_size` pins the layout to 0x138 bytes.
 
 2. **CMSIS-DAP-v2 `bDeviceClass` requirement**. WS-A's job is the

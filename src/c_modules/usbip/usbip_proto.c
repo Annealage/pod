@@ -71,7 +71,7 @@ bool usbip_proto_unpack_op_common(const usbip_op_common_t *in,
 }
 
 void usbip_proto_pack_device_desc(const usbip_dev_record_t *src,
-                                  usbip_device_desc_t *dst)
+                                  usbip_usb_device_t *dst)
 {
     memset(dst, 0, sizeof(*dst));
     memcpy(dst->path, src->path, sizeof(dst->path));
@@ -79,27 +79,27 @@ void usbip_proto_pack_device_desc(const usbip_dev_record_t *src,
     dst->busnum               = HTON32(src->busnum);
     dst->devnum               = HTON32(src->devnum);
     dst->speed                = HTON32(src->speed);
-    dst->id_vendor            = HTON16(src->id_vendor);
-    dst->id_product           = HTON16(src->id_product);
-    dst->bcd_device           = HTON16(src->bcd_device);
-    dst->device_class         = src->device_class;
-    dst->device_subclass      = src->device_subclass;
-    dst->device_protocol      = src->device_protocol;
-    dst->configuration_value  = src->configuration_value;
-    dst->num_configurations   = src->num_configurations;
-    dst->num_interfaces       = src->num_interfaces;
+    dst->idVendor            = HTON16(src->id_vendor);
+    dst->idProduct           = HTON16(src->id_product);
+    dst->bcdDevice           = HTON16(src->bcd_device);
+    dst->bDeviceClass         = src->device_class;
+    dst->bDeviceSubClass      = src->device_subclass;
+    dst->bDeviceProtocol      = src->device_protocol;
+    dst->bConfigurationValue  = src->configuration_value;
+    dst->bNumConfigurations   = src->num_configurations;
+    dst->bNumInterfaces       = src->num_interfaces;
 }
 
 bool usbip_proto_pack_interface_desc(const usbip_dev_record_t *src,
                                      uint8_t i,
-                                     usbip_interface_desc_t *dst)
+                                     usbip_usb_interface_t *dst)
 {
     if (i >= src->num_interfaces || i >= USBIP_MAX_INTERFACES) {
         return false;
     }
-    dst->interface_class    = src->interfaces[i].interface_class;
-    dst->interface_subclass = src->interfaces[i].interface_subclass;
-    dst->interface_protocol = src->interfaces[i].interface_protocol;
+    dst->bInterfaceClass    = src->interfaces[i].interface_class;
+    dst->bInterfaceSubClass = src->interfaces[i].interface_subclass;
+    dst->bInterfaceProtocol = src->interfaces[i].interface_protocol;
     dst->padding            = 0;
     return true;
 }
@@ -150,14 +150,14 @@ void usbip_proto_pack_ret_submit(usbip_header_t *raw,
     raw->u.ret_submit.actual_length       = HTON32(actual_length);
     raw->u.ret_submit.start_frame         = 0;
     /* For non-iso URBs (control / bulk / interrupt) the kernel expects
-     * USBIP_NON_ISO_PACKETS (0xFFFFFFFF). Leaving this at 0 makes
+     * USBIP_NUMBER_OF_PACKETS_NON_ISO (0xFFFFFFFF). Leaving this at 0 makes
      * vhci_rx interpret the URB as isochronous and trip the
      * "vhci_device speed not set" warning on every URB, since iso
      * URBs key off vdev->speed which is only populated for HS/FS-iso
      * paths. mpy-pod forwards only non-iso traffic. */
-    raw->u.ret_submit.number_of_packets   = (int32_t)HTON32(USBIP_NON_ISO_PACKETS);
+    raw->u.ret_submit.number_of_packets   = (int32_t)HTON32(USBIP_NUMBER_OF_PACKETS_NON_ISO);
     raw->u.ret_submit.error_count         = 0;
-    raw->u.ret_submit.padding             = 0;
+    memset(raw->u.ret_submit.padding, 0, sizeof(raw->u.ret_submit.padding));
 }
 
 void usbip_proto_pack_ret_unlink(usbip_header_t *raw,
@@ -199,7 +199,7 @@ int usbip_proto_validate_submit(const usbip_decoded_header_t *hdr,
     /* Per the kernel docs, non-iso URBs carry number_of_packets =
      * 0xFFFFFFFF. Some clients send 0. Reject only positive counts,
      * which would actually be isochronous. */
-    if ((uint32_t)hdr->number_of_packets != USBIP_NON_ISO_PACKETS
+    if ((uint32_t)hdr->number_of_packets != USBIP_NUMBER_OF_PACKETS_NON_ISO
         && hdr->number_of_packets != 0) {
         return -EOPNOTSUPP;
     }

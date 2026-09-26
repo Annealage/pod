@@ -39,14 +39,14 @@ bool usbip_proto_unpack_op_common(const usbip_op_common_t *in,
 /* Pack a backend descriptor record into the 0x138-byte device
  * descriptor struct, ready to write to the wire. */
 void usbip_proto_pack_device_desc(const usbip_dev_record_t *src,
-                                  usbip_device_desc_t *dst);
+                                  usbip_usb_device_t *dst);
 
 /* Pack a single interface descriptor (the 4-byte trailing record
  * appended in OP_REP_DEVLIST). Caller selects which interface
  * triple by index. Returns false if i >= src->num_interfaces. */
 bool usbip_proto_pack_interface_desc(const usbip_dev_record_t *src,
                                      uint8_t i,
-                                     usbip_interface_desc_t *dst);
+                                     usbip_usb_interface_t *dst);
 
 /* Compute the kernel-style devid: (busnum << 16) | (devnum & 0xFFFF). */
 uint32_t usbip_proto_make_devid(const usbip_dev_record_t *src);

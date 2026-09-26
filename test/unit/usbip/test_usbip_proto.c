@@ -136,10 +136,10 @@ TEST(test_device_desc_size)
 {
     /* Layout of the device descriptor on the wire is precisely 0x138
      * bytes; mismatch breaks Linux usbip_attach. */
-    ASSERT_EQ_INT(sizeof(usbip_device_desc_t), 0x138);
+    ASSERT_EQ_INT(sizeof(usbip_usb_device_t), 0x138);
     ASSERT_EQ_INT(sizeof(usbip_op_common_t), 8);
     ASSERT_EQ_INT(sizeof(usbip_header_t), 48);
-    ASSERT_EQ_INT(sizeof(usbip_interface_desc_t), 4);
+    ASSERT_EQ_INT(sizeof(usbip_usb_interface_t), 4);
 }
 
 TEST(test_pack_device_desc)
@@ -149,7 +149,7 @@ TEST(test_pack_device_desc)
     snprintf(src.path,  sizeof(src.path),  "/sys/devices/platform/annealage_pod/usb2/2-1");
     snprintf(src.busid, sizeof(src.busid), "2-1");
 
-    usbip_device_desc_t wire;
+    usbip_usb_device_t wire;
     usbip_proto_pack_device_desc(&src, &wire);
 
     /* Path/busid copied verbatim. */
@@ -164,28 +164,28 @@ TEST(test_pack_device_desc)
     ASSERT_EQ_INT(p[0], 0); ASSERT_EQ_INT(p[1], 0);
     ASSERT_EQ_INT(p[2], 0); ASSERT_EQ_INT(p[3], 2);
 
-    p = (const uint8_t *)&wire.id_vendor;
+    p = (const uint8_t *)&wire.idVendor;
     ASSERT_EQ_INT(p[0], 0xC2); ASSERT_EQ_INT(p[1], 0x51);
 
-    p = (const uint8_t *)&wire.id_product;
+    p = (const uint8_t *)&wire.idProduct;
     ASSERT_EQ_INT(p[0], 0xF0); ASSERT_EQ_INT(p[1], 0x0A);
 
     /* 1-byte fields untouched. */
-    ASSERT_EQ_INT(wire.device_class, 0xEF);
-    ASSERT_EQ_INT(wire.num_interfaces, 1);
+    ASSERT_EQ_INT(wire.bDeviceClass, 0xEF);
+    ASSERT_EQ_INT(wire.bNumInterfaces, 1);
 }
 
 TEST(test_pack_interface_desc)
 {
     usbip_dev_record_t src;
     make_synthetic_dap(&src);
-    usbip_interface_desc_t iface;
+    usbip_usb_interface_t iface;
 
     bool ok = usbip_proto_pack_interface_desc(&src, 0, &iface);
     ASSERT_TRUE(ok, "pack_interface_desc(0) returned false");
-    ASSERT_EQ_INT(iface.interface_class, 0xFF);
-    ASSERT_EQ_INT(iface.interface_subclass, 0x00);
-    ASSERT_EQ_INT(iface.interface_protocol, 0x00);
+    ASSERT_EQ_INT(iface.bInterfaceClass, 0xFF);
+    ASSERT_EQ_INT(iface.bInterfaceSubClass, 0x00);
+    ASSERT_EQ_INT(iface.bInterfaceProtocol, 0x00);
     ASSERT_EQ_INT(iface.padding, 0);
 
     /* Out-of-range index. */
@@ -218,7 +218,7 @@ TEST(test_unpack_header_submit)
     raw.base.direction = htobe32_local(USBIP_DIR_IN);
     raw.base.ep        = htobe32_local(2);
     raw.u.cmd_submit.transfer_buffer_length = htobe32_local(64);
-    raw.u.cmd_submit.number_of_packets = htobe32_local(USBIP_NON_ISO_PACKETS);
+    raw.u.cmd_submit.number_of_packets = htobe32_local(USBIP_NUMBER_OF_PACKETS_NON_ISO);
 
     usbip_decoded_header_t hdr;
     usbip_proto_unpack_header(&raw, &hdr);
@@ -228,7 +228,7 @@ TEST(test_unpack_header_submit)
     ASSERT_EQ_INT(hdr.direction, USBIP_DIR_IN);
     ASSERT_EQ_INT(hdr.ep, 2u);
     ASSERT_EQ_INT(hdr.transfer_buffer_length, 64);
-    ASSERT_EQ_INT((uint32_t)hdr.number_of_packets, USBIP_NON_ISO_PACKETS);
+    ASSERT_EQ_INT((uint32_t)hdr.number_of_packets, USBIP_NUMBER_OF_PACKETS_NON_ISO);
 
     int v = usbip_proto_validate_submit(&hdr, 16 * 1024);
     ASSERT_EQ_INT(v, 0);
@@ -239,7 +239,7 @@ TEST(test_validate_submit_too_large)
     usbip_decoded_header_t hdr = {0};
     hdr.direction = USBIP_DIR_IN;
     hdr.transfer_buffer_length = 32 * 1024;
-    hdr.number_of_packets = (int32_t)USBIP_NON_ISO_PACKETS;
+    hdr.number_of_packets = (int32_t)USBIP_NUMBER_OF_PACKETS_NON_ISO;
     int v = usbip_proto_validate_submit(&hdr, 16 * 1024);
     ASSERT_EQ_INT(v, -EMSGSIZE);
 }
@@ -249,7 +249,7 @@ TEST(test_validate_submit_negative_length)
     usbip_decoded_header_t hdr = {0};
     hdr.direction = USBIP_DIR_IN;
     hdr.transfer_buffer_length = -1;
-    hdr.number_of_packets = (int32_t)USBIP_NON_ISO_PACKETS;
+    hdr.number_of_packets = (int32_t)USBIP_NUMBER_OF_PACKETS_NON_ISO;
     int v = usbip_proto_validate_submit(&hdr, 16 * 1024);
     ASSERT_EQ_INT(v, -EINVAL);
 }
@@ -280,7 +280,7 @@ TEST(test_validate_submit_bad_direction)
     usbip_decoded_header_t hdr = {0};
     hdr.direction = 5;
     hdr.transfer_buffer_length = 0;
-    hdr.number_of_packets = (int32_t)USBIP_NON_ISO_PACKETS;
+    hdr.number_of_packets = (int32_t)USBIP_NUMBER_OF_PACKETS_NON_ISO;
     ASSERT_EQ_INT(usbip_proto_validate_submit(&hdr, 16 * 1024), -EINVAL);
 }
 
@@ -293,7 +293,7 @@ TEST(test_validate_submit_bad_ep)
     hdr.direction = USBIP_DIR_IN;
     hdr.ep = 16;
     hdr.transfer_buffer_length = 0;
-    hdr.number_of_packets = (int32_t)USBIP_NON_ISO_PACKETS;
+    hdr.number_of_packets = (int32_t)USBIP_NUMBER_OF_PACKETS_NON_ISO;
     ASSERT_EQ_INT(usbip_proto_validate_submit(&hdr, 16 * 1024), -EINVAL);
 
     hdr.ep = 0xDEADBEEFu;
@@ -325,7 +325,7 @@ TEST(test_pack_ret_submit_byteorder)
     ASSERT_EQ_INT(p[2], 0); ASSERT_EQ_INT(p[3], 16);
 
     /* For non-iso traffic (all mpy-pod URBs are non-iso), the kernel
-     * requires number_of_packets = USBIP_NON_ISO_PACKETS (0xFFFFFFFF).
+     * requires number_of_packets = USBIP_NUMBER_OF_PACKETS_NON_ISO (0xFFFFFFFF).
      * Zero here makes vhci_rx interpret the URB as isochronous and trip
      * "vhci_device speed not set" on every RET_SUBMIT. */
     p = (const uint8_t *)&raw.u.ret_submit.number_of_packets;
