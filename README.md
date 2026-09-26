@@ -116,13 +116,14 @@ A purpose-built Annealage Pod carrier board is in development: it wires the DUT 
 
 ## License
 
-Annealage Pod is open source under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`). You can use it for any purpose, commercial included, and modify and redistribute it under the AGPL's terms: if you distribute it, or run a modified version that others use over a network, you must make your source available under the same licence.
+Annealage Pod is licensed [AGPL-3.0-only](LICENSE). Use it for anything, commercial included; if you distribute it or host a modified version for others, share your source under the same terms. If that doesn't work for you, eg. you want to ship a modified Pod inside a closed product, there's a [commercial licence](COMMERCIAL.md).
 
-- **Firmware exception.** The firmware (`src/boards/`, `src/c_modules/`, `src/mpy/`) carries an additional permission, [`LICENSES/LicenseRef-Annealage-firmware-exception.txt`](LICENSES/LicenseRef-Annealage-firmware-exception.txt), so the built image can be distributed despite linking the cyw43-driver, BTstack and Espressif radio libraries, whose licences are not AGPL-compatible.
-- **Third-party code** keeps its own licence: the vendored ARM CMSIS-DAP sources and the files derived from them are Apache-2.0, and the Waveshare RP2350B board header is BSD-3-Clause. [`REUSE.toml`](REUSE.toml) and the SPDX headers are the per-file record, with every licence text under [`LICENSES/`](LICENSES/). The `src/micropython` submodule retains its own licences.
-- **Hardware designs** published in this repository are licensed under the CERN Open Hardware Licence v2, strongly reciprocal (`CERN-OHL-S-2.0`).
-- **Earlier releases.** Versions up to and including `v1.6.0-native-flash-default` were published under a PolyForm Noncommercial notice. All of them are also available under `AGPL-3.0-only`, on the same terms as above, at your choice.
-- **Commercial licence.** If the AGPL's source-sharing terms don't suit you, for example you want to ship a modified Pod inside a closed product, a commercial licence is available; see [COMMERCIAL.md](COMMERCIAL.md).
-- **Trademarks.** "Annealage" and "Annealage Pod" are trademarks of Andrew Leech and are not licensed by the AGPL; see [COMMERCIAL.md](COMMERCIAL.md#trademarks).
+The firmware (`src/boards/`, `src/c_modules/`, `src/mpy/`) has an [extra linking permission](LICENSES/LicenseRef-Annealage-firmware-exception.txt), as the built image includes cyw43-driver, BTstack and Espressif's radio libraries which aren't AGPL-compatible.
 
-Contributions welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
+Third-party code keeps its own licence: the CMSIS-DAP sources and files derived from them are Apache-2.0, the Waveshare RP2350B board header is BSD-3-Clause, and `src/micropython` has its own. [`REUSE.toml`](REUSE.toml) and the SPDX headers are the per-file record.
+
+Hardware designs are CERN-OHL-S-2.0.
+
+Releases up to `v1.6.0-native-flash-default` shipped with a PolyForm Noncommercial notice; they're also available under AGPL-3.0-only.
+
+"Annealage" and "Annealage Pod" are trademarks of Andrew Leech, see [COMMERCIAL.md](COMMERCIAL.md#trademarks). Contributions welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).

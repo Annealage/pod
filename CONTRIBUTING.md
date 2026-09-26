@@ -34,9 +34,7 @@ The hook calls `tools/verifygitlog.py --check-file` on each commit message.
 
 ## Contribution licensing
 
-Annealage Pod is offered under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`), with an additional linking permission on the firmware. Andrew Leech also offers commercial licences to organisations that can't meet the AGPL's source-sharing terms. For that dual model to work, contributions need a clear licensing grant; otherwise contributed code could not be offered under a commercial licence without re-asking every contributor.
-
-By submitting a contribution (a pull request, patch, or any change) to this project, you agree to the following.
+Annealage Pod is AGPL-3.0-only, with an extra linking permission on the firmware, and I also offer commercial licences. For contributed code to be included in those, I need the grant below from every contributor. By submitting a contribution (pull request, patch or any other change) you agree to the following.
 
 ### Developer Certificate of Origin
 
@@ -46,22 +44,24 @@ You certify the contribution under the Developer Certificate of Origin 1.1 (<htt
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
-(`git commit -s` adds this line.) The sign-off certifies that you wrote the contribution or otherwise have the right to submit it under the terms below.
+(`git commit -s` adds this.) The sign-off certifies you wrote the contribution or otherwise have the right to submit it under these terms.
 
 ### Licence grant
 
 You grant Andrew Leech a perpetual, worldwide, irrevocable, royalty-free, sublicensable, and transferable licence to use, reproduce, modify, distribute, and relicense your contribution, in whole or in part, under any terms, including the AGPL and any commercial licence Andrew Leech offers, now or in future.
 
-You confirm you have the right to grant this licence (the contribution is your own work, or you are authorised to submit it under these terms). The grant is royalty-free: no payment is due to you for it.
+You confirm you have the right to grant this licence, ie. the contribution is your own work or you're authorised to submit it under these terms.
 
 ### Outbound licence
 
-Your contribution is also made available to the public under the repository's outbound licence: `AGPL-3.0-only`, with the firmware additional permission for contributions under `src/boards/`, `src/c_modules/` and `src/mpy/`. Your own rights to your contribution are not otherwise affected; you retain copyright in your work.
+Your contribution is also available to everyone under `AGPL-3.0-only`, plus the firmware linking permission for anything under `src/boards/`, `src/c_modules/` and `src/mpy/`. You keep copyright in your work.
 
 ### Third-party code
 
-Code copied or derived from another project keeps that project's licence. Changes to the vendored CMSIS-DAP sources under `src/c_modules/dapprobe/vendor/cmsis-dap/`, or to the port files derived from them, are contributed under Apache-2.0, and must keep the existing ARM copyright and licence notices. If you add code from another project, keep its notices, put an SPDX header on the file, add an annotation to `REUSE.toml` if the file can't carry one, and check `uvx reuse lint` passes. Don't add code whose upstream has no licence.
+Code taken from another project keeps that project's licence. Changes to the CMSIS-DAP sources in `src/c_modules/dapprobe/vendor/cmsis-dap/`, or the port files derived from them, are contributed under Apache-2.0 and must keep ARM's notices.
+
+If you bring in code from elsewhere, keep its notices, give the file an SPDX header (or a `REUSE.toml` annotation if it can't carry one) and check `uvx reuse lint` passes. Don't add code from an upstream that has no licence.
 
 ### Other terms
 
-If you cannot grant the licence above, for example, your employer owns the work and has not authorised this grant, or you require a separate contributor agreement, contact andrew@alelec.net before submitting, so alternative arrangements can be made.
+If you can't grant the licence above, eg. your employer owns the work and hasn't authorised it, or you need a separate contributor agreement, email andrew@alelec.net before submitting.

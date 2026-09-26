@@ -23,40 +23,36 @@ multiplexer specified in `docs/esp32-s3/spec.md` §4.4 and
 
 ## 2. Vendoring
 
-The single-device USB/IP server in Scott Shawcroft's
+The ESP32-S3 server, `usbip_server.c`, started from the single-device
+server in Scott Shawcroft's
 [adafruit/esp-usbip-bridge](https://github.com/adafruit/esp-usbip-bridge)
-(checked out locally under `referencea/esp-usbip-bridge/`) was the
-starting point for the ESP32-S3 server, `usbip_server.c`. Carried
-over from it, adapted for the multiplexer shape:
+(local copy in `referencea/esp-usbip-bridge/`). What it kept:
 
-- The accept-loop topology (one accept task spawning one
-  per-connection worker per fd, plus a per-URB socket watchdog).
-  Implementation rewritten; the shape is preserved.
-- The `read_exact` / `write_all` / `discard_exact` byte-stream
-  helpers and the `handle_devlist_request` /
-  `send_device_with_interfaces` decomposition, with some lines
-  unchanged.
+- The accept-loop topology: one accept task, one worker per
+  connection, plus a per-URB socket watchdog. Rewritten, same shape.
+- The `read_exact` / `write_all` / `discard_exact` helpers and the
+  `handle_devlist_request` / `send_device_with_interfaces` split,
+  some lines unchanged.
 - `make_devid`: `(busnum << 16) | (devnum & 0xFFFF)`.
-- The `virtual_device_t` ops table shape: `control_transfer` and
-  `data_transfer`. Two additions over the reference: optional
-  `on_attach` and `on_detach` hooks for per-import lifecycle.
+- The `virtual_device_t` ops table (`control_transfer`,
+  `data_transfer`), with optional `on_attach` / `on_detach` hooks
+  added.
 
-`usbip_protocol.h` is not taken from the reference. It is written
-from the kernel's protocol specification,
-[`Documentation/usb/usbip_protocol.rst`](https://docs.kernel.org/usb/usbip_protocol.html),
-uses the spec's field names and the kernel's structure names, and
-asserts every struct against the spec's offset tables.
+`usbip_protocol.h` isn't from the reference, it's written from the
+kernel spec,
+[`usbip_protocol.rst`](https://docs.kernel.org/usb/usbip_protocol.html),
+with the spec's field names and static asserts against its offset
+tables.
 
 ### License
 
-esp-usbip-bridge has no licence: no LICENSE file, no SPDX headers,
-and no statement in its README or build files. The ESP32-S3 server's
-adapted portions therefore carry no licence grant from their author.
-The RP2350 server, `usbip_server_rp2.c`, was written separately and
-shares only idioms with the reference.
+esp-usbip-bridge has no licence at all, so the parts of
+`usbip_server.c` taken from it currently have no licence grant. The
+RP2350 server, `usbip_server_rp2.c`, was written separately and only
+shares common idioms with it.
 
-If esp-usbip-bridge publishes a licence, record it here and put the
-upstream copyright and licence on `usbip_server.c` in `REUSE.toml`.
+If upstream adds a licence, note it here and add its copyright and
+licence for `usbip_server.c` to `REUSE.toml`.
 
 ## 3. Deviations from the reference
 

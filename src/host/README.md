@@ -26,10 +26,8 @@ Requirements:
   and the `mpremote` import (used by the persistent `pod repl` session). This
   build has no `resume` subcommand; `connect socket://HOST:PORT exec ...` does
   not soft-reset by default, which is what the client relies on.
-- `zeroconf` for mDNS discovery, and `mcp` for the `pod-mcp` server. Both are
-  ordinary requirements: the two console scripts this package installs are built
-  on them. `mcp` is capped below 2.0, which drops the decorator API
-  `build_server` uses.
+- `zeroconf` for mDNS discovery and `mcp` for `pod-mcp`. `mcp` is pinned below
+  2.0 as 2.x dropped the decorator API `build_server` uses.
 - The pod must have `annealage_pod.debug` resident at `/lib` for the DUT
   flash/reset/read verbs (deploy steps in `../../docs/pod/debug-stack.md`).
 

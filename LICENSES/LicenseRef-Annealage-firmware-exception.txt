@@ -2,7 +2,7 @@ Additional permission under GNU AGPL version 3 section 7
 
 Copyright (C) 2026 Andrew Leech
 
-The Annealage Pod firmware (the MicroPython board definitions, C user modules and frozen Python under src/boards/, src/c_modules/ and src/mpy/) is built into a single image together with MicroPython and with vendor libraries whose licences are not compatible with the GNU Affero General Public License. This permission allows the resulting image to be conveyed.
+This applies to the Annealage Pod firmware sources under src/boards/, src/c_modules/ and src/mpy/. The built firmware image links vendor libraries whose licences are not compatible with the GNU Affero General Public License, and this permission allows that image to be conveyed.
 
 If you modify this Program, or any covered work, by linking or combining it with any of the following libraries (or a modified version of that library), containing parts covered by the terms of that library's own licence, the licensors of this Program grant you additional permission to convey the resulting work:
 
