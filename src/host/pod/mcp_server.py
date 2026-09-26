@@ -758,7 +758,7 @@ def handle_dut_gdb(label: str, listen_port: int = 0) -> dict:
 
 def handle_dut_flash(label: str, image: str, target: str = None,
                      addr: int = 0, keep_attached: bool = False,
-                     mass_erase: bool = False, loader: str = None,
+                     mass_erase: bool = False,
                      force: bool = False) -> dict:
     """Flash a firmware image to the DUT via the pod (streamed, no pod FS).
 
@@ -766,11 +766,9 @@ def handle_dut_flash(label: str, image: str, target: str = None,
     For ELF images the DUT flash geometry must be declared in the registry dut
     block (flash_base + flash_size); addr is ignored.
 
-    loader selects the flash backend: "native" (default) is the per-family NVM
-    path; "flm" runs the target's CMSIS-pack algorithm, installed on the pod
-    first. target names the CMSIS device (e.g. "nRF52840_xxAA") to resolve that
-    algorithm for with loader="flm", overriding the registry's declared
-    target_family; ignored otherwise.
+    Flashing runs the target's CMSIS-pack algorithm, resolved and installed on
+    the pod first. target names the CMSIS device (e.g. "nRF52840_xxAA") to
+    resolve that algorithm, overriding the registry's declared target_family.
 
     Detaches a live USB/IP session first (reflashing the DUT mid-forward wedges
     the pod); keep_attached=True overrides. Refuses when another caller holds
@@ -780,24 +778,23 @@ def handle_dut_flash(label: str, image: str, target: str = None,
     pod = _pod_for(label)
     return pod.flash_dut(image, target=target, addr=addr,
                          keep_attached=keep_attached, mass_erase=mass_erase,
-                         loader=loader, force=force)
+                         force=force)
 
 
 def handle_dut_erase(label: str, clkdiv: int = DEFAULT_SWD_CLKDIV,
-                     loader: str = "native", keep_attached: bool = False,
+                     keep_attached: bool = False,
                      force: bool = False) -> dict:
     """Erase the entire DUT flash via the on-pod debug stack.
 
-    loader: "native" (default) = nRF NVMC mass-erase fast-path; "flm" = the
-    generic CMSIS path, which resolves the target's CMSIS-pack algorithm and
-    installs it on the pod first.
+    Resolves the target's CMSIS-pack algorithm and installs it on the pod
+    first if it has none.
 
     Erasing halts the core to run, same as reset/flash, so it detaches a live
     USB/IP session first (keep_attached=True overrides) and refuses when
     another caller holds it, naming them, unless force=True bumps it.
-    Returns {ok, ms, loader, err[, stole_from]}.
+    Returns {ok, ms, err[, stole_from]}.
     """
-    return _pod_for(label).erase_dut(clkdiv=clkdiv, loader=loader,
+    return _pod_for(label).erase_dut(clkdiv=clkdiv,
                                      keep_attached=keep_attached, force=force)
 
 
@@ -808,8 +805,8 @@ def handle_dut_flm(label: str, device: str = None, pack: str = None,
 
     With no options beyond label, returns what the pod currently has
     installed. Given any of device/pack/download/force, resolves the
-    algorithm from the target's CMSIS pack and installs it. Flashing with
-    loader="flm" installs one automatically from the local pack cache only;
+    algorithm from the target's CMSIS pack and installs it. dut_flash/
+    dut_erase install one automatically from the local pack cache only;
     this is for pointing at an explicit pack, fetching one that is not
     cached, or checking what is loaded.
 
@@ -1639,7 +1636,9 @@ def build_server():
                     "streamed into pod RAM (no pod filesystem). Accepts a flat "
                     "binary or an ELF file (detected by magic, not extension); "
                     "for ELF the DUT flash geometry must be declared in the "
-                    "registry dut block (flash_base + flash_size). Refuses "
+                    "registry dut block (flash_base + flash_size). Runs the "
+                    "target's CMSIS-pack flash algorithm, resolved and "
+                    "installed on the pod first if it has none. Refuses "
                     "when another caller holds the USB/IP session it would "
                     "detach, naming them, unless force=true bumps it (the "
                     "result then carries stole_from)."
@@ -1659,7 +1658,7 @@ def build_server():
                         },
                         "target": {
                             "type": "string",
-                            "description": "Target MCU identifier (optional).",
+                            "description": "CMSIS device name (e.g. 'nRF52840_xxAA') to resolve the flash algorithm for, overriding the registry's declared target_family (optional).",
                         },
                         "keep_attached": {
                             "type": "boolean",
@@ -1670,11 +1669,6 @@ def build_server():
                             "type": "boolean",
                             "description": "Erase the entire DUT flash before programming.",
                             "default": False,
-                        },
-                        "loader": {
-                            "type": "string",
-                            "enum": ["native", "flm"],
-                            "description": "Flash algorithm: 'native' (per-family NVM, default) or 'flm' (the target's CMSIS-pack algorithm).",
                         },
                         "force": {
                             "type": "boolean",
@@ -1689,25 +1683,18 @@ def build_server():
                 name="dut_erase",
                 description=(
                     "Erase the entire DUT flash via the on-pod debug stack. "
-                    "loader 'native' (default) uses the nRF NVMC mass-erase "
-                    "fast-path; 'flm' runs the target's CMSIS-pack algorithm, "
-                    "resolved from the DUT's declared target_family and "
-                    "installed on the pod first. Erasing halts the core, the "
+                    "Runs the target's CMSIS-pack algorithm, resolved from "
+                    "the DUT's declared target_family and installed on the "
+                    "pod first if it has none. Erasing halts the core, the "
                     "same DUT-freeze reset and flash detach a live USB/IP "
                     "session for; refuses when another caller holds it, "
                     "naming them, unless force=true bumps it. Returns "
-                    "{ok, ms, loader, err[, stole_from]}."
+                    "{ok, ms, err[, stole_from]}."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
-                        "loader": {
-                            "type": "string",
-                            "enum": ["native", "flm"],
-                            "description": "Flash algorithm: 'native' (nRF NVMC fast-path, default) or 'flm' (generic CMSIS-pack algorithm, any target with a pack).",
-                            "default": "native",
-                        },
                         "keep_attached": {
                             "type": "boolean",
                             "description": "Do not detach a live USB/IP session first (risks a forwarder wedge).",
@@ -1765,14 +1752,14 @@ def build_server():
                 name="dut_flm",
                 description=(
                     "Report or install the DUT's generic CMSIS flash algorithm, "
-                    "used by dut_flash/dut_erase with loader=\"flm\". With no "
-                    "options beyond label, reports what the pod currently has "
-                    "installed. Given any of device/pack/download/force, "
-                    "resolves the algorithm from the target's CMSIS pack and "
-                    "installs it. Flashing with loader=\"flm\" installs one "
-                    "automatically from the local pack cache only; this is the "
-                    "only way to point at an explicit pack file, fetch one that "
-                    "is not cached, or check what is currently loaded. "
+                    "used by dut_flash/dut_erase. With no options beyond "
+                    "label, reports what the pod currently has installed. "
+                    "Given any of device/pack/download/force, resolves the "
+                    "algorithm from the target's CMSIS pack and installs it. "
+                    "dut_flash/dut_erase install one automatically from the "
+                    "local pack cache only; this is the only way to point at "
+                    "an explicit pack file, fetch one that is not cached, or "
+                    "check what is currently loaded. "
                     "download=true permits fetching the pack from the vendor "
                     "index when nothing local matches; vendor and pack_name "
                     "select which one, required with download when nothing "
@@ -2094,12 +2081,11 @@ def build_server():
                     arguments.get("target"), arguments.get("addr", 0),
                     arguments.get("keep_attached", False),
                     arguments.get("mass_erase", False),
-                    arguments.get("loader"), arguments.get("force", False))
+                    arguments.get("force", False))
             elif name == "dut_erase":
                 result = await asyncio.to_thread(
                     handle_dut_erase, arguments["label"],
                     arguments.get("clkdiv", DEFAULT_SWD_CLKDIV),
-                    arguments.get("loader", "native"),
                     arguments.get("keep_attached", False),
                     arguments.get("force", False))
             elif name == "dut_reset":

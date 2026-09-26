@@ -17,13 +17,12 @@
 import struct
 import time
 
-from . import swd_dap, swd_pio, flash_nrf52, netutil, dbgsrv
+from . import swd_dap, swd_pio, netutil, dbgsrv
 from .. import _rp2_pinmap, holders
 
 _dp = None
 _ap = None
 _cm = None
-_flash = None
 _fpb = None
 _dwt = None
 _flm = None
@@ -107,15 +106,11 @@ def _guarded(op):
     return decorate
 
 
-# Selectable flash backend. "native" is the per-family NVM path
-# (flash_nrf52.NRF52Flash), driven directly through the NVMC and hardware-validated
-# on the nRF52840 (2026-07-09: program + full-chip erase). "flm" is the generic
-# CMSIS flash-algorithm runner (flm.FLMFlasher) that runs a standard algorithm on
-# the target and so generalises to any chip with a CMSIS pack. The pod carries no
-# algorithms of its own: the host extracts one from the target's CMSIS Device
-# Family Pack on demand and installs it with set_flm_algo() before selecting
-# loader="flm". "native" stays the default because it needs no such install.
-# _select_loader keeps the choice out of the hot path.
+# The pod carries no flash algorithm of its own: the host extracts one from the
+# target's CMSIS Device Family Pack and installs it with set_flm_algo().
+# flm.FLMFlasher then runs that standard CMSIS algorithm (Init / EraseSector /
+# EraseChip / ProgramPage) on the target's own core, so this generalises to any
+# chip with a pack rather than needing a per-family driver.
 def stage_flm_blob(b64=None):
     # Accumulate an algorithm image in pod RAM across REPL round-trips. Vendor
     # algorithms run to tens of KB, and a single exec carrying all of it would
@@ -135,7 +130,7 @@ def stage_flm_blob(b64=None):
 
 
 def set_flm_algo(algo):
-    # Install the host-supplied CMSIS flash algorithm for subsequent loader="flm"
+    # Install the host-supplied CMSIS flash algorithm for subsequent flash/erase
     # operations, replacing any previous one. The algorithm stays installed for
     # the VM lifetime (one DUT per pod), so the host ships it once per target
     # rather than per flash. See flm.FLMFlasher for the dict's keys; its
@@ -177,7 +172,7 @@ def flm_algo_info():
 
 
 def _ensure(clkdiv=swd_pio.DEFAULT_CLKDIV):
-    global _dp, _ap, _cm, _flash, _fpb, _dwt, _flm
+    global _dp, _ap, _cm, _fpb, _dwt, _flm
     if _dp is not None and _dp.swd.clkdiv != clkdiv:
         # A prior call built the SWD stack at a different clock. A running PIO
         # state machine's divisor can't be retuned in place, so drop the whole
@@ -192,7 +187,7 @@ def _ensure(clkdiv=swd_pio.DEFAULT_CLKDIV):
             _dp.swd.release()
         except Exception:
             pass
-        _dp = _ap = _cm = _flash = _fpb = _dwt = _flm = None
+        _dp = _ap = _cm = _fpb = _dwt = _flm = None
     if _dp is None:
         from . import pio_arbiter
         pio_arbiter.claim("swd", 1, 0)   # PIO1 sm0 (PIO2 = CYW43; PIO0 = SPI/LA)
@@ -200,32 +195,26 @@ def _ensure(clkdiv=swd_pio.DEFAULT_CLKDIV):
                                 swclk=_rp2_pinmap.SWD_SWCLK, sm_id=4, clkdiv=clkdiv)
         _ap = swd_dap.MEMAP(_dp)
         _cm = swd_dap.CortexM(_ap)
-        _flash = flash_nrf52.NRF52Flash(_ap, _cm)
         _fpb = swd_dap.FPB(_ap)
         _dwt = swd_dap.DWT(_ap)
     _dp.connect()
-    return _dp, _ap, _cm, _flash
+    return _dp, _ap, _cm
 
 
-def _select_loader(loader):
-    # Return the flash backend for this operation. "native" (default) is the
-    # cached NRF52Flash created by _ensure; "flm" lazily builds and caches an
-    # FLMFlasher over the same MEM-AP / CortexM so repeated FLM flashes reuse
-    # the loaded algorithm session. _ensure must have run first.
+def _require_flm():
+    # Return the cached FLM flasher, lazily building it over the algorithm
+    # set_flm_algo() installed. FLMFlasher wraps the same MEM-AP / CortexM
+    # _ensure built, so repeated flashes reuse the loaded algorithm session.
+    # _ensure must have run first.
     global _flm
-    if loader == "native":
-        return _flash
-    if loader == "flm":
-        if _flm_algo is None:
-            raise ValueError(
-                "no CMSIS flash algorithm installed; call set_flm_algo() first "
-                "(the host extracts one from the target's CMSIS pack), or use "
-                "loader='native'")
-        if _flm is None:
-            from . import flm
-            _flm = flm.FLMFlasher(_ap, _cm, _flm_algo)
-        return _flm
-    raise ValueError("unknown loader %r (use 'native' or 'flm')" % loader)
+    if _flm_algo is None:
+        raise ValueError(
+            "no CMSIS flash algorithm installed; call set_flm_algo() first "
+            "(the host extracts one from the target's CMSIS pack)")
+    if _flm is None:
+        from . import flm
+        _flm = flm.FLMFlasher(_ap, _cm, _flm_algo)
+    return _flm
 
 
 def _flm_begin(flm_fl):
@@ -239,10 +228,10 @@ def _flm_begin(flm_fl):
 
 def _flm_erase_range(flm_fl, addr, length):
     # Erase the sectors covering [addr, addr+length) inside one Init(erase)/UnInit
-    # bracket. Mirrors NRF52Flash.erase_range so the FLM flash_file / flash_stream
-    # paths erase once up front and then program with erase=False, matching the
-    # native path's behaviour. Sector stepping comes from the algorithm's CMSIS
-    # sector map (FLMFlasher.erase_range), not from page_size.
+    # bracket, so flash_file / flash_stream erase once up front and then program
+    # with erase=False rather than re-erasing per page. Sector stepping comes
+    # from the algorithm's CMSIS sector map (FLMFlasher.erase_range), not from
+    # page_size.
     flm_fl.init(1)                                 # operation 1 = erase
     try:
         flm_fl.erase_range(addr, length)
@@ -250,17 +239,14 @@ def _flm_erase_range(flm_fl, addr, length):
         flm_fl.uninit(1)
 
 
-def _flm_restore(loader, cm):
+def _flm_restore(cm):
     # An FLM operation ends with the core parked on the algorithm's own BKPT
     # trampoline (LR = load_address|1, see flm.py's calling convention): the
     # halt is the BKPT instruction itself, not a debug C_HALT request, so a
     # plain resume re-traps on it immediately rather than continuing past it.
     # A system reset bypasses PC entirely and restarts the DUT's own firmware,
-    # which is also the right outcome after a fresh flash or erase. The native
-    # path halts the core plainly via NRF52Flash.prepare(), so a plain resume
-    # is correct there and unchanged.
-    if loader == "flm":
-        cm.sysreset()
+    # which is also the right outcome after a fresh flash or erase.
+    cm.sysreset()
     cm.resume()
 
 
@@ -291,7 +277,7 @@ def _flm_program_file(flm_fl, addr, fileobj, verify):
 
 @_guarded('info')
 def info(clkdiv=swd_pio.DEFAULT_CLKDIV):
-    dp, ap, cm, fl = _ensure(clkdiv)
+    dp, ap, cm = _ensure(clkdiv)
     return {
         "dpidr": dp.dpidr,
         "cpuid": cm.cpuid(),
@@ -310,7 +296,7 @@ def discover(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # and only valid per family). The host decodes core/designer/family from
     # these raw ids. Returns {"ok": False, "err": ...} if SWD does not connect.
     try:
-        dp, ap, cm, fl = _ensure(clkdiv)
+        dp, ap, cm = _ensure(clkdiv)
         return {
             "ok": True,
             "dpidr": dp.dpidr,
@@ -323,25 +309,19 @@ def discover(clkdiv=swd_pio.DEFAULT_CLKDIV):
 
 
 @_guarded('flash_file')
-def flash_file(addr, path, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True, chunk_words=256,
-               loader="native"):
+def flash_file(addr, path, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True):
     # Program target flash from a pod-side file, bounded memory, then resume.
-    # loader: "native" (default, validated NVMC path) or "flm" (generic CMSIS
-    # algorithm). See _select_loader.
-    dp, ap, cm, fl = _ensure(clkdiv)
-    fl = _select_loader(loader)
+    # Runs the CMSIS algorithm set_flm_algo() installed (_require_flm).
+    # FLMFlasher has no file/streaming API: seek to size, erase the whole
+    # covered region once (so a multi-page image is not partially erased),
+    # then feed the image in page-sized chunks with erase=False so the whole
+    # file is never resident in pod RAM (_flm_program_file).
+    dp, ap, cm = _ensure(clkdiv)
+    fl = _require_flm()
     f = open(path, "rb")
     try:
         t0 = time.ticks_ms()
-        if loader == "native":
-            n = fl.program_file(addr, f, erase=True, verify=verify,
-                                chunk_words=chunk_words)
-        else:
-            # FLMFlasher has no file/streaming API. Seek to size, erase the
-            # whole covered region once (so a multi-page image is not partially
-            # erased), then feed the image in page-sized chunks with erase=False
-            # so the whole file is never resident in pod RAM.
-            n = _flm_program_file(fl, addr, f, verify)
+        n = _flm_program_file(fl, addr, f, verify)
         dt = time.ticks_diff(time.ticks_ms(), t0)
     finally:
         f.close()
@@ -349,13 +329,12 @@ def flash_file(addr, path, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True, chunk_wor
         # restore and leave the DUT parked on the algorithm's own breakpoint -
         # exactly the state gap 1 exists to eliminate, and the one most likely
         # to be misread as a dead DUT rather than a failed flash.
-        _flm_restore(loader, cm)
-    return {"ok": True, "addr": addr, "bytes": n, "ms": dt, "loader": loader}
+        _flm_restore(cm)
+    return {"ok": True, "addr": addr, "bytes": n, "ms": dt}
 
 
 @_guarded('flash_stream')
-def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True,
-                 loader="native"):
+def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_CLKDIV, verify=True):
     # Flash a DUT image streamed over TCP straight into pod RAM, no filesystem.
     # The image is received into a RAM buffer a chunk at a time and programmed
     # to the DUT over SWD; the whole image is never resident (only one chunk
@@ -368,12 +347,9 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
     # marginal, so this single-buffer-plus-lwIP form is used.)
     import socket
 
-    dp, ap, cm, fl = _ensure(clkdiv)
-    fl = _select_loader(loader)
-    if loader == "native":
-        fl.prepare()
-    else:
-        _flm_begin(fl)
+    dp, ap, cm = _ensure(clkdiv)
+    fl = _require_flm()
+    _flm_begin(fl)
     page = fl.page_size
     err = None
 
@@ -390,10 +366,7 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
         # in TCP while we erase)
         start = addr & ~(page - 1)
         span = ((addr & (page - 1)) + total_len + page - 1) & ~(page - 1)
-        if loader == "native":
-            fl.erase_range(start, span)
-        else:
-            _flm_erase_range(fl, start, span)
+        _flm_erase_range(fl, start, span)
 
         buf = bytearray(chunk)
         mv = memoryview(buf)
@@ -419,51 +392,45 @@ def flash_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFAULT_
             cl.close()
         srv.close()
         try:
-            _flm_restore(loader, cm)
+            _flm_restore(cm)
         except Exception as e:  # noqa: BLE001 - return as a result, not a raise
             if err is None:
                 err = repr(e)
-    return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err,
-            "loader": loader}
+    return {"ok": err is None, "addr": addr, "bytes": total_len, "err": err}
 
 
 @_guarded('erase_all')
-def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV, loader="native"):
-    # Erase the entire DUT flash, returning timing and loader info. loader="native"
-    # (default) uses NRF52Flash.mass_erase() directly through the NVMC; loader="flm"
-    # runs the generic CMSIS FLMFlasher.erase_all() against the algorithm installed
-    # by set_flm_algo(), using its EraseChip entry point if it has one and a sector
-    # sweep otherwise. _select_loader runs before the try (matching
-    # flash_stream): raising there (no algorithm installed) means nothing has
-    # touched the DUT yet, and the finally's restore must not run in that case
-    # - it would sysreset a DUT that was never halted. Once past it, the core
-    # is always restored in the finally (see _flm_restore for why the FLM path
-    # needs a system reset rather than a plain resume); a restore failure is
-    # reported rather than swallowed, since it means the DUT was left in
-    # whatever state the erase attempt left it in.
-    dp, ap, cm, fl = _ensure(clkdiv)
-    fl = _select_loader(loader)
+def erase_all(clkdiv=swd_pio.DEFAULT_CLKDIV):
+    # Erase the entire DUT flash, returning timing. Runs the CMSIS
+    # FLMFlasher.erase_all() against the algorithm installed by set_flm_algo(),
+    # using its EraseChip entry point if it has one and a sector sweep
+    # otherwise. _require_flm runs before the try (matching flash_stream):
+    # raising there (no algorithm installed) means nothing has touched the DUT
+    # yet, and the finally's restore must not run in that case - it would
+    # sysreset a DUT that was never halted. Once past it, the core is always
+    # restored in the finally (see _flm_restore for why a system reset is
+    # needed rather than a plain resume); a restore failure is reported rather
+    # than swallowed, since it means the DUT was left in whatever state the
+    # erase attempt left it in.
+    dp, ap, cm = _ensure(clkdiv)
+    fl = _require_flm()
     err = None
     t0 = time.ticks_ms()
     try:
-        if loader == "native":
-            fl.prepare()     # halt the core
-            fl.mass_erase()
-        else:
-            if not cm.is_halted():
-                cm.halt()
-            _flm_begin(fl)
-            fl.erase_all()
+        if not cm.is_halted():
+            cm.halt()
+        _flm_begin(fl)
+        fl.erase_all()
     except Exception as e:  # noqa: BLE001 - return as a result, not a raise
         err = repr(e)
     finally:
         try:
-            _flm_restore(loader, cm)
+            _flm_restore(cm)
         except Exception as e:  # noqa: BLE001 - return as a result, not a raise
             if err is None:
                 err = repr(e)
     dt = time.ticks_diff(time.ticks_ms(), t0)
-    return {"ok": err is None, "ms": dt, "loader": loader, "err": err}
+    return {"ok": err is None, "ms": dt, "err": err}
 
 
 @_guarded('write_mem_stream')
@@ -490,7 +457,7 @@ def write_mem_stream(addr, total_len, port=3333, chunk=4096, clkdiv=swd_pio.DEFA
                        "(< 0x%08x, the Cortex-M SRAM base) and is not "
                        "word-writable" % (addr, dbgsrv.FLASH_TOP)}
 
-    dp, ap, cm, fl = _ensure(clkdiv)
+    dp, ap, cm = _ensure(clkdiv)
     err = None
 
     # AF_INET6 + "::" = dual-stack (v4+v6) via modlwip's listen() promotion.
@@ -539,7 +506,7 @@ def dump_stream(addr, length, port=3334, clkdiv=swd_pio.DEFAULT_CLKDIV):
     import socket
     import struct
 
-    dp, ap, cm, fl = _ensure(clkdiv)
+    dp, ap, cm = _ensure(clkdiv)
     if not cm.is_halted():
         cm.halt()
     err = None
@@ -583,7 +550,7 @@ def flash_crc(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
     # the source image.
     import binascii
     import struct
-    dp, ap, cm, fl = _ensure(clkdiv)
+    dp, ap, cm = _ensure(clkdiv)
     if not cm.is_halted():
         cm.halt()
     err = None
@@ -610,7 +577,7 @@ def flash_crc(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
 
 @_guarded('reset')
 def reset(mode="sysreset", clkdiv=swd_pio.DEFAULT_CLKDIV):
-    dp, ap, cm, fl = _ensure(clkdiv)
+    dp, ap, cm = _ensure(clkdiv)
     if mode == "halt":
         cm.reset_and_halt()
     else:
@@ -640,7 +607,7 @@ def halt(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Halt the core where it is and hold it (no auto-resume). Required before a
     # register read/write; also freezes the DUT (incl. its USB) for the duration.
     try:
-        dp, ap, cm, fl = _ensure(clkdiv)
+        dp, ap, cm = _ensure(clkdiv)
         cm.halt()
         return {"ok": True, "halted": True, "dhcsr": cm.read_dhcsr()}
     except Exception as e:  # noqa: BLE001 - return as a result, not a raise
@@ -651,7 +618,7 @@ def halt(clkdiv=swd_pio.DEFAULT_CLKDIV):
 def resume(clkdiv=swd_pio.DEFAULT_CLKDIV):
     # Resume a core halted by halt() / reset(mode="halt").
     try:
-        dp, ap, cm, fl = _ensure(clkdiv)
+        dp, ap, cm = _ensure(clkdiv)
         cm.resume()
         return {"ok": True, "halted": False}
     except Exception as e:  # noqa: BLE001 - return as a result, not a raise
@@ -664,7 +631,7 @@ def read_reg(regsel, clkdiv=swd_pio.DEFAULT_CLKDIV):
     if regsel < 0 or regsel > dbgsrv.REGSEL_MAX:
         return {"ok": False, "err": "regsel out of range 0..%d" % dbgsrv.REGSEL_MAX}
     try:
-        dp, ap, cm, fl = _ensure(clkdiv)
+        dp, ap, cm = _ensure(clkdiv)
         if not cm.is_halted():
             return {"ok": False, "err": "core is running; halt() it first "
                     "(registers need a halted core)"}
@@ -679,7 +646,7 @@ def write_reg(regsel, value, clkdiv=swd_pio.DEFAULT_CLKDIV):
         return {"ok": False, "err": "regsel out of range 0..%d" % dbgsrv.REGSEL_MAX}
     value &= 0xFFFFFFFF
     try:
-        dp, ap, cm, fl = _ensure(clkdiv)
+        dp, ap, cm = _ensure(clkdiv)
         if not cm.is_halted():
             return {"ok": False, "err": "core is running; halt() it first "
                     "(registers need a halted core)"}
@@ -696,7 +663,7 @@ def read_mem(addr, length, clkdiv=swd_pio.DEFAULT_CLKDIV):
         return {"ok": False, "err": "length out of range 0..%d "
                 "(use read_dut/dump_stream for bulk)" % dbgsrv.MAX_DATA}
     try:
-        dp, ap, cm, fl = _ensure(clkdiv)
+        dp, ap, cm = _ensure(clkdiv)
         data = dbgsrv._read_mem(ap, addr, length)
         return {"ok": True, "addr": addr, "length": length,
                 "hex": binascii.hexlify(data).decode()}
@@ -730,7 +697,7 @@ def write_mem(addr, data_hex, protect=None, clkdiv=swd_pio.DEFAULT_CLKDIV):
                 "(< 0x%08x, the Cortex-M SRAM base) and is not word-writable"
                 % (addr, dbgsrv.FLASH_TOP)}
     try:
-        dp, ap, cm, fl = _ensure(clkdiv)
+        dp, ap, cm = _ensure(clkdiv)
         dbgsrv._write_mem(ap, addr, data)
     except Exception as e:  # noqa: BLE001 - return as a result, not a raise
         return {"ok": False, "err": repr(e)}
@@ -756,7 +723,7 @@ def gdb_serve(port=3335, clkdiv=swd_pio.DEFAULT_CLKDIV, reset_halt=True):
     # comparators armed, which a later flash_stream (it never inits the FPB/DWT)
     # would inherit and spuriously trap on. The host 'D' detach still issues its
     # own clear/resume; this is the backstop for the paths 'D' never reaches.
-    dp, ap, cm, fl = _ensure(clkdiv)
+    dp, ap, cm = _ensure(clkdiv)
     if reset_halt:
         cm.reset_and_halt()
     elif not cm.is_halted():
@@ -790,7 +757,7 @@ def gdb_serve(port=3335, clkdiv=swd_pio.DEFAULT_CLKDIV, reset_halt=True):
 def close():
     # Resume the target, fully release the SWD PIO (so PIO1 is reclaimable, e.g.
     # by the analyser swap), and drop the cached session (next call re-creates it).
-    global _dp, _ap, _cm, _flash, _fpb, _dwt, _flm
+    global _dp, _ap, _cm, _fpb, _dwt, _flm
     try:
         if _cm is not None:
             _cm.resume()
@@ -809,7 +776,6 @@ def close():
     _dp = None
     _ap = None
     _cm = None
-    _flash = None
     _fpb = None
     _dwt = None
     _flm = None

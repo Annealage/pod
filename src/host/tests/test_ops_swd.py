@@ -21,7 +21,7 @@ _MPY = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "mpy"
 if _MPY not in sys.path:
     sys.path.insert(0, _MPY)
 
-for _name in ("annealage_pod.debug.swd_dap", "annealage_pod.debug.flash_nrf52",
+for _name in ("annealage_pod.debug.swd_dap",
               "annealage_pod.debug.netutil", "annealage_pod._rp2_pinmap"):
     sys.modules.setdefault(_name, types.ModuleType(_name))
 
@@ -98,9 +98,9 @@ class _FakeCM:
 
 
 def _patch_session(monkeypatch, cm=None, ap=None):
-    """Make _ensure() return a fake (dp, ap, cm, flash) without real SWD."""
+    """Make _ensure() return a fake (dp, ap, cm) without real SWD."""
     cm = cm or _FakeCM()
-    monkeypatch.setattr(ops, "_ensure", lambda clkdiv=8: (object(), ap, cm, object()))
+    monkeypatch.setattr(ops, "_ensure", lambda clkdiv=8: (object(), ap, cm))
     return cm
 
 
@@ -221,7 +221,7 @@ class TestEnsureClkdiv:
         import annealage_pod.debug.pio_arbiter as pio_arbiter
         _FakeDP.built = []
         # Fresh, torn-down session each time.
-        for g in ("_dp", "_ap", "_cm", "_flash", "_fpb", "_dwt", "_flm"):
+        for g in ("_dp", "_ap", "_cm", "_fpb", "_dwt", "_flm"):
             monkeypatch.setattr(ops, g, None)
         monkeypatch.setattr(ops._rp2_pinmap, "SWD_SWDIO", 14, raising=False)
         monkeypatch.setattr(ops._rp2_pinmap, "SWD_SWCLK", 15, raising=False)
@@ -230,8 +230,6 @@ class TestEnsureClkdiv:
         monkeypatch.setattr(ops.swd_dap, "CortexM", lambda ap: object(), raising=False)
         monkeypatch.setattr(ops.swd_dap, "FPB", lambda ap: object(), raising=False)
         monkeypatch.setattr(ops.swd_dap, "DWT", lambda ap: object(), raising=False)
-        monkeypatch.setattr(ops.flash_nrf52, "NRF52Flash",
-                            lambda ap, cm: object(), raising=False)
         monkeypatch.setattr(pio_arbiter, "claim", lambda *a, **k: None)
 
     def test_same_clkdiv_reuses_session(self, monkeypatch):
@@ -262,8 +260,8 @@ class TestFlmAlgoInstall:
 
     The pod carries no flash algorithms; the host extracts one from the target's
     CMSIS pack and installs it. These cover the install/replace bookkeeping and
-    the refusal when nothing is installed - the failure a user hits by selecting
-    loader="flm" without the host having resolved a pack.
+    the refusal when nothing is installed - the failure a user hits flashing or
+    erasing before the host has resolved a pack.
     """
 
     _ALGO = {
@@ -311,22 +309,16 @@ class TestFlmAlgoInstall:
         assert ops._flm is None
         assert ops.flm_algo_info()["name"] == "other"
 
-    def test_select_flm_without_an_algo_refuses(self):
+    def test_require_flm_without_an_algo_refuses(self):
         with pytest.raises(ValueError, match="no CMSIS flash algorithm installed"):
-            ops._select_loader("flm")
-
-    def test_select_unknown_loader_refuses(self):
-        with pytest.raises(ValueError, match="unknown loader"):
-            ops._select_loader("nope")
+            ops._require_flm()
 
 
 class TestFlmRestore:
     """Gap 1 of cmsis-flash-completion.md: an FLM operation ends with the core
     parked on the algorithm's own BKPT trampoline, and a plain resume cannot
     move it past that (the halt is the BKPT instruction, not a debug C_HALT
-    request) - only a system reset restarts the DUT's own firmware. The native
-    path halts the core plainly via NRF52Flash.prepare(), so it keeps a plain
-    resume."""
+    request) - only a system reset restarts the DUT's own firmware."""
 
     @pytest.fixture(autouse=True)
     def _clean_algo(self):
@@ -334,16 +326,10 @@ class TestFlmRestore:
         yield
         ops._flm_algo, ops._flm = saved
 
-    def test_flm_loader_resets_before_resuming(self):
+    def test_restore_resets_before_resuming(self):
         cm = _FakeCM()
-        ops._flm_restore("flm", cm)
+        ops._flm_restore(cm)
         assert cm.sysreset_called is True
-        assert cm.is_halted() is False
-
-    def test_native_loader_only_resumes(self):
-        cm = _FakeCM()
-        ops._flm_restore("native", cm)
-        assert cm.sysreset_called is False
         assert cm.is_halted() is False
 
     def test_erase_all_flm_restore_failure_is_reported_not_swallowed(
@@ -364,9 +350,9 @@ class TestFlmRestore:
         _patch_session(monkeypatch, cm=cm)
         fake_flasher = types.SimpleNamespace(
             reload=lambda: None, erase_all=lambda: None)
-        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+        monkeypatch.setattr(ops, "_require_flm", lambda: fake_flasher)
 
-        result = ops.erase_all(loader="flm")
+        result = ops.erase_all()
 
         assert result["ok"] is False
         assert "sysreset failed" in result["err"]
@@ -379,28 +365,28 @@ class TestFlmRestore:
         img = tmp_path / "img.bin"
         img.write_bytes(b"\x00" * 16)
         fake_flasher = types.SimpleNamespace()
-        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+        monkeypatch.setattr(ops, "_require_flm", lambda: fake_flasher)
         monkeypatch.setattr(
             ops, "_flm_program_file", lambda fl, addr, f, verify: len(f.read()))
 
-        result = ops.flash_file(0x1000, str(img), loader="flm")
+        result = ops.flash_file(0x1000, str(img))
 
         assert result["ok"] is True
         assert cm.sysreset_called is True
 
     def test_erase_all_does_not_restore_when_no_algorithm_is_installed(
             self, monkeypatch):
-        # _select_loader raising (no algorithm installed) means nothing has
+        # _require_flm raising (no algorithm installed) means nothing has
         # touched the DUT yet - the finally must not sysreset a DUT that was
-        # never halted. Reproduces a real bug: _select_loader used to be
-        # called inside the try, so this refusal still triggered a restore.
+        # never halted. Reproduces a real bug: the equivalent lookup used to
+        # be called inside the try, so this refusal still triggered a restore.
         monkeypatch.setattr(ops, "time", types.SimpleNamespace(
             ticks_ms=lambda: 0, ticks_diff=lambda a, b: 0))
         cm = _patch_session(monkeypatch, cm=_FakeCM())
         ops._flm_algo = None
 
         with pytest.raises(ValueError, match="no CMSIS flash algorithm installed"):
-            ops.erase_all(loader="flm")
+            ops.erase_all()
 
         assert cm.sysreset_called is False
         assert cm.is_halted() is True     # neither sysreset nor resume ran
@@ -424,9 +410,9 @@ class TestFlmRestore:
             raise RuntimeError("erase failed")
         fake_flasher = types.SimpleNamespace(
             reload=lambda: None, erase_all=_erase_boom)
-        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+        monkeypatch.setattr(ops, "_require_flm", lambda: fake_flasher)
 
-        result = ops.erase_all(loader="flm")
+        result = ops.erase_all()
 
         assert result["ok"] is False
         assert "erase failed" in result["err"]
@@ -443,14 +429,14 @@ class TestFlmRestore:
         img = tmp_path / "img.bin"
         img.write_bytes(b"\x00" * 16)
         fake_flasher = types.SimpleNamespace()
-        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+        monkeypatch.setattr(ops, "_require_flm", lambda: fake_flasher)
 
         def _boom(fl, addr, f, verify):
             raise RuntimeError("program failed")
         monkeypatch.setattr(ops, "_flm_program_file", _boom)
 
         with pytest.raises(RuntimeError, match="program failed"):
-            ops.flash_file(0x1000, str(img), loader="flm")
+            ops.flash_file(0x1000, str(img))
 
         assert cm.sysreset_called is True
 
@@ -470,7 +456,7 @@ class TestFlmRestore:
         _patch_session(monkeypatch, cm=cm)
         fake_flasher = types.SimpleNamespace(
             page_size=64, program=lambda addr, data, erase, verify: None)
-        monkeypatch.setattr(ops, "_select_loader", lambda loader: fake_flasher)
+        monkeypatch.setattr(ops, "_require_flm", lambda: fake_flasher)
         monkeypatch.setattr(ops, "_flm_begin", lambda fl: None)
         monkeypatch.setattr(ops, "_flm_erase_range", lambda fl, a, n: None)
         monkeypatch.setattr(
@@ -484,7 +470,7 @@ class TestFlmRestore:
         monkeypatch.setattr(ops.netutil, "send_all", lambda *a, **k: None,
                             raising=False)
 
-        result = ops.flash_stream(0x1000, 4, port=0, loader="flm")
+        result = ops.flash_stream(0x1000, 4, port=0)
 
         assert "sysreset failed" in result["err"]
 

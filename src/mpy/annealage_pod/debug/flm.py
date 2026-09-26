@@ -1,9 +1,10 @@
 # Generic CMSIS flash-algorithm (FLM) runner (workstream D2.2).
 #
-# Runs a standard CMSIS flash algorithm on the target itself, the general path
-# that works for any chip with a CMSIS pack, as opposed to the per-family native
-# NVM path (flash_nrf52). The algorithm is a position-independent Thumb blob with
-# fixed entry points (Init / UnInit / EraseSector / EraseChip / ProgramPage), the
+# Runs a standard CMSIS flash algorithm on the target itself, the pod's only
+# flash backend: it generalises to any chip with a CMSIS pack rather than
+# needing a per-family driver. The algorithm is a position-independent Thumb
+# blob with fixed entry points (Init / UnInit / EraseSector / EraseChip /
+# ProgramPage), the
 # standard CMSIS-FLM contract (ARM's FlashOS.H); we drive it through the MEM-AP +
 # core registers:
 #

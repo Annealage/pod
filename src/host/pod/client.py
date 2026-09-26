@@ -514,7 +514,7 @@ class Pod:
 
     @staticmethod
     def _flash_stream_cmd(addr: int, total: int, port: int, verify: bool,
-                          loader: str = "native", caller=None) -> str:
+                          caller=None) -> str:
         """Build the on-pod flash_stream invocation (pure, for testability).
 
         caller feeds the pod-side SWD re-entrancy guard (ops._guarded); None
@@ -523,8 +523,8 @@ class Pod:
         """
         return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.flash_stream(%d, %d, port=%d, verify=%s, loader=%r, caller=%r))"
-            % (addr, total, port, bool(verify), loader, caller)
+            "print(o.flash_stream(%d, %d, port=%d, verify=%s, caller=%r))"
+            % (addr, total, port, bool(verify), caller)
         )
 
     @staticmethod
@@ -540,13 +540,12 @@ class Pod:
         )
 
     @staticmethod
-    def _erase_all_cmd(clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native",
-                       caller=None) -> str:
+    def _erase_all_cmd(clkdiv: int = DEFAULT_SWD_CLKDIV, caller=None) -> str:
         """Build the on-pod erase_all invocation (pure, for testability)."""
         return (
             "import annealage_pod.debug.ops as o;"
-            "print(o.erase_all(clkdiv=%d, loader=%r, caller=%r))"
-            % (clkdiv, loader, caller)
+            "print(o.erase_all(clkdiv=%d, caller=%r))"
+            % (clkdiv, caller)
         )
 
     def _stream_region(self, cmd: str, payload, size: int, port: int) -> dict:
@@ -614,7 +613,7 @@ class Pod:
             raise result["exc"]
         return _last_dict(result.get("out", ""))
 
-    # ── generic CMSIS flash algorithm (loader="flm") ─────────────────────
+    # ── CMSIS flash algorithm ─────────────────────────────────────────────
     # The pod carries no flash algorithms. One is extracted here from the
     # target's CMSIS Device Family Pack and installed over the REPL, in base64
     # chunks so a large vendor algorithm is never one huge source literal on
@@ -643,7 +642,7 @@ class Pod:
         )
 
     def install_flm_algo(self, algo: dict) -> dict:
-        """Install a CMSIS flash algorithm on the pod for loader="flm".
+        """Install a CMSIS flash algorithm on the pod.
 
         Stages the algorithm image in base64 chunks, checks the pod received
         every byte, then installs it with the rest of the algo dict. Returns
@@ -715,7 +714,7 @@ class Pod:
         return algo
 
     def ensure_flm_algo(self, addr=None, force: bool = False, **kwargs) -> dict:
-        """Make sure the pod has an algorithm installed for loader="flm".
+        """Make sure the pod has a CMSIS flash algorithm installed.
 
         Free once this client has installed one, so a mass-erase followed by
         several flashes does not re-ship the image or even re-query the pod.
@@ -757,26 +756,22 @@ class Pod:
         self._flm_installed = info
         return info
 
-    def _erase_all_on_pod(self, clkdiv: int = DEFAULT_SWD_CLKDIV,
-                          loader: str = "native") -> dict:
+    def _erase_all_on_pod(self, clkdiv: int = DEFAULT_SWD_CLKDIV) -> dict:
         """Run ops.erase_all() on the pod. No usbip guard - the caller's job,
         so an erase nested inside flash_dut's mass_erase does not re-gate and
         re-log an eviction that the enclosing call already settled."""
-        if loader == "flm":
-            self.ensure_flm_algo()
-        out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, loader=loader,
-                                            caller=self.caller))
+        self.ensure_flm_algo()
+        out = self.exec(self._erase_all_cmd(clkdiv=clkdiv, caller=self.caller))
         return _last_dict(out)
 
-    def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV, loader: str = "native",
+    def erase_dut(self, clkdiv: int = DEFAULT_SWD_CLKDIV,
                   keep_attached: bool = False, force: bool = False) -> dict:
         """Erase the entire DUT flash via the on-pod debug stack.
 
-        Runs ops.erase_all() on the pod over the REPL. loader selects the
-        flash algorithm: "native" (default) for the nRF NVMC mass-erase
-        fast-path, "flm" for the generic CMSIS path, which resolves and
-        installs the target's CMSIS-pack algorithm first if the pod has none.
-        Returns the on-pod result dict {ok, ms, loader, err[, stole_from]}.
+        Runs ops.erase_all() on the pod over the REPL, using the target's
+        CMSIS-pack algorithm (resolved and installed first if the pod has
+        none; see ensure_flm_algo). Returns the on-pod result dict
+        {ok, ms, err[, stole_from]}.
 
         erase_all() halts the core to run, the same DUT-freeze reset and flash
         already guard against, so it goes through the same _guard_live_attach:
@@ -784,7 +779,7 @@ class Pod:
         and refuses when another host holds it unless force=True bumps it.
         """
         stolen = self._guard_live_attach(keep_attached, force=force)
-        result = self._erase_all_on_pod(clkdiv, loader)
+        result = self._erase_all_on_pod(clkdiv)
         if stolen:
             result["stole_from"] = stolen
         return result
@@ -809,7 +804,7 @@ class Pod:
     _FLASH_STREAM_CHUNK = 64 * 1024
 
     def _flash_region_chunked(self, addr: int, data: bytes, port: int,
-                              verify: bool, loader: str) -> dict:
+                              verify: bool) -> dict:
         """Flash a flash region in <=64KB page-aligned sub-flashes (#35), then
         end-to-end verify the whole region once. Returns {ok, addr, bytes[,
         verify, err]}. A sub-flash failure stops and names its address."""
@@ -821,7 +816,7 @@ class Pod:
                 * self._FLASH_STREAM_CHUNK
             sub_end = min(addr + total, boundary)
             n = sub_end - sub_start
-            cmd = self._flash_stream_cmd(sub_start, n, port, verify, loader=loader,
+            cmd = self._flash_stream_cmd(sub_start, n, port, verify,
                                          caller=self.caller)
             sub = self._stream_region(cmd, data[off:off + n], n, port)
             if not sub.get("ok"):
@@ -870,14 +865,15 @@ class Pod:
                   addr: int = 0, verify: bool = True, port: int = 3333,
                   keep_attached: bool = False,
                   mass_erase: bool = False,
-                  loader: Optional[str] = None,
                   force: bool = False) -> dict:
         """Flash a firmware image to the DUT, streamed into pod RAM (no pod FS).
 
         The pod runs a TCP receiver that double-buffers the image into two RAM
         buffers (Wi-Fi fills one while SWD programs the other) and never writes
         the image to its filesystem. The host starts that receiver over the REPL
-        and streams the file straight to it.
+        and streams the file straight to it. Flashing runs the target's
+        CMSIS-pack flash algorithm (resolved and installed on the pod first if
+        it has none; see ensure_flm_algo).
 
         With verify=True (default) each flash region is checked end-to-end after
         programming: the region is re-read over SWD (ops.flash_crc) and its CRC32
@@ -900,22 +896,17 @@ class Pod:
             - Returns {ok, segments:[...], bytes, err}; stops at the first failed
               segment (err names it), leaving the earlier segments applied.
             addr is ignored for ELF images.
-            loader selects the flash algorithm for both erase (if mass_erase=True)
-            and per-segment programming. Defaults to "native" (nRF NVMC);
-            "flm" runs the target's CMSIS-pack algorithm, resolved and installed
-            on the pod first (see ensure_flm_algo) if it has none.
 
         For flat binaries (non-ELF): single-segment flash at addr. mass_erase
-        issues ops.erase_all() before streaming. Defaults to "native" for
-        backward compatibility. Returns {ok, addr, bytes, err}.
+        issues ops.erase_all() before streaming. Returns {ok, addr, bytes, err}.
 
-        target names the CMSIS device to resolve a "flm" algorithm for (e.g.
+        target names the CMSIS device to resolve the algorithm for (e.g.
         "nRF52840_xxAA"), overriding the registry's declared target_family for
         this flash; a device with several algorithms may need this to pick a
-        different one than addr alone would. Ignored for loader="native".
-        Naming a different device than whatever is cached/installed resolves
-        and installs fresh (ensure_flm_algo treats the mismatch as a cache
-        miss); naming the same one reuses the cache as usual.
+        different one than addr alone would. Naming a different device than
+        whatever is cached/installed resolves and installs fresh
+        (ensure_flm_algo treats the mismatch as a cache miss); naming the same
+        one reuses the cache as usual.
 
         Detaches a live USB/IP session first (re-enumerating the DUT mid-forward
         wedges the pod); pass keep_attached=True to override. Refuses when
@@ -932,25 +923,17 @@ class Pod:
                 raise ValueError(
                     "DUT flash geometry (flash_base + flash_size) must be "
                     "declared in the registry dut block to flash an ELF image")
-            # Default to "native" (nRF NVMC), the validated per-family path that
-            # needs no algorithm install. Both erase and program use the same
-            # backend so they agree on the flash layout.
-            elf_loader = loader if loader is not None else "native"
-            if elf_loader == "flm":
-                self.ensure_flm_algo(addr=flash_ranges[0][0], device=target)
+            self.ensure_flm_algo(addr=flash_ranges[0][0], device=target)
             result = self._flash_dut_elf(
                 image, flash_ranges=flash_ranges, port=port, verify=verify,
-                mass_erase=mass_erase, loader=elf_loader)
+                mass_erase=mass_erase)
         else:
-            # Flat binary path - default "native" preserves prior behaviour.
-            bin_loader = loader if loader is not None else "native"
-            if bin_loader == "flm":
-                self.ensure_flm_algo(addr=addr, device=target)
+            self.ensure_flm_algo(addr=addr, device=target)
             if mass_erase:
                 # No further gate: the guard above already settled whether this
                 # call may proceed at all, and re-checking here would refuse a
                 # forced bump the caller already paid for.
-                erase_result = self._erase_all_on_pod(loader=bin_loader)
+                erase_result = self._erase_all_on_pod()
                 if not erase_result.get("ok"):
                     result = erase_result
                 else:
@@ -964,8 +947,7 @@ class Pod:
                 # are small, and the verify reads it anyway.
                 with open(image, "rb") as f:
                     data = f.read()
-                result = self._flash_region_chunked(addr, data, port, verify,
-                                                    bin_loader)
+                result = self._flash_region_chunked(addr, data, port, verify)
 
         if stolen:
             result = dict(result, stole_from=stolen)
@@ -973,15 +955,12 @@ class Pod:
 
     def _flash_dut_elf(self, image: str, flash_ranges: list,
                        port: int = 3333, verify: bool = True,
-                       mass_erase: bool = False,
-                       loader: str = "native") -> dict:
+                       mass_erase: bool = False) -> dict:
         """Flash an ELF image segment-by-segment via flash_stream / write_mem_stream.
 
-        loader is used for both the mass_erase (if requested) and every flash
-        segment, so erase and program always use the same algorithm backend.
-        RAM segments use write_mem_stream regardless of loader (no flash algo
-        involved). Returns an aggregated dict {ok, segments, bytes}. Assumes
-        the caller (flash_dut) already ran the usbip guard; does not re-gate.
+        RAM segments use write_mem_stream (no flash algo involved). Returns an
+        aggregated dict {ok, segments, bytes}. Assumes the caller (flash_dut)
+        already ran the usbip guard; does not re-gate.
         """
         from pod.elf_loader import parse_load_segments
 
@@ -990,7 +969,7 @@ class Pod:
             raise ValueError("ELF has no PT_LOAD segments with data to program")
 
         if mass_erase:
-            erase_result = self._erase_all_on_pod(loader=loader)
+            erase_result = self._erase_all_on_pod()
             if not erase_result.get("ok"):
                 return {"ok": False, "segments": [], "bytes": 0,
                         "err": erase_result.get("err", "erase_all failed")}
@@ -1006,8 +985,7 @@ class Pod:
                 # <=64KB sub-flashes (#35) + end-to-end CRC verify of the segment:
                 # the per-chunk verify in the program path cannot catch a chunk
                 # lost mid-stream, so the whole segment is re-read and compared.
-                seg_dict = self._flash_region_chunked(lma, data, port, verify,
-                                                      loader)
+                seg_dict = self._flash_region_chunked(lma, data, port, verify)
             else:
                 # Guard the RAM write with the DUT's DECLARED flash geometry, not
                 # the pod's nRF-hardcoded FLASH_TOP, so "no MEM-AP write into a

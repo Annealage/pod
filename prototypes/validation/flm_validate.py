@@ -11,7 +11,7 @@ the mechanism that generalises to any chip with a CMSIS pack.
 
 Method:
   1. host resolves the DUT's declared target_family from its CMSIS pack and
-     installs it on the pod (ops.set_flm_algo), the same path loader="flm"
+     installs it on the pod (ops.set_flm_algo), the same path every flash/erase
      uses in production;
   2. pick a high scratch flash page (0xF8000, well clear of low/used flash) and
      save its current 4 KB contents via the MEM-AP;
@@ -44,9 +44,9 @@ N = {n}
 
 res = {{"ok": False, "addr": ADDR}}
 try:
-    dp, ap, cm, fl = o._ensure()
-    fr = o._select_loader("flm")
-    # reload(), not load(): _select_loader may return an FLMFlasher cached from
+    dp, ap, cm = o._ensure()
+    fr = o._require_flm()
+    # reload(), not load(): _require_flm may return an FLMFlasher cached from
     # an earlier operation in this same pod session, whose _loaded=True no
     # longer holds - _flm_restore's sysreset (between that operation and this
     # one) reboots the DUT into its own firmware, which runs over and clobbers
@@ -93,7 +93,7 @@ try:
             off += PAGE
         fr.uninit(2)
 
-    o._flm_restore("flm", cm)
+    o._flm_restore(cm)
     res = {{"ok": mismatch < 0, "addr": ADDR, "n": N, "mismatch": mismatch,
             "saved_dirty": saved_dirty,
             "rb_head": rb[:8].hex(), "want_head": pattern[:8].hex()}}

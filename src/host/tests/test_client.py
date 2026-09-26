@@ -121,12 +121,6 @@ class TestDutOps:
         assert "verify=True" in cmd
         # addr is rendered as the decimal of 0x1000
         assert str(0x1000) in cmd
-        # default loader is "native" (backward compat for the flat binary path)
-        assert "loader='native'" in cmd
-
-    def test_flash_stream_cmd_explicit_loader(self):
-        cmd = Pod._flash_stream_cmd(0x0, 256, 3333, True, loader="flm")
-        assert "loader='flm'" in cmd
 
     def test_reset_dut_invokes_reset(self, pod_fake, fake_runner):
         fake_runner.return_value = MagicMock(
@@ -755,6 +749,11 @@ class TestUsbipConflictGate:
                             lambda self, resource=None, timeout=3.0:
                                 {"usbip": {"caller": "other@host/1"}})
         monkeypatch.setattr(_Pod, "attached_ports", lambda self: [])
+        # This class is about the usbip anti-bump gate, not CMSIS algorithm
+        # resolution: stand in for an already-installed algorithm so
+        # flash_dut/erase_dut do not go looking for a pack.
+        monkeypatch.setattr(_Pod, "ensure_flm_algo",
+                            lambda self, **kw: {"installed": True})
 
         def _fake_exec(code):
             if "holders" in code and "evict" in code:
@@ -855,8 +854,10 @@ class TestUsbipConflictGate:
         assert len(evicted) == 1      # exactly one eviction log, not two
 
 
-class TestFlashDutLoaderConsistency:
-    """Verify loader is threaded consistently through flash_dut / _flash_dut_elf."""
+class TestFlashDutUsesFlm:
+    """flash_dut/_flash_dut_elf always resolve and install the DUT's CMSIS
+    algorithm before flashing or erasing (see ensure_flm_algo); there is no
+    other flash backend to thread through."""
 
     def _make_elf_pod(self, monkeypatch, fake_runner):
         """Pod with ELF geometry declared and elf_loader stubbed out."""
@@ -870,151 +871,54 @@ class TestFlashDutLoaderConsistency:
         p._elf_flash_ranges = [(0x0, 0x100000)]
         return p
 
-    def test_flash_stream_cmd_default_loader_native(self):
-        # The static helper's default stays "native" (flat binary backward compat).
-        cmd = Pod._flash_stream_cmd(0x0, 64, 3333, True)
-        assert "loader='native'" in cmd
-
-    def test_elf_flash_defaults_to_native(self, monkeypatch, fake_runner):
-        # ELF path defaults to "native" (nRF NVMC); the generic "flm" path awaits a
-        # host-supplied on-demand CMSIS-pack algorithm. A flash_dut on an ELF with no
-        # loader must thread loader='native' into both the erase and the flash segments.
+    def test_elf_flash_resolves_the_algorithm_before_streaming(
+            self, monkeypatch, fake_runner):
         p = self._make_elf_pod(monkeypatch, fake_runner)
-        fake_runner.return_value = MagicMock(
-            stdout="{'ok': True, 'ms': 100, 'loader': 'native', 'err': None}\n",
-            returncode=0)
-        stream_cmds = []
-
-        def _fake_stream(cmd, payload, size, port):
-            stream_cmds.append(cmd)
-            return {"ok": True, "addr": 0, "bytes": size, "err": None,
-                    "loader": "native"}
-
-        monkeypatch.setattr(p, "_stream_region", _fake_stream)
+        seen = {}
+        monkeypatch.setattr(
+            p, "ensure_flm_algo",
+            lambda **kw: seen.update(kw) or {"installed": True})
+        monkeypatch.setattr(
+            p, "_stream_region",
+            lambda cmd, payload, size, port: {"ok": True, "addr": 0,
+                                              "bytes": size, "err": None})
         monkeypatch.setattr(p, "_verify_flashed", lambda *a, **k: {"ok": True})
-        p.flash_dut("fake.elf", mass_erase=True)   # no loader -> ELF default
-        erase_code = fake_runner.call_args[0][0][4]
-        assert "loader='native'" in erase_code, (
-            "erase_all defaulted to wrong loader: %r" % erase_code)
-        assert stream_cmds, "no _stream_region call recorded"
-        assert "loader='native'" in stream_cmds[0], (
-            "flash_stream defaulted to wrong loader: %r" % stream_cmds[0])
 
-    def test_elf_mass_erase_and_program_use_same_loader(self, monkeypatch,
-                                                         fake_runner):
-        # Both erase_dut and flash_stream must receive the same loader when
-        # mass_erase=True on an ELF image. Capture on-pod code strings.
+        p.flash_dut("fake.elf")
+
+        assert seen.get("addr") == 0x0
+
+    def test_elf_mass_erase_happens_before_segments_stream(
+            self, monkeypatch, fake_runner):
+        # mass_erase=True on an ELF image must erase before any segment is
+        # streamed; capture ordering via a shared events list.
         import pod.elf_loader as el
         import pod.usbip as u
-        import threading, socket as _socket
 
         monkeypatch.setattr(u, "ports", lambda: [])
         monkeypatch.setattr(el, "is_elf", lambda path: True)
         monkeypatch.setattr(el, "parse_load_segments",
                             lambda path, ranges: [(0x0, b"\xaa" * 8, "flash")])
 
-        codes_seen = []
-        # fake_runner is only used for the erase_dut exec call;
-        # _stream_region does its own socket IO which we short-circuit below.
-        fake_runner.return_value = MagicMock(
-            stdout="{'ok': True, 'ms': 100, 'loader': 'flm', 'err': None}\n",
-            returncode=0)
         p = Pod(addr4="10.0.0.1", runner=fake_runner)
         p._elf_flash_ranges = [(0x0, 0x100000)]
-
-        # Capture what _stream_region is called with (the cmd string), then
-        # short-circuit the actual network IO.
-        stream_cmds = []
-
-        def _fake_stream(cmd, payload, size, port):
-            stream_cmds.append(cmd)
-            return {"ok": True, "addr": 0, "bytes": size, "err": None,
-                    "loader": "flm"}
-
-        monkeypatch.setattr(p, "_stream_region", _fake_stream)
-        # This test is about loader threading, not the end-to-end verify; stub the
-        # read-back so it does not add its own exec call and shift call_args.
-        monkeypatch.setattr(p, "_verify_flashed", lambda *a, **k: {"ok": True})
-        # This test is about loader threading, not algorithm resolution: stand
-        # in for an already-installed CMSIS algorithm so erase_dut does not go
-        # looking for a pack.
         p._flm_installed = {"installed": True, "name": "fake"}
 
-        p._flash_dut_elf("fake.elf", flash_ranges=[(0x0, 0x100000)],
-                         port=3333, verify=True, mass_erase=True, loader="flm")
-
-        # erase_dut exec call: the code sent to the pod must use loader='flm'
-        erase_code = fake_runner.call_args[0][0][4]
-        assert "loader='flm'" in erase_code, (
-            "erase_all called with wrong loader: %r" % erase_code)
-
-        # flash_stream call: the streamed segment must also use loader='flm'
-        assert stream_cmds, "no _stream_region call recorded"
-        assert "loader='flm'" in stream_cmds[0], (
-            "flash_stream called with wrong loader: %r" % stream_cmds[0])
-
-    def test_elf_explicit_native_loader_threads_through(self, monkeypatch,
-                                                         fake_runner):
-        # An explicit loader="native" override on flash_dut must reach both
-        # erase_dut and flash_stream (for users that opt into the nRF fast-path).
-        import pod.elf_loader as el
-        import pod.usbip as u
-
-        monkeypatch.setattr(u, "ports", lambda: [])
-        monkeypatch.setattr(el, "is_elf", lambda path: True)
-        monkeypatch.setattr(el, "parse_load_segments",
-                            lambda path, ranges: [(0x0, b"\xaa" * 8, "flash")])
-
-        fake_runner.return_value = MagicMock(
-            stdout="{'ok': True, 'ms': 50, 'loader': 'native', 'err': None}\n",
-            returncode=0)
-        p = Pod(addr4="10.0.0.1", runner=fake_runner)
-        p._elf_flash_ranges = [(0x0, 0x100000)]
-
-        stream_cmds = []
+        events = []
+        monkeypatch.setattr(
+            p, "_erase_all_on_pod",
+            lambda *a, **k: events.append("erase") or {"ok": True})
 
         def _fake_stream(cmd, payload, size, port):
-            stream_cmds.append(cmd)
+            events.append("stream")
             return {"ok": True, "addr": 0, "bytes": size, "err": None}
 
         monkeypatch.setattr(p, "_stream_region", _fake_stream)
-        # Loader-threading test; stub the read-back verify (see above).
         monkeypatch.setattr(p, "_verify_flashed", lambda *a, **k: {"ok": True})
 
-        p.flash_dut("fake.elf", mass_erase=True, loader="native")
+        p.flash_dut("fake.elf", mass_erase=True)
 
-        erase_code = fake_runner.call_args[0][0][4]
-        assert "loader='native'" in erase_code
-        assert stream_cmds and "loader='native'" in stream_cmds[0]
-
-    def test_flat_binary_defaults_to_native(self, monkeypatch, fake_runner):
-        # Flat binary path must default to "native" (backward compat).
-        import pod.elf_loader as el
-        import pod.usbip as u
-        import tempfile, os
-
-        monkeypatch.setattr(u, "ports", lambda: [])
-        monkeypatch.setattr(el, "is_elf", lambda path: False)
-
-        p = Pod(addr4="10.0.0.1", runner=fake_runner)
-
-        stream_cmds = []
-
-        def _fake_stream(cmd, payload, size, port):
-            stream_cmds.append(cmd)
-            return {"ok": True, "addr": 0, "bytes": size, "err": None}
-
-        monkeypatch.setattr(p, "_stream_region", _fake_stream)
-
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            f.write(b"\x00" * 16)
-            tmp = f.name
-        try:
-            p.flash_dut(tmp)
-        finally:
-            os.unlink(tmp)
-
-        assert stream_cmds and "loader='native'" in stream_cmds[0]
+        assert events == ["erase", "stream"]
 
     def test_flat_binary_target_reaches_flm_resolution(self, monkeypatch,
                                                         fake_runner):
@@ -1037,7 +941,7 @@ class TestFlashDutLoaderConsistency:
             f.write(b"\x00" * 16)
             tmp = f.name
         try:
-            p.flash_dut(tmp, target="STM32F407VG", loader="flm")
+            p.flash_dut(tmp, target="STM32F407VG")
         finally:
             os.unlink(tmp)
 
@@ -1053,7 +957,7 @@ class TestFlashDutLoaderConsistency:
             p, "_flash_dut_elf",
             lambda *a, **k: {"ok": True, "segments": [], "bytes": 0, "err": None})
 
-        p.flash_dut("fake.elf", target="STM32F407VG", loader="flm")
+        p.flash_dut("fake.elf", target="STM32F407VG")
 
         assert seen.get("device") == "STM32F407VG"
 
@@ -1198,6 +1102,7 @@ class TestFlashVerify:
         img = tmp_path / "fw.bin"
         img.write_bytes(b"\xa5" * 4096)
         p = Pod(addr4="10.0.0.1")
+        monkeypatch.setattr(p, "ensure_flm_algo", lambda **kw: {"installed": True})
         monkeypatch.setattr(p, "_stream_region",
                             lambda cmd, payload, size, port: {"ok": True, "addr": 0, "bytes": size})
         monkeypatch.setattr(p, "flash_crc",
@@ -1218,6 +1123,7 @@ class TestFlashVerify:
         img.write_bytes(data)
         want = zlib.crc32(data) & 0xFFFFFFFF
         p = Pod(addr4="10.0.0.1")
+        monkeypatch.setattr(p, "ensure_flm_algo", lambda **kw: {"installed": True})
         monkeypatch.setattr(p, "_stream_region",
                             lambda cmd, payload, size, port: {"ok": True, "addr": 0, "bytes": size})
         monkeypatch.setattr(p, "flash_crc",
@@ -1234,6 +1140,7 @@ class TestFlashVerify:
         img = tmp_path / "fw.bin"
         img.write_bytes(b"\x00" * 512)
         p = Pod(addr4="10.0.0.1")
+        monkeypatch.setattr(p, "ensure_flm_algo", lambda **kw: {"installed": True})
         monkeypatch.setattr(p, "_stream_region",
                             lambda cmd, payload, size, port: {"ok": True, "addr": 0, "bytes": size})
         called = []
@@ -1254,7 +1161,7 @@ class TestFlashChunking:
         p = Pod(address=ADDRESS, repl_port=PORT)
         subs = []
 
-        def fake_cmd(a, n, port, verify, loader="native", caller=None):
+        def fake_cmd(a, n, port, verify, caller=None):
             subs.append((a, n))
             return "CMD"
 
@@ -1267,14 +1174,14 @@ class TestFlashChunking:
 
     def test_small_region_single_subflash(self):
         p = self._chunk_pod()
-        r = p._flash_region_chunked(0x0, b"\x00" * 4096, 3333, True, "native")
+        r = p._flash_region_chunked(0x0, b"\x00" * 4096, 3333, True)
         assert r["ok"] is True
         assert p._subs == [(0x0, 4096)]
 
     def test_large_aligned_region_splits_at_64k(self):
         p = self._chunk_pod()
         data = b"\x00" * (150 * 1024)
-        r = p._flash_region_chunked(0x0, data, 3333, True, "native")
+        r = p._flash_region_chunked(0x0, data, 3333, True)
         assert r["ok"] is True
         assert p._subs == [(0x0, 65536), (0x10000, 65536), (0x20000, 22528)]
         assert all(n <= 64 * 1024 for _, n in p._subs)
@@ -1284,7 +1191,7 @@ class TestFlashChunking:
         p = self._chunk_pod()
         data = b"\x00" * (80 * 1024)
         start = 0x1000
-        r = p._flash_region_chunked(start, data, 3333, True, "native")
+        r = p._flash_region_chunked(start, data, 3333, True)
         assert r["ok"] is True
         # first sub-flash runs only to the next 64KB boundary
         assert p._subs[0] == (0x1000, 0x10000 - 0x1000)
@@ -1307,7 +1214,7 @@ class TestFlashChunking:
             return {"ok": len(calls) < 2, "err": "reset"}   # 2nd sub-flash fails
 
         p._stream_region = failing_stream
-        r = p._flash_region_chunked(0x0, b"\x00" * (100 * 1024), 3333, True, "native")
+        r = p._flash_region_chunked(0x0, b"\x00" * (100 * 1024), 3333, True)
         assert r["ok"] is False
         assert "0x00010000" in r["err"]          # the failing sub-flash address
 
@@ -1317,13 +1224,13 @@ class TestFlashChunking:
         p._verify_flashed = lambda lma, source, **k: (
             vcalls.append((lma, len(source))) or {"ok": True})
         data = b"\xaa" * (130 * 1024)
-        r = p._flash_region_chunked(0x0, data, 3333, True, "native")
+        r = p._flash_region_chunked(0x0, data, 3333, True)
         assert r["ok"] is True
         assert vcalls == [(0x0, 130 * 1024)]     # one verify, whole region
 
 
 class TestFlmAlgoInstall:
-    """Shipping a CMSIS algorithm to the pod for loader="flm".
+    """Shipping a CMSIS algorithm to the pod.
 
     The image goes over the REPL in base64 chunks (a vendor algorithm is tens
     of KB and must not become one huge source literal on the pod), then the
@@ -1421,7 +1328,7 @@ class TestFlmAlgoInstall:
         # a device= that disagrees with what is cached/installed must not be
         # silently ignored (naming a device is a request for that one, not a
         # hint the caller thinks force= might be needed) - otherwise a fresh
-        # `pod dut flash --target X --loader flm` process can flash a real DUT
+        # `pod dut flash --target X` process can flash a real DUT
         # with the wrong part's algorithm with no error.
         p = Pod(addr4="10.0.0.1")
         p._flm_installed = {"installed": True, "name": "nRF52840_xxAA"}
