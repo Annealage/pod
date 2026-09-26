@@ -23,6 +23,7 @@ Email **andrew@alelec.net** with your company name and country, a short descript
 The commercial licence covers only code whose copyright Andrew Leech holds. Third-party code in this repository stays under its own licence regardless of which licence you take Pod under:
 
 - the vendored ARM CMSIS-DAP sources under `src/c_modules/dapprobe/vendor/cmsis-dap/`, and the port files derived from them, are Apache-2.0;
+- the Waveshare RP2350B board header, `src/boards/ANNEALAGE_POD_RP2350B/waveshare_rp2350b_plus_w.h`, is BSD-3-Clause;
 - the `src/micropython` submodule and the libraries it pulls in (MicroPython, TinyUSB, lwIP, the Pico SDK, cyw43-driver, BTstack, ESP-IDF and others) keep their own licences, some of which restrict use, for example cyw43-driver to Raspberry Pi silicon.
 
 [`REUSE.toml`](REUSE.toml), the SPDX headers and [`LICENSES/`](LICENSES/) record the licence of every file. Whatever licence you take Pod under, you must meet those components' terms, including preserving their notices.
