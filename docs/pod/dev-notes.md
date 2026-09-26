@@ -181,9 +181,9 @@ that is a separate, deliberate operation, not part of the flash path.
   (1.66 KB/s) at 9.375 MHz. Still Python/SWD-overhead-bound, not clock-bound.
 - Memory: `MEMAP.read_block32` materialises a Python list, a full-image block
   read exhausts the pod heap (worse under socket+`mount`, which adds RemoteFS
-  overhead). Program and verify in bounded chunks (`flash_nrf52` uses
-  `chunk_words`); for real images stream from a pod-side file rather than holding
-  the image in RAM.
+  overhead). Program and verify in bounded chunks (`flm.FLMFlasher` programs
+  one page at a time); for real images stream from a pod-side file rather than
+  holding the image in RAM.
 - SWD clock: the default is `clkdiv=16` (`swd_pio.DEFAULT_CLKDIV`) = 4.69 MHz
   write / 3.13 MHz read, inside the nRF52840's characterised 8 MHz SWDCLK max.
   The PIO clocks the write phase at 2 cyc/bit and the read phase at 3 cyc/bit, so
@@ -323,17 +323,16 @@ low-SRAM region the algorithm was loaded into, so the blob is gone the moment
 the DUT's own code starts running. `ops.py`'s three entry points
 (`flash_file`/`flash_stream`/`erase_all`) are safe because each calls
 `_flm_begin()` -> `reload()` at the start of its own operation regardless of
-what `_select_loader("flm")` handed back (a fresh instance or last
-operation's cached one), forcing a re-upload every time.
+what `_require_flm()` handed back (a fresh instance or last operation's
+cached one), forcing a re-upload every time.
 
-A script driving `_select_loader("flm")` directly - `flm_validate.py`, or
-anything at a REPL - does not get that for free, and `_select_loader` may
-return the **same cached `FLMFlasher`** from an earlier operation in the same
-pod session with `_loaded` still `True`. Calling `.load()` on it trusts that
-stale flag and skips the re-upload; the algorithm's entry points then run
-against whatever the DUT's own firmware left in that SRAM, which produces
-nonsense - hit hardware-validating gap 2 (2026-09-03) as an `Init()` call
-hanging with PC wandered off to `0x20000170` (deep inside neither the
-algorithm nor the BKPT trampoline) until `_call`'s timeout fired. Call
-`.reload()` instead of `.load()` whenever driving `_select_loader("flm")`'s
-result directly.
+A script driving `_require_flm()` directly - `flm_validate.py`, or anything at
+a REPL - does not get that for free, and `_require_flm` may return the **same
+cached `FLMFlasher`** from an earlier operation in the same pod session with
+`_loaded` still `True`. Calling `.load()` on it trusts that stale flag and
+skips the re-upload; the algorithm's entry points then run against whatever
+the DUT's own firmware left in that SRAM, which produces nonsense - hit
+hardware-validating gap 2 (2026-09-03) as an `Init()` call hanging with PC
+wandered off to `0x20000170` (deep inside neither the algorithm nor the BKPT
+trampoline) until `_call`'s timeout fired. Call `.reload()` instead of
+`.load()` whenever driving `_require_flm()`'s result directly.

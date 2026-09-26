@@ -119,12 +119,12 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   PIO0 (per-SM arbiter claims + per-program PIO teardown), so an agent can watch the
   bus the pod is driving. Phases A-D landed and hardware-validated (`4ff1b77`);
   Phase E's SWD-puppet byte-pattern cross-check is the one piece left to confirm.
-- `cmsis-flash-completion.md` - finishing the generic CMSIS-FLM flash path and
-  deleting the hand-written native nRF52 driver it was a stand-in for. Covers the
-  FLM resume bug that leaves the DUT parked on the algorithm's breakpoint, the
+- `cmsis-flash-completion.md` - finished the generic CMSIS-FLM flash path and
+  deleted the hand-written native nRF52 driver it was a stand-in for. Covered the
+  FLM resume bug that left the DUT parked on the algorithm's breakpoint, the
   unvalidated host pack-to-algo layer, the dropped FlashDevice timeouts, and the
-  pack-versus-registry geometry question. Native is retained only as the revert
-  tool through the validation steps, then removed.
+  pack-versus-registry geometry question. The generic CMSIS-FLM runner is now the
+  only flash backend; `flash_nrf52.py` and the `loader` parameter are gone.
 
 ### Agent-surface track (execution order)
 

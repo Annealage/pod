@@ -1,9 +1,9 @@
 # RP2350 on-pod debug stack (`annealage_pod.debug`)
 
 The pod debugs a DUT over SWD entirely in MicroPython: a PIO bit transport, an
-ADIv5 DP/AP/MEM-AP layer, a per-family flash loader, and a thin high-level
-`ops` module that the host `pod` tool drives over the REPL. This is the RP2350
-target's replacement for exporting a synthetic CMSIS-DAP probe.
+ADIv5 DP/AP/MEM-AP layer, a generic CMSIS flash-algorithm runner, and a thin
+high-level `ops` module that the host `pod` tool drives over the REPL. This is
+the RP2350 target's replacement for exporting a synthetic CMSIS-DAP probe.
 
 For the host-side `pod` CLI / library / MCP that calls into this, see
 `src/host/README.md`. For development gotchas (USB-CDC dev transport, `resume`
@@ -19,13 +19,12 @@ hardware-validated results, see `spike-findings.md` section 6.
   gives intermittent ACK=3 / parity errors, worst on a cold DUT.
 - PIO allocation (authoritative map: `annealage_pod.debug.pio_arbiter.PIO_MAP`):
   CYW43 Wi-Fi runs on PIO2 (reserved, never claimable), the SWD transport uses
-  PIO1 SM4, and the logic analyser plus the optional write-streamer use PIO0 (the
-  free block). Do not build a state machine on PIO2 - it hard-wedges Wi-Fi.
+  PIO1 SM4, and the logic analyser uses PIO0 (the free block). Do not build a
+  state machine on PIO2 - it hard-wedges Wi-Fi.
 - Validated target: nRF52840 (PCA10059). Other Cortex-M targets work at the
-  DP/AP/MEM-AP level; flashing has the nRF52 native-NVM path plus the generic
-  CMSIS-FLM runner (per-target algo required; both validated on the nRF52840
-  only). Per-DUT-family status: the "DUT compatibility" table in
-  [../website-features.md](../website-features.md).
+  DP/AP/MEM-AP level; flashing runs the generic CMSIS-FLM runner against a
+  per-target algo (validated on the nRF52840 only). Per-DUT-family status: the
+  "DUT compatibility" table in [../website-features.md](../website-features.md).
 
 ## Layers
 
@@ -33,9 +32,7 @@ hardware-validated results, see `spike-findings.md` section 6.
 |---|---|
 | `swd_pio.SWDPio` | SWD bit transport on a PIO state machine; raw DP/AP read/write, plus inlined `read_drw_block` / `write_drw_block` for fast block transfer. |
 | `swd_dap.DebugPort` / `MEMAP` / `CortexM` | ADIv5 debug port (line bring-up, power, SELECT banking, sticky-error recovery, `resync`), MEM-AP (8/16/32-bit + 32-bit block with TAR auto-increment), and Cortex-M halt/resume/reset. |
-| `flash_nrf52.NRF52Flash` | nRF52 NVMC flash loader (erase / program / verify) driven through the MEM-AP, bounded-memory chunked. The per-family native path. |
-| `flm.FLMFlasher` + `flm_<target>.py` | Generic CMSIS flash-algorithm runner: loads a vendor FLM blob into target RAM and calls its Init/EraseSector/ProgramPage. Works for any chip with a CMSIS pack. |
-| `swd_stream.DRWStreamer` | Experimental, opt-in PIO0 write-streamer (see below). |
+| `flm.FLMFlasher` | Generic CMSIS flash-algorithm runner: loads a vendor FLM blob into target RAM and calls its Init/EraseSector/ProgramPage. Works for any chip with a CMSIS pack. |
 | `dbgsrv` (pod) + `pod.gdbserver` (host) | GDB debugging: a binary debug-command server on the pod (port 3335) plus a host GDB RSP translator, so host `gdb` debugs a DUT through the pod. FPB hardware breakpoints live in `CortexM`. |
 | `ops` | High-level entry points the host drives over the REPL. |
 
@@ -54,7 +51,7 @@ The package must be importable on the pod. Two ways:
       except OSError: pass"
   mpremote connect "$DEV" resume cp src/mpy/annealage_pod/__init__.py :/lib/annealage_pod/__init__.py
   mpremote connect "$DEV" resume cp src/mpy/annealage_pod/_version.py :/lib/annealage_pod/_version.py
-  for f in __init__ swd_pio swd_dap flash_nrf52 swd_stream ops; do
+  for f in __init__ swd_pio swd_dap flm ops; do
     mpremote connect "$DEV" resume cp "src/mpy/annealage_pod/debug/$f.py" ":/lib/annealage_pod/debug/$f.py"
   done
   ```
@@ -65,11 +62,11 @@ The package must be importable on the pod. Two ways:
 
 ## `ops` API (the host-facing interface)
 
-`ops` lazily creates one `DebugPort`/`MEMAP`/`CortexM`/`NRF52Flash` session and
-reuses it across calls (so repeated host commands do not re-create PIO state
-machines). All functions take an optional `clkdiv` (default `swd_pio.DEFAULT_CLKDIV`
-= 16). Passing a different `clkdiv` than the live session rebuilds the SWD
-transport at the new clock (the target's halt/breakpoint state is preserved).
+`ops` lazily creates one `DebugPort`/`MEMAP`/`CortexM` session and reuses it
+across calls (so repeated host commands do not re-create PIO state machines).
+All functions take an optional `clkdiv` (default `swd_pio.DEFAULT_CLKDIV` = 16).
+Passing a different `clkdiv` than the live session rebuilds the SWD transport
+at the new clock (the target's halt/breakpoint state is preserved).
 
 Every function below except `stage_flm_blob`/`set_flm_algo`/`flm_algo_info`
 also takes an optional `caller` keyword: a label the `Pod` client always
@@ -84,12 +81,12 @@ calling `ops.*` directly, e.g. from a human at the REPL) is never gated -
 deliberate god-mode, not an oversight.
 
 - `info() -> {dpidr, cpuid, part, flash_kb, ram_kb}` - identify the target.
-- `flash_stream(addr, total_len, port=3333, chunk=4096, verify=True, loader="native") -> {ok, addr, bytes, err}`
+- `flash_stream(addr, total_len, port=3333, chunk=4096, verify=True) -> {ok, addr, bytes, err}`
   Open a short-lived TCP receiver on `port`; the host connects and streams the
   image straight into a pod RAM buffer that is erased-once then programmed +
   verified chunk by chunk. Nothing is written to the pod filesystem. This is
   what `Pod.flash_dut` drives.
-- `flash_file(addr, path, verify=True, chunk_words=256, loader="native") -> {ok, addr, bytes, ms}`
+- `flash_file(addr, path, verify=True) -> {ok, addr, bytes, ms}`
   Program from a pod-resident file in bounded chunks. Use when the image is
   already on the pod; otherwise prefer `flash_stream` (no filesystem).
 - `flash_crc(addr, length, clkdiv=16) -> {ok, crc, addr, length, err}` - CRC32 of a
@@ -102,10 +99,8 @@ deliberate god-mode, not an oversight.
   string); an all-`0xff` region returns the CRC of `0xff` bytes, which a real image
   never matches. See `troubleshooting.md` Cause 3.
 
-Both take a `loader` selecting the flash backend: `loader="native"` (default) is
-the per-family native path (the validated nRF52 NVMC loader, `flash_nrf52`);
-`loader="flm"` runs the generic CMSIS-FLM algorithm in target SRAM (`flm`, see
-"Generic CMSIS-FLM flashing" below). Both are validated on the nRF52840.
+Both run the generic CMSIS-FLM algorithm in target SRAM (`flm`, see "Generic
+CMSIS-FLM flashing" below), validated on the nRF52840.
 - `dump_stream(addr, length, port=3334) -> {ok, addr, bytes, err}`
   Open a short-lived TCP sender on `port`; reads the target in bounded blocks
   and streams them to the host. The only path that returns target contents.
@@ -173,11 +168,10 @@ cm.halt()
 print(hex(ap.read32(0xE000ED00)))                  # CPUID
 words = ap.read_block32(0x10000000, 16)            # block read, TAR auto-increment
 cm.resume()
-
-import annealage_pod.debug.flash_nrf52 as fl
-flash = fl.NRF52Flash(ap, cm)
-flash.program(0x000FF000, open("img.bin","rb").read(), erase=True, verify=True)
 ```
+
+Flashing goes through `flm.FLMFlasher` against a CMSIS algorithm dict; see
+"Generic CMSIS-FLM flashing" below for the driving example.
 
 ## Throughput
 
@@ -187,9 +181,8 @@ the bound; reads were the original bottleneck until `read_drw_block` was inlined
 
 ## Generic CMSIS-FLM flashing
 
-The per-family native path (`flash_nrf52`) is fastest where it exists; the
-generic path runs a standard CMSIS flash algorithm on the target and works for
-any chip with a CMSIS pack. `flm.FLMFlasher` takes an `algo` dict (the blob,
+The generic path runs a standard CMSIS flash algorithm on the target and works
+for any chip with a CMSIS pack. `flm.FLMFlasher` takes an `algo` dict (the blob,
 entry points, `begin_data`/`begin_stack`/`static_base`, flash geometry,
 `page_size`, and the erase-sector map) sourced from the target's CMSIS Device
 Family Pack.
@@ -197,9 +190,8 @@ Family Pack.
 The pod carries no algorithms of its own. The host extracts one from the
 target's pack on demand and installs it with `ops.set_flm_algo(algo)`, which
 holds it for the VM lifetime; `ops.flm_algo_info()` reports what is installed
-without echoing the blob back. Selecting `loader="flm"` with nothing installed
-raises. `loader="native"` needs no install and stays the default for
-`ops.erase_all` / `ops.flash_file` / `ops.flash_stream`.
+without echoing the blob back. `ops.erase_all` / `ops.flash_file` /
+`ops.flash_stream` raise if nothing is installed yet.
 
 The image is shipped in base64 chunks via `ops.stage_flm_blob()` rather than as
 one source literal, since a vendor algorithm runs to tens of KB and the pod
@@ -216,7 +208,7 @@ whose symbols give the entry points, and whose `DevDscr` holds the
 pod flm <label>                          # what the pod has installed
 pod flm <label> --device nRF52840_xxAA   # resolve from the pack cache + install
 pod flm <label> --pack /path/to/x.pack   # or from an explicit pack
-pod dut flash <label> fw.bin --loader flm    # installs automatically if needed
+pod dut flash <label> fw.bin              # installs automatically if needed
 ```
 
 The device name defaults to the DUT's declared `target_family` in the registry.
@@ -250,12 +242,6 @@ BKPT trampoline, PC = entry, xPSR Thumb) and resumes **with interrupts masked**
 (`C_MASKINTS`, set while halted then held across the resume; otherwise an
 interrupt vectors into the target's firmware and the algo never returns).
 Validated on the nRF52840 (FLM erase+program+verify, ~570 ms / 1 KB).
-
-`swd_stream.DRWStreamer` runs the whole AP-DRW write per FIFO word on PIO0 and is
-opt-in via `NRF52Flash(ap, cm, streamer=DRWStreamer(dp.swd))`. It measured ~3131
-vs ~2934 words/s (~7%) for a second PIO block, GP14/15 funcsel switching, and a
-per-burst DP resync, so it is disabled by default. Kept because the margin may
-matter once other write-path work lands.
 
 ## GDB debugging through the pod (Phase 3)
 
@@ -301,11 +287,13 @@ through the pod over Wi-Fi.
 
 ## Limitations
 
-- Flashing: nRF52 native-NVM path and the generic CMSIS-FLM path both work
-  (validated on the nRF52840). RP-native (bootrom) flashing is not built yet and
-  needs an RP DUT wired to validate. Other CMSIS-FLM targets need an `algo` dict
-  sourced from that part's CMSIS Device Family Pack (the host-side on-demand
-  pack lookup is not built yet) and validation on that silicon.
+- Flashing: the generic CMSIS-FLM path works, validated on the nRF52840. It is
+  the only flash backend (see `docs/pod/plan/cmsis-flash-completion.md`);
+  RP-native (bootrom) flashing is not built and needs an RP DUT wired to
+  validate. Other CMSIS-FLM targets resolve an `algo` dict from that part's
+  CMSIS Device Family Pack via the host-side on-demand pack lookup
+  (`pod.cmsis_pack`), but need validation on that silicon - it has only run
+  against the nRF52840.
 - SWD clock tops out at 9.375 MHz reliably; >= 10 MHz needs PIO input-phase
   tuning.
 - `resume` + editing PIO modules accumulates PIO instruction memory; clear with
