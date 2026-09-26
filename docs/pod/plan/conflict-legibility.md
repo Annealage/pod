@@ -23,8 +23,6 @@ Several of the protections assumed missing are already present on the live RP235
 
 The gaps are elsewhere, and they are of two kinds: refusals that name no one and are misclassified by the time they reach the agent, and host-side operations that displace an incumbent by tearing its attachment down first.
 
-Note also that `annealage_pod/boot.py` carries a divergent, thread-based `_repl_accept_loop` with `listen(1)` and a blocking inner poll, where a second client's handshake completes into the backlog and then hangs with no BUSY notice (`src/mpy/annealage_pod/boot.py:274-333`). That is the ESP32-S3 path (`src/mpy/main.py`), not the RP2350 one, but it is the same package. Either port the netboot refusal into it or mark it ESP32-S3-only, so the divergence does not get copied back.
-
 ## The three real bump vectors
 
 All host-side, all in `src/host/pod/client.py`, all working by detaching the incumbent so the pod's own refusal never fires:
@@ -114,7 +112,6 @@ Note that SWD ops arrive over the socket REPL, which is already single-holder, s
 
 ## Landmines found while scoping this
 
-- **`supervisor._default_cleanup` fires on every REPL disconnect** and powers off both DUT rails and opens every relay (`src/mpy/annealage_pod/supervisor.py:57-76`, registered at import on line 76). It is inert today only because `power` and `relays` raise `_pinmap.assert_esp32_carrier` on the RP2350 (`src/mpy/annealage_pod/_pinmap.py:115-121`) and `run_cleanup` swallows and prints the exception. When `carrier-hardware.md` lands and those rails become real, every `pod_exec` agent A makes will power-cycle agent B's DUT on disconnect. This is a cross-agent destructive side effect caused by a *departure* rather than an arrival, so no holder record explains it after the fact. Fix before the carrier port: scope the default cleanup to the last disconnect, or make it opt-in per session.
 - **PIO arbiter owner strings collide across callers** (see bump vector 4). Composing the owner as `subsystem@caller` once identity exists restores the refusal for two agents using the same subsystem, and costs nothing else.
 
 ## Phasing

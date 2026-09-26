@@ -10,7 +10,7 @@
 #     (unbounded transfer length, no growing buffer); MOSI is captured into a
 #     bounded overwrite ring.
 #   - regfile: a [reg_ptr][data...] register-file responder (see
-#     docs/esp32-s3/design/slaveio.md section 4). A WRITE CS transaction
+#     _regtable.py for the protocol). A WRITE CS transaction
 #     stores its payload into write_table[reg_ptr+] and repoints reg_ptr; a
 #     FOLLOWING READ CS serves read_table[reg_ptr+]. The pointer is only ever
 #     moved by the CS-deassert soft IRQ, never mid-transfer; a same-CS

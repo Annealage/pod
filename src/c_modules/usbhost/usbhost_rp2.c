@@ -1,21 +1,17 @@
 /* Annealage Pod RP2350: TinyUSB raw-URB host backend (lwIP-RAW forwarder).
  *
- * Cooperative single-thread port of usbhost.c (ESP32-S3). TinyUSB host runs on
- * the MicroPython main thread via shared/tinyusb/mp_usbh.c's tuh_task pump
- * (mp_usbh_task -> tuh_task_ext(0,false), scheduled from
- * __wrap_hcd_event_handler + mp_sched_schedule_node). Because there is one
- * cooperative submit/completion context, ALL of the FreeRTOS scaffolding in the
- * esp32 original collapses: no tasks, no per-slot/per-EP mutexes, no watchdog
- * task, no ep_stats/ep0_errors rings, no done_sem sync path, and no
- * natural-vs-cancel atomic CAS (completion and cancel can never run
- * concurrently - both only execute on the main thread, completion when tuh_task
- * runs and cancel when the transport calls in). The host is depth=1 (one
+ * Cooperative and single-threaded. TinyUSB host runs on the MicroPython main
+ * thread via shared/tinyusb/mp_usbh.c's tuh_task pump (mp_usbh_task ->
+ * tuh_task_ext(0,false), scheduled from __wrap_hcd_event_handler +
+ * mp_sched_schedule_node). With one submit/completion context there are no
+ * tasks or mutexes, and completion and cancel can never run concurrently: both
+ * only execute on the main thread, completion when tuh_task runs and cancel
+ * when the transport calls in. The host is depth=1 (one
  * transfer in flight per endpoint, the tuh_edpt_xfer / tuh_control_xfer
  * constraint).
  *
  * Enumeration: the rp2 mp_usbh.c does NOT call the weak tuh_mount_hook /
- * tuh_umount_hook (the esp32 backend hooked those; confirmed absent here and
- * unnecessary). Instead descriptors are cached during TinyUSB's own enumeration
+ * tuh_umount_hook. Instead descriptors are cached during TinyUSB's own enumeration
  * by the weak tuh_enum_descriptor_device_cb / tuh_enum_descriptor_configuration_cb
  * overrides below, and the slot table is populated by usbhost_start() scanning
  * tuh_mounted() for every device address (rescan_mounted). That scan calls
@@ -34,10 +30,7 @@
  * marshalling submits to the main thread (mirror mp_usbh_schedule_task /
  * __wrap_hcd_event_handler in mp_usbh.c).
  *
- * Reuse-verbatim helpers ported unchanged from usbhost.c: busid_eq,
- * ep_mutex_index, find_slot_by_busid / find_slot_by_devaddr / find_free_slot,
- * get_endpoint_mps, speed_to_usbip, xfer_result_to_errno, parse_config_desc.
- * Gotchas preserved from the esp32 history: CFG_TUH_API_EDPT_XFER=1 (set in the
+ * Gotchas: CFG_TUH_API_EDPT_XFER=1 (set in the
  * board cmake; without it the user complete_cb is silently dropped); the
  * tuh_xfer_t setup/buflen UNION hazard (control: set ONLY xfer.setup); MPS
  * no-fallback (an IN with no cached MPS is refused, never silently rounded to
@@ -100,9 +93,8 @@
 #define BOARD_TUH_RHPORT 0
 #endif
 
-/* Debug print, OFF by default; toggled by usbhost_set_verbose. The esp32
- * backend used ESP_LOGI/W/E with a static TAG; here a single macro keyed off
- * s_verbose covers all three levels. Kept terse so a verbose session does not
+/* Debug print, OFF by default; toggled by usbhost_set_verbose. One macro
+ * keyed off s_verbose covers every level. Kept terse so a verbose session does not
  * starve the cooperative loop. */
 #define USBHOST_DBG(...)                          \
     do {                                          \
@@ -179,7 +171,7 @@ static usbhost_desc_cache_t s_desc_cache[CFG_TUH_DEVICE_MAX]; /* indexed by (dev
 static uint32_t s_enum_gen[CFG_TUH_DEVICE_MAX];
 
 /* -------------------------------------------------------------------------
- * Helpers (reuse-verbatim from usbhost.c, mutex/locked suffix dropped)
+ * Helpers
  * ------------------------------------------------------------------------- */
 
 static bool busid_eq(const char a[USBIP_BUSID_SIZE], const char b[USBIP_BUSID_SIZE])
@@ -773,7 +765,7 @@ static void rescan_mounted(void)
 }
 
 /* -------------------------------------------------------------------------
- * Weak enum-descriptor overrides (reuse-verbatim from usbhost.c)
+ * Weak enum-descriptor overrides
  * ------------------------------------------------------------------------- */
 
 /* Override the weak tuh_enum_descriptor_device_cb from usbh.c. Called during
@@ -796,9 +788,8 @@ void tuh_enum_descriptor_device_cb(uint8_t daddr, const tusb_desc_device_t *desc
  * SET_CONFIGURATION and firing tuh_mount_cb (which makes tuh_mounted() true so
  * usbhost_start()'s seed picks the device up).
  *
- * NOTE: the esp32 backend returned false here intending to keep the device in
- * Address state. That does NOT translate to this TinyUSB pin: in usbh.c's
- * ENUM_SET_CONFIG, returning false means "reject this configuration, try the
+ * NOTE: returning false here does NOT keep the device in Address state with
+ * this TinyUSB pin: in usbh.c's ENUM_SET_CONFIG, returning false means "reject this configuration, try the
  * next index", and for a single-config device that trips
  * TU_ASSERT(config_idx < bNumConfigurations) and ABORTS enumeration - the device
  * never mounts. So we return true. Class drivers are off (CFG_TUH_CDC/MSC/HID=0),
@@ -998,9 +989,8 @@ int usbhost_submit_async(const char busid[USBIP_BUSID_SIZE],
  * Public API: usbhost_cancel_ep
  *
  * Abort the in-flight URB on an EP. MUST be called from the main-thread
- * tuh_task context. Simplified from the esp32 original: no CAS arbitration
- * (completion and cancel never interleave), no usbh_edpt_busy probe, no synth
- * counters, no done_sem branch. Reduces to: abort the hardware endpoint (real
+ * tuh_task context. Completion and cancel never interleave, so no arbitration
+ * is needed: abort the hardware endpoint (real
  * EP_ABORT quiesce on rp2350), clear current_inflight, deliver -ECONNRESET to
  * the user cb. The endpoint stays configured for the next forwarded transfer.
  * ------------------------------------------------------------------------- */
@@ -1217,10 +1207,8 @@ bool usbhost_is_verbose(void)
 /* -------------------------------------------------------------------------
  * Identity-change recovery: usbhost_flush / usbhost_bus_reset
  *
- * Kept from the esp32 backend (the DWC2 PRT_CONN_DET edge-trigger-miss / stuck
- * D+ pull-up case is a DWC2 property shared with rp2350). vTaskDelay ->
- * mp_hal_delay_ms; no mutex (single cooperative thread); tuh_deinit is live on
- * rp2 (mp_usbh_deinit only skips it on ESP32).
+ * Covers the DWC2 PRT_CONN_DET edge-trigger-miss / stuck D+ pull-up case. No
+ * mutex (single cooperative thread); tuh_deinit is live on rp2.
  * ------------------------------------------------------------------------- */
 
 /* Abort every in-flight forwarder URB so no endpoint is left with its DWC2

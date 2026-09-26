@@ -1,5 +1,0 @@
-0000936 I Target type is rp2040 [board]
-0001101 C Unexpected ACK value (0) returned by probe [__main__]
-
---- Engine trace ---
-W (37930) swd: xfer hdr=0xa5 ack_raw=0x07 ack=7 (FAIL)

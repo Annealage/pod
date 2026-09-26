@@ -9,7 +9,7 @@
 
 #include "usbip_proto.h"
 #include "usbip_protocol.h"
-#include "virtual_device.h"
+#include "usbip_device.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -72,11 +72,9 @@ static uint32_t htobe32_local(uint32_t x);
         }                                                                         \
     } while (0)
 
-/* Helper: fill a `usbip_dev_record_t` with the synthetic CMSIS-DAP
- * fields used by docs/design/usbip-server.md and the design doc
- * §1.1.1. The registry assigns busid/path on register; tests fill
- * the rest. */
-static void make_synthetic_dap(usbip_dev_record_t *r)
+/* Helper: fill a `usbip_dev_record_t` with a representative CMSIS-DAP
+ * probe's descriptor fields. */
+static void make_dap_record(usbip_dev_record_t *r)
 {
     memset(r, 0, sizeof(*r));
     r->present              = true;
@@ -145,7 +143,7 @@ TEST(test_device_desc_size)
 TEST(test_pack_device_desc)
 {
     usbip_dev_record_t src;
-    make_synthetic_dap(&src);
+    make_dap_record(&src);
     snprintf(src.path,  sizeof(src.path),  "/sys/devices/platform/annealage_pod/usb2/2-1");
     snprintf(src.busid, sizeof(src.busid), "2-1");
 
@@ -178,7 +176,7 @@ TEST(test_pack_device_desc)
 TEST(test_pack_interface_desc)
 {
     usbip_dev_record_t src;
-    make_synthetic_dap(&src);
+    make_dap_record(&src);
     usbip_usb_interface_t iface;
 
     bool ok = usbip_proto_pack_interface_desc(&src, 0, &iface);
@@ -196,7 +194,7 @@ TEST(test_pack_interface_desc)
 TEST(test_make_devid)
 {
     usbip_dev_record_t src;
-    make_synthetic_dap(&src);
+    make_dap_record(&src);
     src.busnum = 2;
     src.devnum = 1;
     ASSERT_EQ_INT(usbip_proto_make_devid(&src), 0x00020001u);
@@ -359,174 +357,6 @@ TEST(test_pack_ret_unlink)
     ASSERT_EQ_INT(p[3], 7);
 }
 
-/* ---------- virtual_device registry tests ---------- */
-
-static int g_attach_calls;
-static int g_detach_calls;
-static int g_ctrl_calls;
-static int g_data_calls;
-static uint8_t g_last_ep;
-
-static int test_control(virtual_device_t *dev,
-                        const usbip_setup_packet_t *setup,
-                        const uint8_t *out_data, size_t out_len,
-                        uint8_t *in_data, size_t in_capacity, size_t *in_len)
-{
-    (void)dev; (void)out_data; (void)out_len;
-    g_ctrl_calls++;
-    /* Echo wValue into the IN buffer if there is room. */
-    if (in_capacity >= 2) {
-        in_data[0] = setup->wValue & 0xFF;
-        in_data[1] = (setup->wValue >> 8) & 0xFF;
-        *in_len = 2;
-    } else {
-        *in_len = 0;
-    }
-    return 0;
-}
-
-static int test_data(virtual_device_t *dev, uint8_t ep_addr,
-                     const uint8_t *out_data, size_t out_len,
-                     uint8_t *in_data, size_t in_capacity, size_t *in_len)
-{
-    (void)dev; (void)out_data; (void)out_len;
-    (void)in_data; (void)in_capacity;
-    g_data_calls++;
-    g_last_ep = ep_addr;
-    *in_len = 0;
-    return 0;
-}
-
-static int test_attach(virtual_device_t *dev)
-{
-    (void)dev;
-    g_attach_calls++;
-    return 0;
-}
-
-static void test_detach(virtual_device_t *dev)
-{
-    (void)dev;
-    g_detach_calls++;
-}
-
-static const virtual_device_ops_t s_ops = {
-    .control_transfer = test_control,
-    .data_transfer    = test_data,
-    .on_attach        = test_attach,
-    .on_detach        = test_detach,
-};
-
-TEST(test_register_assigns_busid)
-{
-    usbip_virtual_device_reset_for_test();
-
-    virtual_device_t dev = {0};
-    dev.ops = &s_ops;
-    make_synthetic_dap(&dev.desc);
-
-    int rc = usbip_register_virtual_device(&dev);
-    ASSERT_EQ_INT(rc, 0);
-
-    /* Registry assigns "2-1" for the first synthetic device. */
-    ASSERT_EQ_INT(dev.desc.busnum, USBIP_VIRTUAL_DEVICE_BUSNUM);
-    ASSERT_EQ_INT(dev.desc.devnum, 1);
-    ASSERT_TRUE(strcmp(dev.desc.busid, "2-1") == 0,
-                "busid '%s' != expected '2-1'", dev.desc.busid);
-    ASSERT_TRUE(dev.desc.path[0] != '\0', "path was not auto-populated");
-}
-
-TEST(test_register_two_synthetic_devices)
-{
-    usbip_virtual_device_reset_for_test();
-
-    virtual_device_t dev1 = {0};
-    virtual_device_t dev2 = {0};
-    dev1.ops = &s_ops;
-    dev2.ops = &s_ops;
-    make_synthetic_dap(&dev1.desc);
-    make_synthetic_dap(&dev2.desc);
-
-    ASSERT_EQ_INT(usbip_register_virtual_device(&dev1), 0);
-    ASSERT_EQ_INT(usbip_register_virtual_device(&dev2), 0);
-
-    ASSERT_TRUE(strcmp(dev1.desc.busid, "2-1") == 0,
-                "dev1 busid '%s' != '2-1'", dev1.desc.busid);
-    ASSERT_TRUE(strcmp(dev2.desc.busid, "2-2") == 0,
-                "dev2 busid '%s' != '2-2'", dev2.desc.busid);
-    ASSERT_EQ_INT(usbip_virtual_device_count(), 2);
-}
-
-TEST(test_find_by_busid_padding)
-{
-    usbip_virtual_device_reset_for_test();
-
-    virtual_device_t dev = {0};
-    dev.ops = &s_ops;
-    make_synthetic_dap(&dev.desc);
-    usbip_register_virtual_device(&dev);
-
-    /* Lookup with NUL-padded 32-byte buffer (matches wire format). */
-    char busid[USBIP_BUSID_SIZE] = {0};
-    snprintf(busid, sizeof(busid), "2-1");
-
-    virtual_device_t *found = usbip_find_virtual_device(busid);
-    ASSERT_TRUE(found == &dev, "find_by_busid returned %p, expected %p",
-                (void *)found, (void *)&dev);
-
-    /* Mismatched busid returns NULL. */
-    char other[USBIP_BUSID_SIZE] = {0};
-    snprintf(other, sizeof(other), "1-1");
-    ASSERT_TRUE(usbip_find_virtual_device(other) == NULL,
-                "find_by_busid('1-1') should be NULL");
-}
-
-TEST(test_register_invalid)
-{
-    usbip_virtual_device_reset_for_test();
-
-    /* NULL ops -> EINVAL. */
-    virtual_device_t bad = {0};
-    int rc = usbip_register_virtual_device(&bad);
-    ASSERT_EQ_INT(rc, -EINVAL);
-}
-
-TEST(test_register_full)
-{
-    usbip_virtual_device_reset_for_test();
-
-    virtual_device_t devs[USBIP_VIRTUAL_DEVICE_MAX + 1] = {0};
-    for (size_t i = 0; i < USBIP_VIRTUAL_DEVICE_MAX; i++) {
-        devs[i].ops = &s_ops;
-        make_synthetic_dap(&devs[i].desc);
-        ASSERT_EQ_INT(usbip_register_virtual_device(&devs[i]), 0);
-    }
-    devs[USBIP_VIRTUAL_DEVICE_MAX].ops = &s_ops;
-    make_synthetic_dap(&devs[USBIP_VIRTUAL_DEVICE_MAX].desc);
-    ASSERT_EQ_INT(usbip_register_virtual_device(&devs[USBIP_VIRTUAL_DEVICE_MAX]),
-                  -ENOMEM);
-}
-
-TEST(test_get_all)
-{
-    usbip_virtual_device_reset_for_test();
-
-    virtual_device_t dev1 = {0};
-    virtual_device_t dev2 = {0};
-    dev1.ops = &s_ops;
-    dev2.ops = &s_ops;
-    make_synthetic_dap(&dev1.desc);
-    make_synthetic_dap(&dev2.desc);
-    usbip_register_virtual_device(&dev1);
-    usbip_register_virtual_device(&dev2);
-
-    usbip_dev_record_t out[8];
-    size_t n = usbip_get_virtual_devices(out, 8);
-    ASSERT_EQ_INT(n, 2);
-    ASSERT_TRUE(strcmp(out[0].busid, "2-1") == 0, "out[0].busid mismatch");
-    ASSERT_TRUE(strcmp(out[1].busid, "2-2") == 0, "out[1].busid mismatch");
-}
-
 /* Helper for tests above: portable big-endian convert without
  * pulling in arpa/inet.h on the host build. The protocol module
  * already has its own bswap; this is local to tests. */
@@ -559,12 +389,6 @@ int main(void)
     run_test_pack_ret_submit_byteorder();
     run_test_pack_ret_submit_negative_status();
     run_test_pack_ret_unlink();
-    run_test_register_assigns_busid();
-    run_test_register_two_synthetic_devices();
-    run_test_find_by_busid_padding();
-    run_test_register_invalid();
-    run_test_register_full();
-    run_test_get_all();
 
     if (g_failures == 0) {
         printf("\nAll tests passed.\n");

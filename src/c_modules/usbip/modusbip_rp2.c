@@ -1,8 +1,7 @@
-/* Annealage Pod RP2350: MicroPython binding for the usbip C module
- * (lwIP-RAW forwarder variant).
+/* Annealage Pod RP2350: MicroPython binding for the usbip C module.
  *
- * Trimmed from modusbip.c: no synthetic (dapprobe) device verbose toggle, since
- * the rp2 pod runs the debug probe on-pod and forwards only the DUT (busid 1).
+ * Forwards only the DUT (busid 1); the debug probe runs on-pod rather than
+ * being exported over USB/IP.
  *
  * Surface:
  *   usbip.start(port=3240)        -> None  (idempotent)

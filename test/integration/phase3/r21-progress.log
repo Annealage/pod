@@ -1,1 +1,0 @@
-2026-05-01T15:03:02+10:00 cycle1_exp123 commit=96f7917 note=exp1:128B URBs confirmed; exp2:t_idf=2ms median t_tcp=1ms median; exp3:11KiB/s baseline reproduced; path=A(doc)+Bb1(writev)

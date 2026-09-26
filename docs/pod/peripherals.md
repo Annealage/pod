@@ -37,9 +37,8 @@ repeated-start of `readfrom_mem` in silicon.
 from the pod side, so a test can seed registers or inspect what the controller
 wrote.
 
-This is the RP2350 realisation of the ESP32-S3 `slaveio` register-table model
-(`annealage_pod.slave`): the mem buffer is the register file, but it rides the
-built-in `machine.I2CTarget` rather than a custom C module. A PIO I2C slave was
+The mem buffer is the register file, and it rides the built-in
+`machine.I2CTarget` rather than a custom C module. A PIO I2C slave was
 tried and abandoned - the full target doesn't fit a PIO block (the byte engine
 plus a START/STOP detector overruns the 32-instruction limit), and the hardware
 peripheral does the address-match / ACK / clock-stretch / repeated-start

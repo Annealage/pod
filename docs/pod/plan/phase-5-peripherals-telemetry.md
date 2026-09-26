@@ -15,7 +15,7 @@ and the `power` reset path are gated on a future custom carrier.
 
 ### F5.1 PIO I2C/SPI target personalities
 - Implement I2C-target and SPI-target responders on PIO with the S3 slaveio
-  register-table model (`docs/esp32-s3/design/slaveio.md`): two flat buffers per
+  register-table model (`v1.6.0-native-flash-default:docs/esp32-s3/design/slaveio.md`): two flat buffers per
   personality (read-table / write-table), ISR-free PIO path, MP-side read/write
   and on-write-range callbacks. PIO target is the reason the RP2350 is expected to
   be more reliable than the S3 i2c-target.
@@ -396,6 +396,6 @@ exists.
 
 ## References
 
-- `docs/esp32-s3/design/slaveio.md`, `docs/esp32-s3/design/uartbridge.md`
-- `docs/esp32-s3/design/annealage-pod-package.md`, S3 spec §7, appendix B
+- `v1.6.0-native-flash-default:docs/esp32-s3/design/slaveio.md`, `v1.6.0-native-flash-default:docs/esp32-s3/design/uartbridge.md`
+- `v1.6.0-native-flash-default:docs/esp32-s3/design/annealage-pod-package.md`, S3 spec §7, appendix B
 - `src/mpy/annealage_pod/` (existing package to share/factor)

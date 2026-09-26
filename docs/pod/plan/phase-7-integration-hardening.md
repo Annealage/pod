@@ -51,6 +51,6 @@ without the wired probe.
 
 ## References
 
-- `docs/esp32-s3/spec.md` §6 (logging/watchdog/time), §5.5 (trust model)
+- `v1.6.0-native-flash-default:docs/esp32-s3/spec.md` §6 (logging/watchdog/time), §5.5 (trust model)
 - `test/integration/` (S3 benches to port)
 - `docs/pod/dev-notes.md` §2 (probe-assisted flash/recovery)

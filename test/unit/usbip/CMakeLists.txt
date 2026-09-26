@@ -2,7 +2,7 @@
 # and the virtual-device registry.
 #
 # Host-side build: link the protocol-layer translation units
-# (usbip_proto.c, virtual_device.c) into a CTest binary that
+# (usbip_proto.c) into a CTest binary that
 # exercises wire-format encode/decode and registry behaviour
 # without needing FreeRTOS, lwIP or the ESP target.
 
@@ -22,13 +22,11 @@ set(USBIP_DIR    "${CMODULES_DIR}/usbip")
 
 enable_testing()
 
-# Tests build: protocol parser, virtual-device registry, plus the
-# test runner itself. The TCP-server translation unit (usbip_server.c)
-# is excluded from this build because it pulls in FreeRTOS and lwIP.
+# Tests build: the protocol codec plus the test runner. The transport
+# (usbip_server_rp2.c) is excluded because it needs lwIP and the Pico SDK.
 add_executable(test_usbip_proto
     test_usbip_proto.c
     ${USBIP_DIR}/usbip_proto.c
-    ${USBIP_DIR}/virtual_device.c
 )
 
 target_include_directories(test_usbip_proto PRIVATE

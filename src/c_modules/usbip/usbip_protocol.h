@@ -11,7 +11,7 @@
  * through them directly; usbip_proto.c does the byte-order conversion.
  * The offset assertions at the end pin each struct to the spec's tables.
  *
- * Host-portable (no IDF, FreeRTOS or lwIP dependency) so the unit-test
+ * Host-portable (no lwIP or SDK dependency) so the unit-test
  * harness under test/unit/usbip/ can include it directly.
  *
  * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception

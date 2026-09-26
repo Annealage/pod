@@ -1,13 +1,7 @@
-/* Annealage Pod: USB host (TinyUSB) abstraction.
+/* Annealage Pod: USB host (TinyUSB) interface used by the USB/IP server.
  *
- * Phase 2 WS-A scope: declarations only. WS-B replaces the stub
- * implementation with the real TinyUSB host integration. The shape
- * of this API tracks referencea/esp-usbip-bridge/main/usb_backend.h
- * so the multiplexer can use it without knowing whether the backend
- * is a stub or the real TinyUSB host stack.
- *
- * This header is host-portable on purpose; usbhost.c on-target is
- * the only file that needs IDF / TinyUSB headers.
+ * Implemented by usbhost_rp2.c. The header is host-portable; only the
+ * implementation needs TinyUSB and the Pico SDK.
  */
 
 #ifndef MPY_POD_USBHOST_H
@@ -19,26 +13,17 @@
 #include <stdint.h>
 
 #include "../usbip/usbip_protocol.h"
-#include "../usbip/virtual_device.h"
+#include "../usbip/usbip_device.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Status codes returned by the URB submit functions. Negative errno
- * with the standard meaning. The Phase 2 WS-B stub returns -ENOSYS
- * to signal "real USB host not yet wired up"; the multiplexer maps
- * that into a transparent USBIP_RET_SUBMIT error so the host sees
- * an honest "no such function" rather than a silent zero-length
- * completion. */
-#define USBHOST_ERR_NOT_IMPLEMENTED (-ENOSYS)
-
-/* Bring up the USB host stack. The Phase 2 stub returns 0 without
- * doing anything; WS-B replaces this with TinyUSB host init. */
+/* Bring up the TinyUSB host stack. */
 int usbhost_start(void);
 
-/* Populate the array with the real-USB devices currently enumerated.
- * Returns the count copied (0 in the Phase 2 stub). */
+/* Populate the array with the USB devices currently enumerated.
+ * Returns the count copied. */
 size_t usbhost_get_devices(usbip_dev_record_t *out, size_t max);
 
 /* Look up a real-USB device by busid. Returns true on hit. */
@@ -84,11 +69,6 @@ int usbhost_bulk_transfer(const char busid[USBIP_BUSID_SIZE],
                           uint8_t *in_data, size_t in_capacity, size_t *in_len,
                           volatile bool *cancel);
 
-/* usbhost_submit_order_t and the _ordered transfer variants are removed
- * in R20 step3. Per-EP lane tasks serialise submit order by construction
- * (FIFO queue per (ep,dir)). Use usbhost_bulk_transfer and
- * usbhost_interrupt_transfer directly. */
-
 /* Submit an interrupt transfer; same shape as bulk. */
 int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
                                uint8_t ep_addr,
@@ -103,14 +83,12 @@ int usbhost_interrupt_transfer(const char busid[USBIP_BUSID_SIZE],
 bool usbhost_is_interrupt_endpoint(const char busid[USBIP_BUSID_SIZE],
                                    uint8_t ep_num, uint8_t direction);
 
-/* Non-blocking async submit. Calls cb(ctx, status, in_len) from the IDF
- * worker context (priority 9) when the transfer completes. The caller does
- * NOT block; ownership of the transfer is with the IDF until the callback
- * fires. Returns 0 if the IDF accepted the submit, negative errno on
- * immediate failure (IDF rejected submit; callback will NOT be called in
- * that case). ep_addr's high bit carries direction (0x8N = IN, 0x0N = OUT).
- * cancel is polled by the per-EP lane prior to submit; the UNLINK handler
- * drives cancellation via usbhost_cancel_ep instead of the cancel flag. */
+/* Non-blocking async submit. Calls cb(ctx, status, in_len) from the
+ * tuh_task context when the transfer completes; ownership of the buffers
+ * stays with the host stack until then. Returns 0 if the submit was
+ * accepted, negative errno on immediate failure (the callback is then
+ * NOT called). ep_addr's high bit carries direction (0x8N = IN, 0x0N =
+ * OUT). The UNLINK handler cancels via usbhost_cancel_ep. */
 int usbhost_submit_async(const char busid[USBIP_BUSID_SIZE],
                          uint8_t ep_addr, bool is_control,
                          const usbip_setup_packet_t *setup,
@@ -119,15 +97,13 @@ int usbhost_submit_async(const char busid[USBIP_BUSID_SIZE],
                          void (*cb)(void *ctx, int status, size_t in_len),
                          void *ctx);
 
-/* Synchronous halt+flush+clear of a specific endpoint. Called from the
- * UNLINK handler (under the per-EP submit mutex) to force-cancel any
- * in-flight URB on this EP. The IDF delivers the cancelled URB to the
- * async callback with status -ECONNRESET. */
+/* Force-cancel any in-flight URB on this endpoint, called from the
+ * UNLINK handler. The cancelled URB completes through its async
+ * callback with status -ECONNRESET. */
 void usbhost_cancel_ep(const char busid[USBIP_BUSID_SIZE], uint8_t ep_addr);
 
-/* Toggle per-URB observability logging on the usbhost backend. When
- * enabled every transfer submit and completion emits one ESP_LOGI
- * line under the "usbhost" tag. Default off. */
+/* Toggle per-URB logging on the usbhost backend: one line per transfer
+ * submit and completion. Default off. */
 void usbhost_set_verbose(bool enable);
 
 /* True if per-URB verbose logging is currently enabled. */
@@ -200,96 +176,6 @@ uint32_t usbhost_mounted_mask(void);
  * Compare with usbhost_mounted_mask() to tell a cache-missing fault from a
  * rescan-not-run fault. */
 uint32_t usbhost_cache_valid_mask(void);
-
-/* Diagnostic: return the raw 32-bit value of the DWC2 HPRT (Host Port
- * Control and Status) register, or 0 if the host stack is not running.
- * Useful to disambiguate "no device on the bus" from "device on bus but
- * host state machine wedged":
- *
- *   bit  0  PRT_CONN_STS   1 = device connected (D+/D- pull-up detected)
- *   bit  1  PRT_CONN_DET   1 = port connect detected (W1C)
- *   bit  2  PRT_EN          1 = port enabled
- *   bit  3  PRT_EN_CHNG     1 = port enable changed (W1C)
- *   bit  8  PRT_RST         1 = port reset asserted
- *   bits 17:18 PRT_SPD      0=HS, 1=FS, 2=LS
- */
-uint32_t usbhost_dwc2_hprt(void);
-
-/* Diagnostic: sample HPRT at a high rate for a bounded duration and
- * record every value transition with a timestamp (microseconds from
- * trace start). Used to observe bus-state changes during a DUT
- * power-cycle or PROG+RESET when the kernel/TinyUSB-level mount/umount
- * events are not granular enough.
- *
- * Each captured transition is written into out[] as a pair of
- * (t_us, hprt). out_n receives the number of pairs written (clamped to
- * cap). Initial HPRT value is recorded as the first entry at t=0; from
- * there only transitions are appended.
- *
- * duration_ms is capped at HPRT_TRACE_MAX_DURATION_MS internally to
- * keep the loop bounded. period_us is the minimum spacing between
- * polls (a hint, not a tight bound).
- *
- * Returns 0 on success, negative errno on failure. */
-typedef struct {
-    uint32_t t_us;
-    uint32_t hprt;
-} usbhost_hprt_sample_t;
-
-int usbhost_hprt_trace(uint32_t duration_ms, uint32_t period_us,
-                       uint32_t force_every, usbhost_hprt_sample_t *out,
-                       size_t cap, size_t *out_n);
-
-/* Per-endpoint URB counters for a given busid. Indexed by
- * ep_mutex_index (low 4 bits = EP number, bit 4 = direction:
- * 0=OUT/control, 1=IN). 32 entries total.
- *
- * Used to triage "URB went out but completion never landed" vs "URB
- * was never submitted in the first place" failure modes - the
- * counters increment at the points where the host-stack code
- * actually has control, so a discrepancy between submitted and
- * completed-or-errored points at the boundary where transfers are
- * being lost.
- */
-typedef struct {
-    uint32_t submitted;    /* tuh_*_xfer called (URB handed to TinyUSB) */
-    uint32_t completed;    /* xfer_complete_cb fired with XFER_RESULT_SUCCESS */
-    uint32_t errored;      /* xfer_complete_cb fired with non-SUCCESS result */
-    uint32_t cancelled;    /* usbhost_cancel_ep synthesised a completion */
-    uint32_t bytes_total;  /* sum of xfer->actual_len across completed URBs.
-                              IN: bytes received from device; OUT: bytes
-                              sent to device. Disambiguates "URB completed
-                              but device sent ZLP" from "URB completed with
-                              payload". */
-} usbhost_ep_stats_t;
-
-/* Copy the 32-entry per-EP stats array for the device at `busid` into
- * `out` (must be at least 32 entries). Returns true on hit, false if
- * busid not found. */
-bool usbhost_get_ep_stats(const char busid[USBIP_BUSID_SIZE],
-                          usbhost_ep_stats_t out[32]);
-
-/* Per-slot ring buffer of recent failed EP0 control transfers. Captures
- * the 8-byte setup packet and the TinyUSB result code so callers can
- * see WHICH control requests are failing (kernel-issued
- * SET_CONTROL_LINE_STATE, vendor-specific bRequests, string-descriptor
- * STALLs, etc.).
- *
- * Records only failures (xfer->result != XFER_RESULT_SUCCESS). The
- * ring drops the oldest entry on overflow. */
-#define USBHOST_EP0_ERROR_LOG_SIZE 8u
-
-typedef struct {
-    uint32_t t_us;        /* esp_timer_get_time() at the time of failure */
-    uint8_t  setup[8];    /* bmRequestType, bRequest, wValue, wIndex, wLength */
-    int8_t   result;      /* TinyUSB xfer_result_t (STALLED=2, TIMEOUT=3, FAILED=4) */
-} usbhost_ep0_error_t;
-
-/* Copy up to USBHOST_EP0_ERROR_LOG_SIZE recent EP0-error records into
- * `out`, oldest first. Returns the number of records written, or
- * negative errno on busid lookup failure. */
-int usbhost_get_ep0_errors(const char busid[USBIP_BUSID_SIZE],
-                           usbhost_ep0_error_t out[USBHOST_EP0_ERROR_LOG_SIZE]);
 
 #ifdef __cplusplus
 }

@@ -76,6 +76,6 @@ auto-reconnect.
 ## References
 
 - `github.com/essele/pico_debug` (`swd.pio`, `swd.c`)
-- `docs/esp32-s3/design/swd-swo-engine.md` (SWD frame protocol, reusable at the protocol
+- `v1.6.0-native-flash-default:docs/esp32-s3/design/swd-swo-engine.md` (SWD frame protocol, reusable at the protocol
   level), `docs/pod/dev-notes.md` §3
 - `prototypes/rp2350-swd-spike/swd_bitbang.py`

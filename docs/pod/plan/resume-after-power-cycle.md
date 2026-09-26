@@ -127,7 +127,7 @@ never drains RX. Architecturally correct fix = remove the second lwIP mutator.
 
 Committed on `rp2350-pivot` this session:
 
-- `52962a1` docs split (ESP32-S3 -> `docs/esp32-s3/`) + the RP2350
+- `52962a1` docs split (ESP32-S3 -> `v1.6.0-native-flash-default:docs/esp32-s3/`) + the RP2350
   `hardware-setup.md` guide.
 - `cd07563` `_pinmap`/NRST collision fix (NRST is GP13 on RP2350, carrier cluster
   guarded).

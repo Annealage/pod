@@ -1,10 +1,6 @@
-/* Annealage Pod RP2350: MicroPython binding for the usbhost C module
- * (lwIP-RAW forwarder variant).
+/* Annealage Pod RP2350: MicroPython binding for the usbhost C module.
  *
- * Trimmed from modusbhost.c: only the recovery ops are exposed. The ESP32-S3
- * DWC2 diagnostics (dwc2_hprt / hprt_trace / ep_stats / ep0_errors) were bring-up
- * triage tools for the FreeRTOS lane/responder model and have no place in the
- * cooperative single-thread rp2 backend.
+ * Exposes the USB identity-change recovery ops and two mount diagnostics.
  *
  * Surface:
  *   usbhost.flush(force_bus_reset=True) -> None

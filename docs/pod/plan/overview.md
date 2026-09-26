@@ -4,7 +4,7 @@ Master plan for the RP2350 (Pico 2 W), the canonical, current Annealage Pod
 target. This is a dynamic, risk-ordered plan: each phase ends at a decision gate
 that is validated on hardware before the next phase commits, and the plan is
 re-cut as spikes land. It supersedes the prior ESP32-S3 design captured in
-`docs/esp32-s3/spec.md` and `docs/esp32-s3/architecture.md`.
+`v1.6.0-native-flash-default:docs/esp32-s3/spec.md` and `v1.6.0-native-flash-default:docs/esp32-s3/architecture.md`.
 
 Read first: `docs/pod/spike-findings.md` (what is already proven on hardware)
 and `docs/pod/dev-notes.md` (gotchas and recipes).
@@ -146,9 +146,11 @@ the reorg lands.
 
 ## 5. Code-sharing strategy with the ESP32-S3 variant
 
+The ESP32-S3 variant has since been removed from the tree, so this section only records the original plan.
+
 Shared (single source, both variants):
 - the `annealage_pod` MicroPython package surface and RP_INFRA API mimicry
-  (`docs/esp32-s3/spec.md` §7, appendix B);
+  (`v1.6.0-native-flash-default:docs/esp32-s3/spec.md` §7, appendix B);
 - USB/IP protocol logic (framing, OP_REQ/REP, CMD_SUBMIT validation) factored
   away from the ESP-IDF/lwIP specifics;
 - INA228 driver, slave register-table model, reset abstractions.
@@ -231,7 +233,7 @@ Deferred:
 ## 9. Pointers
 
 - `docs/pod/spike-findings.md`, `docs/pod/dev-notes.md`
-- ESP32-S3 baseline: `docs/esp32-s3/spec.md`, `docs/esp32-s3/architecture.md`, `docs/esp32-s3/design/`
+- ESP32-S3 baseline: `v1.6.0-native-flash-default:docs/esp32-s3/spec.md`, `v1.6.0-native-flash-default:docs/esp32-s3/architecture.md`, `v1.6.0-native-flash-default:docs/esp32-s3/design/`
 - On-device probe reference: `github.com/essele/pico_debug`
 - Spike code: `prototypes/rp2350-swd-spike/`
 - Per-phase detail: `phase-1-foundation.md` ... `phase-7-integration-hardening.md`

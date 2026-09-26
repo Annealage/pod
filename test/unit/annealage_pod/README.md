@@ -1,31 +1,14 @@
 # annealage_pod.* unit tests
 
-WS-E unit-test suite. Exercises the MP-side surface added in Phase 2
-without requiring a board.
-
-## Running
-
-CPython (fastest, used in CI):
+Host-side tests for the pod's MicroPython package, no board needed.
 
     python3 -m pytest test/unit/annealage_pod/
 
-MicroPython Unix port:
+`conftest.py` prepends `src/mpy/` to `sys.path`.
 
-    cd src/micropython/ports/unix && make submodules && make
-    MICROPYPATH=".frozen:../../src/mpy" \
-        ./build-standard/micropython -c "import test_relays; ..."
-
-The CPython path uses `conftest.py` to prepend `src/mpy/` to
-`sys.path`. The MicroPython path needs `MICROPYPATH` set explicitly.
-
-## Coverage
-
-| File                        | Surface                                                      |
-|-----------------------------|--------------------------------------------------------------|
-| `test_imports.py`           | every submodule + `_pinmap` constants                        |
-| `test_relays.py`            | `annealage_pod.relays.relays.{set,get,batch,pulse,all_off}`       |
-| `test_power.py`             | `annealage_pod.power.{vtarget,dut_usb}.{on,off,cycle,is_on,...}`  |
-| `test_dut_reset.py`         | `annealage_pod.dut.reset(mode='swd'|'nrst'|'power'|'relay')`      |
-| `test_compat_shim.py`       | RP_INFRA shim incl. `get_relays` bug fix and strict-mode     |
-| `test_supervisor.py`        | cleanup-hook registration / ordering / exception-swallowing  |
-| `test_asyncio_dryrun.py`    | every primitive callable from inside `asyncio.run()`         |
+| File                        | Covers                                                        |
+|-----------------------------|---------------------------------------------------------------|
+| `test_imports.py`           | the package imports without a board build                     |
+| `test_netboot_nrst_pin.py`  | netboot's copy of the DUT reset pin matches `_rp2_pinmap`     |
+| `test_netutil.py`           | `debug.netutil` send/recv retry loops under backpressure      |
+| `test_pio_arbiter.py`       | the PIO arbiter's per-(block, SM) claim model                 |

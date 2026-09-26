@@ -115,7 +115,7 @@ def spi_target(mode=0, bits=8, miso=_pins.DUT_SPI_MISO, mosi=_pins.DUT_SPI_MOSI,
     `size`-byte overwrite ring (rounded up to a power of two).
     `personality='regfile'`: a [reg_ptr][data...] register-file responder
     over `table_size` bytes each way (see spi_target_regs and
-    docs/esp32-s3/design/slaveio.md section 4); `size` still bounds the MOSI
+    annealage_pod/_regtable.py for the protocol); `size` still bounds the MOSI
     capture ring, grown automatically to retain a full transaction.
     `spi_target_status` reads the byte count, captured ring, and (regfile)
     the register-pointer state. Re-calling with the same `name` replaces the

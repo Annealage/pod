@@ -65,7 +65,7 @@ function.
 
 ## References
 
-- S3 `docs/esp32-s3/design/usbip-server.md`, `docs/esp32-s3/design/usbhost.md`
+- S3 `v1.6.0-native-flash-default:docs/esp32-s3/design/usbip-server.md`, `v1.6.0-native-flash-default:docs/esp32-s3/design/usbhost.md`
 - `research/usbip-multiplexing-design.md` (protocol; multiplexing now unused)
 - S3 spec §4.5, §5.5 (trust model carries over)
 

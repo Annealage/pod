@@ -1,11 +1,9 @@
 /* Annealage Pod RP2350: USB/IP server, lwIP-RAW transport.
  *
- * Port of usbip_server.c (ESP32-S3) onto rp2's lwIP-RAW callback API. The
- * FreeRTOS accept/client/lane/responder tasks + BSD sockets collapse into a
- * single lwIP-RAW callback state machine (tcp_new/bind/listen/accept +
- * tcp_recv/tcp_sent/tcp_poll/tcp_err). Forwards the DUT only (busid 1); no
- * synthetic device. The protocol codec (usbip_proto.c) and the device-record
- * types (virtual_device.h) are shared verbatim with the esp32 build.
+ * A single lwIP-RAW callback state machine (tcp_new/bind/listen/accept +
+ * tcp_recv/tcp_sent/tcp_poll/tcp_err) rather than tasks and BSD sockets.
+ * Forwards the DUT only (busid 1). The wire codec is usbip_proto.c and the
+ * device-record types are in usbip_device.h.
  *
  * Threading model (this is the crux of the port):
  *   - lwIP RAW callbacks (accept/recv/sent/poll/err) run at PendSV level on rp2
@@ -101,7 +99,7 @@
 
 /* tcp_poll fires every POLL_INTERVAL * 500ms. A conn that has neither received
  * nor acked anything for IDLE_POLLS ticks is treated as a dead half-open peer
- * and aborted (the esp32 SO_KEEPALIVE intent). 0 disables. */
+ * and aborted, in place of TCP keepalive. 0 disables. */
 #define USBIP_POLL_INTERVAL 4      /* ~2s between polls */
 #define USBIP_IDLE_POLLS    30     /* ~60s idle before abort */
 
@@ -1751,13 +1749,6 @@ int usbip_server_stop(void)
 bool usbip_server_is_running(void)
 {
     return s_running;
-}
-
-int usbip_server_register_virtual_device(virtual_device_t *dev)
-{
-    /* The rp2 pod forwards only the on-bus DUT; no synthetic devices. */
-    (void)dev;
-    return -ENOSYS;
 }
 
 int32_t usbip_server_max_transfer(void)

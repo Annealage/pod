@@ -1,13 +1,11 @@
 /* Annealage Pod: host-portable USB/IP protocol helpers.
  *
- * Pure byte-shuffling. No FreeRTOS, no lwIP, no IDF. Anything that
- * touches a socket or a task lives in usbip_server.c.
+ * Pure byte-shuffling with no lwIP or SDK dependency, so it builds on the
+ * host for the unit tests. The transport is usbip_server_rp2.c.
  *
- * Adapted from referencea/esp-usbip-bridge/main/usbip_server.c
- * (`fill_wire_device_desc`, `make_devid`, `send_ret_submit`,
- * `send_ret_unlink`). The byte order conversions and field
- * placements mirror the reference exactly; deviations are documented
- * in docs/design/usbip-server.md.
+ * The OP_REP / RET_SUBMIT / RET_UNLINK packing follows the kernel spec,
+ * Documentation/usb/usbip_protocol.rst. The split of helpers was modelled on
+ * the server in adafruit/esp-usbip-bridge.
  */
 
 #include "usbip_proto.h"

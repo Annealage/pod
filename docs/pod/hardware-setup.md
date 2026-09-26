@@ -358,11 +358,8 @@ The guide is complete for the VERIFIED interfaces. These items block writing the
 full guide and need a hardware decision plus a firmware change before the
 SUGGESTED sections can be promoted to VERIFIED:
 
-- **DUT nRST pin.** Done in code (needs a hardware test). `_pinmap.NRST` is now
-  GP13 on the RP2350 (GP14 only on the ESP32-S3 carrier), so it can no longer
-  collide with SWDIO, and the unported `power` / `relays` / `carrier` / `compat`
-  cluster now refuses to drive its ESP32-S3 GPIOs on the RP2350 rather than
-  seizing the wrong line. Still unexercised: validate `pod reset --mode nrst` on
+- **DUT nRST pin.** Done in code (needs a hardware test). `_rp2_pinmap.NRST` is
+  GP13, so it can't collide with SWDIO. Still unexercised: validate `pod reset --mode nrst` on
   GP13 once `plan/phase-5` wires it up.
 - **DUT UART pins.** Assign UART1 (suggested GP4/GP5) or a PIO UART.
 - **DUT SPI pins.** Assign SPI0 (suggested GP16-GP19) or a PIO SPI.
@@ -383,5 +380,3 @@ Pins and behaviour above derive from:
 - Logic analyser: `annealage_pod/debug/logic_analyser.py`; usage and electrical
   rules in `logic-analyser.md`.
 - Host workflow: `src/host/README.md`.
-- The ESP32-S3 variant's pin map is **not** applicable here; it lives under
-  `docs/esp32-s3/`.

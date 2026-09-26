@@ -17,11 +17,11 @@ and naming conventions.
   - `ANNEALAGE_POD_RP2350B` - Waveshare RP2350B-Plus-W (RP2350B, 16 MB flash,
     optional 8 MB QSPI PSRAM, radio on GPIO36-39), flashed over USB BOOTSEL.
     See `src/boards/ANNEALAGE_POD_RP2350B/README.md` for the hardware deltas.
-- **ESP32-S3** (prior, superseded design; no new features): single ESP32-S3 +
-  ESP-IDF + MicroPython, C user modules for USB/IP, synthetic CMSIS-DAP-v2, UART
-  bridge, I2C/SPI slave. Its docs are retained for reference at
-  `docs/esp32-s3/spec.md` and `docs/esp32-s3/architecture.md`, with per-workstream
-  notes in `docs/esp32-s3/design/`.
+- **ESP32-S3** (prior design, removed): the code and its docs are no longer in
+  the tree. They're at tag `v1.6.0-native-flash-default`, eg.
+  `git show v1.6.0-native-flash-default:docs/esp32-s3/spec.md`. Its
+  `usbip_server.c` was adapted from adafruit/esp-usbip-bridge, which has no
+  licence, so don't restore it.
 
 ## RP2350 docs (read these before working on the RP2350 target)
 

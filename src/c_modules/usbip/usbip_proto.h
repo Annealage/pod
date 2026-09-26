@@ -1,8 +1,7 @@
 /* Annealage Pod: host-portable USB/IP protocol helpers.
  *
- * Splits the byte-format work out of usbip_server.c so the unit
- * tests under test/unit/usbip/ can exercise it without FreeRTOS,
- * lwIP, or the IDF in scope.
+ * Kept separate from the transport so the unit tests under
+ * test/unit/usbip/ can exercise it without lwIP or the Pico SDK.
  *
  * Convention: the in-memory `usbip_dev_record_t` and
  * `usbip_setup_packet_t` are host byte order; this module produces
@@ -17,7 +16,7 @@
 #include <stdint.h>
 
 #include "usbip_protocol.h"
-#include "virtual_device.h"
+#include "usbip_device.h"
 
 #ifdef __cplusplus
 extern "C" {
