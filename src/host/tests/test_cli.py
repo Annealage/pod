@@ -153,8 +153,8 @@ class TestUnregister:
 
 
 class TestFlashReset:
-    # flash/reset are wired to the on-pod loader; with an unknown label they
-    # resolve-then-fail (exit 1) rather than printing a stub message.
+    # flash/reset are wired to the on-pod debug stack; with an unknown label
+    # they resolve-then-fail (exit 1) rather than printing a stub message.
     def test_flash_unknown_label_errors(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["pod", "dut", "flash", "nope", "fw.bin"])
         with pytest.raises(SystemExit):

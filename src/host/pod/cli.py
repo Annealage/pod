@@ -496,8 +496,8 @@ def cmd_flm(args):
     With no options, prints what the pod currently has installed. Given any of
     --device / --pack / --download / --force, resolves the algorithm from the
     target's CMSIS pack and installs it, then prints the result. Flashing with
-    --loader flm installs one automatically; this command is for pointing at a
-    specific pack, forcing a refresh, or checking what is loaded.
+    Flashing/erasing installs one automatically; this command is for pointing
+    at a specific pack, forcing a refresh, or checking what is loaded.
     """
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
@@ -719,7 +719,6 @@ def cmd_dut_flash(args):
         result = pod.flash_dut(args.image, target=args.target, addr=addr,
                                keep_attached=args.keep_attached,
                                mass_erase=args.mass_erase,
-                               loader=getattr(args, "loader", None),
                                force=args.force)
     except PodConflictError as exc:
         print(f"pod dut flash: {exc}", file=sys.stderr)
@@ -733,8 +732,7 @@ def cmd_dut_erase(args):
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
     try:
-        result = pod.erase_dut(loader=getattr(args, "loader", None) or "native",
-                               keep_attached=args.keep_attached, force=args.force)
+        result = pod.erase_dut(keep_attached=args.keep_attached, force=args.force)
     except PodConflictError as exc:
         print(f"pod dut erase: {exc}", file=sys.stderr)
         return 1
@@ -1344,18 +1342,12 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    help="Do not detach a live USB/IP session first (risks a wedge)")
     p.add_argument("--mass-erase", action="store_true", dest="mass_erase",
                    help="Erase the entire DUT flash before programming")
-    p.add_argument("--loader", default=None, choices=["native", "flm"],
-                   help="Flash backend: native (per-family NVM, default) or "
-                        "flm (the target's CMSIS-pack algorithm)")
     p.add_argument("--force", action="store_true",
                    help="Bump another caller's USB/IP session instead of refusing")
 
     # dut erase
     p = dut_sub.add_parser("erase", help="Erase the entire DUT flash via the pod")
     p.add_argument("label")
-    p.add_argument("--loader", default=None, choices=["native", "flm"],
-                   help="Flash backend: native (per-family NVM, default) or "
-                        "flm (the target's CMSIS-pack algorithm)")
     p.add_argument("--keep-attached", action="store_true", dest="keep_attached",
                    help="Do not detach a live USB/IP session first (risks a wedge)")
     p.add_argument("--force", action="store_true",
