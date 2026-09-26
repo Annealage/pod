@@ -42,8 +42,8 @@ Keep or edit; flagged because it changes emphasis from the current line.
 It replaces a multi-board, wired-USB probe carrier (the dual-RP2040 Octoprobe Tentacle)
 with a single network-attached board.
 
-Target users: professional embedded and PCB engineers, plus a hobbyist free tier for
-non-commercial use.
+Target users: professional embedded and PCB engineers. The software is open source
+(AGPL-3.0), and the hardware designs are open hardware (CERN-OHL-S-2.0).
 
 ---
 

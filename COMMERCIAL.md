@@ -1,66 +1,42 @@
 # Commercial Licensing
 
-Annealage Pod is published under the **PolyForm Noncommercial License 1.0.0** (see [LICENSE](LICENSE)) for noncommercial use only. This document explains when a commercial licence is required and how to obtain one.
+Annealage Pod is open source under the [GNU Affero General Public License v3.0 only](LICENSE). The AGPL already permits commercial use: a company can run Pod in its own lab, on its own benches, to develop and test its own products, with no licence fee and no obligation to publish anything, as long as it doesn't distribute Pod or offer a modified Pod to others over a network.
 
-## When a commercial licence is required
+A separate commercial licence exists for the cases where the AGPL's source-sharing terms don't fit.
 
-The boundary is the **purpose of your use**, not whether you are a company. The PolyForm Noncommercial License permits any noncommercial purpose; a commercial licence is required when your use is for a commercial purpose, that is, use directed toward commercial advantage or monetary compensation.
+## When you'd want a commercial licence
 
-In practice you need a commercial licence if you use Annealage Pod for purposes such as:
+You need one only if you want to do something the AGPL doesn't allow without releasing your source. For example:
 
-- Developing, validating, or qualifying firmware, hardware, or systems intended to ship in a commercial product.
-- Providing paid services that involve using Annealage Pod on behalf of clients (contracting, consulting, test services).
-- Distributing Annealage Pod, or a modified version, as part of a commercial product or paid service.
-- Hosting Annealage Pod, or a modified version, as a service offered to third parties for a commercial purpose.
+- Shipping Pod, or a modified Pod, inside a product you sell (a test fixture, a production programmer, a lab instrument) without publishing the corresponding source under the AGPL.
+- Offering a modified Pod to third parties over a network, as a hosted service, without publishing your modifications.
+- Combining Pod with proprietary code into a work you distribute, where the AGPL would require the combined work's source to be released.
 
-These are illustrations of commercial-purpose use, not an exhaustive list. If your use is for a commercial purpose by any other route, a commercial licence is required. If any of these may describe your use, contact **andrew@alelec.net** before deploying or distributing.
+If you can meet the AGPL's terms, you don't need a commercial licence.
 
-## When a commercial licence is NOT required
+## How to obtain one
 
-Any noncommercial purpose is permitted free of charge under the PolyForm Noncommercial License. This includes:
+Email **andrew@alelec.net** with your company name and country, a short description of what you intend to build or ship, and whether you intend to redistribute, embed, or host the software. You will receive a licensing proposal within a few business days. If you are unsure whether the AGPL already covers your use, ask; pre-clearance is free.
 
-- Personal projects, hobby work, amateur pursuits, and private experimentation.
-- Education, including teaching, coursework, and student projects (whether or not the student is paid as a teaching assistant).
-- Academic research and experimentation, including funded research at universities and public research institutions.
-- Use by charitable organisations, government agencies, public research institutions, public safety and health organisations, and environmental protection organisations, regardless of funding source.
-- Evaluation and testing with no anticipated commercial application, including evaluation by individuals at a for-profit company, on their own time or otherwise, where there is no commercial purpose to the use.
+## Third-party components
 
-You may study, modify, contribute to, and run Annealage Pod freely for any noncommercial purpose. Being a for-profit company does not by itself require a licence; using the software for a commercial purpose does.
+The commercial licence covers only code whose copyright Andrew Leech holds. Third-party code in this repository stays under its own licence regardless of which licence you take Pod under:
 
-## How to obtain a commercial licence
+- the vendored ARM CMSIS-DAP sources under `src/c_modules/dapprobe/vendor/cmsis-dap/`, and the port files derived from them, are Apache-2.0;
+- the `src/micropython` submodule and the libraries it pulls in (MicroPython, TinyUSB, lwIP, the Pico SDK, cyw43-driver, BTstack, ESP-IDF and others) keep their own licences, some of which restrict use, for example cyw43-driver to Raspberry Pi silicon.
 
-Email **andrew@alelec.net** with:
+[`REUSE.toml`](REUSE.toml), the SPDX headers and [`LICENSES/`](LICENSES/) record the licence of every file. Whatever licence you take Pod under, you must meet those components' terms, including preserving their notices.
 
-1. Your company name, country, and approximate size.
-2. A short description of how you intend to use Annealage Pod.
-3. The approximate number of engineers who will use it.
-4. Whether you intend to redistribute, embed, or host the software.
+## Hardware
 
-You will receive a licensing proposal within a few business days. Standard commercial licences cover internal use by your organisation for hardware bring-up, firmware testing, and hardware-in-the-loop automation, with separately negotiated terms for redistribution, embedding in third-party products, and hosting as a service.
+Hardware designs published in this repository are licensed under `CERN-OHL-S-2.0`. You may build, modify and sell hardware from them, provided you publish your modified design sources under the same licence. Commercial terms for closed derivatives of the hardware designs are available on the same basis as for the software.
 
-Pre-clearance is free. If you are uncertain whether your intended use is permitted under the PolyForm Noncommercial License, ask before deploying. This is faster, cheaper, and lower-risk than discovering the answer through a cease-and-desist letter.
+## Trademarks
 
-## Enforcement
+"Annealage" and "Annealage Pod" are trademarks of Andrew Leech. Neither the AGPL, the CERN-OHL nor a commercial licence grants trademark rights unless it says so explicitly.
 
-Unauthorised commercial use is copyright infringement. The Licensor reserves all rights not expressly granted under the PolyForm Noncommercial License, including the right to:
-
-- Seek injunctive relief to halt unauthorised use.
-- Recover damages or an account of profits.
-- Recover costs of enforcement as the court allows.
-- Issue takedown notices (including DMCA notices) against unauthorised hosting or distribution.
-
-Under the PolyForm Noncommercial License, the first time you are notified in writing of a violation, your licenses can continue if you come into full compliance and take practical steps to correct past violations within **32 days** of the notice; otherwise all your licenses to the software terminate.
-
-Forking, rebranding, hosting, or otherwise redistributing the PolyForm-licensed Annealage Pod as a commercial offering, in whole or in part, with or without modification, is not permitted under the PolyForm Noncommercial License, and the Licensor will pursue such uses. (This concerns code obtained under the PolyForm Noncommercial License. It does not affect any rights you separately hold under a commercial licence.)
-
-## Patent and trademark
-
-The Licensor reserves all patent rights not expressly granted by the PolyForm Noncommercial License or by any commercial licence.
-
-"Annealage" and "Annealage Pod" are trademarks of Andrew Leech. The PolyForm Noncommercial License grants no trademark rights. The PolyForm Noncommercial License does permit you to make and distribute modified versions for a noncommercial purpose, but that copyright permission does not extend to the trademarks. If you distribute a modified version, you must rename it so the name is clearly distinct from "Annealage" and "Annealage Pod" and does not suggest endorsement by or affiliation with the Licensor. The renaming requirement is a trademark matter; it does not restrict the copyright permission PolyForm grants.
+You may say truthfully that your product is based on, or compatible with, Annealage Pod. You may not sell hardware or software under the Annealage or Annealage Pod names, or under names or branding likely to be confused with them, or in a way that suggests endorsement by or affiliation with Andrew Leech. If you distribute a modified version, rename it. Pods built and sold by third parties from the published designs must not be marketed as Annealage Pods.
 
 ## Contributions
 
-Contributions are accepted under the terms in [CONTRIBUTING.md](CONTRIBUTING.md): a Developer Certificate of Origin sign-off, plus a grant to the Licensor of a sublicensable licence to use and relicense the contribution under any terms (including commercial). The contribution is also made available to the public under the repository's outbound licence (PolyForm Noncommercial 1.0.0). This lets the Licensor offer commercial licences that include contributed code without re-clearing each contributor's consent.
-
-If you cannot grant those terms (for example, your employer owns the work and has not authorised the grant, or you require a separate contributor agreement), contact andrew@alelec.net before submitting.
+Contributions are accepted under the terms in [CONTRIBUTING.md](CONTRIBUTING.md): a Developer Certificate of Origin sign-off, plus a grant to Andrew Leech of a licence to use and relicense the contribution under any terms, including commercial. That grant is what allows the commercial licence to include contributed code. Contributions are also available to everyone under the AGPL.

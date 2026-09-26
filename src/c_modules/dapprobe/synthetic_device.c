@@ -32,7 +32,7 @@
  * synchronisation primitive is required for it. The SWO ring is
  * drained under whatever lock swo_read installs internally.
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #include "synthetic_device.h"

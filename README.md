@@ -116,4 +116,13 @@ A purpose-built Annealage Pod carrier board is in development: it wires the DUT 
 
 ## License
 
-Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE): free for non-commercial use (hobbyists, makers, students, research, evaluation). Commercial use needs a separate license, see [COMMERCIAL.md](COMMERCIAL.md). Contributions welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
+Annealage Pod is open source under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`). You can use it for any purpose, commercial included, and modify and redistribute it under the AGPL's terms: if you distribute it, or run a modified version that others use over a network, you must make your source available under the same licence.
+
+- **Firmware exception.** The firmware (`src/boards/`, `src/c_modules/`, `src/mpy/`) carries an additional permission, [`LICENSES/LicenseRef-Annealage-firmware-exception.txt`](LICENSES/LicenseRef-Annealage-firmware-exception.txt), so the built image can be distributed despite linking the cyw43-driver, BTstack and Espressif radio libraries, whose licences are not AGPL-compatible.
+- **Third-party code** keeps its own licence: the vendored ARM CMSIS-DAP sources and the files derived from them are Apache-2.0. [`REUSE.toml`](REUSE.toml) and the SPDX headers are the per-file record, with every licence text under [`LICENSES/`](LICENSES/). The `src/micropython` submodule retains its own licences.
+- **Hardware designs** published in this repository are licensed under the CERN Open Hardware Licence v2, strongly reciprocal (`CERN-OHL-S-2.0`).
+- **Earlier releases.** Versions up to and including `v1.6.0-native-flash-default` were published under a PolyForm Noncommercial notice. All of them are also available under `AGPL-3.0-only`, on the same terms as above, at your choice.
+- **Commercial licence.** If the AGPL's source-sharing terms don't suit you, for example you want to ship a modified Pod inside a closed product, a commercial licence is available; see [COMMERCIAL.md](COMMERCIAL.md).
+- **Trademarks.** "Annealage" and "Annealage Pod" are trademarks of Andrew Leech and are not licensed by the AGPL; see [COMMERCIAL.md](COMMERCIAL.md#trademarks).
+
+Contributions welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).

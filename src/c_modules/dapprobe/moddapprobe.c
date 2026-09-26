@@ -14,7 +14,7 @@
  *   dapprobe.detach()                # soft detach (flag-flip; registry
  *                                    #  is append-only in rev1)
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #include "py/runtime.h"

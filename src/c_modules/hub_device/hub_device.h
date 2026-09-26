@@ -15,7 +15,7 @@
  * for up to ~1 s waiting for an event; if none arrives it returns a ZLP
  * and the host re-polls.
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #ifndef MPY_POD_HUB_DEVICE_H

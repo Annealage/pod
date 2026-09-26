@@ -13,7 +13,7 @@
  * returns the response length. The host then issues a matching Bulk-IN
  * to drain the response.
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #ifndef MPY_POD_DAPPROBE_DAP_CORE_H

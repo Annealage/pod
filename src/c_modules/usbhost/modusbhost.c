@@ -9,7 +9,7 @@
  *     Used to recover from a stuck D+ pull-up when a DUT changes USB
  *     identity in place (e.g. boot1 -> user firmware on Baochip dabao).
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #include "py/runtime.h"

@@ -10,7 +10,7 @@
  *       Register a service under the current hostname.
  *       txt values must be str.  Max 16 TXT key/value pairs.
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #include "py/obj.h"

@@ -20,7 +20,7 @@
  *                                 single static instance for unit-test
  *                                 introspection
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #ifndef MPY_POD_DAPPROBE_SYNTHETIC_DEVICE_H

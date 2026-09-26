@@ -5,7 +5,7 @@
  *   import hub_device
  *   hub_device.attach()    # register the beacon device with usbip
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #include "py/runtime.h"

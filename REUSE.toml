@@ -1,19 +1,52 @@
 version = 1
 
-# Per-file licensing map for Annealage Pod (REUSE 3.0).
-# Authoritative, machine-readable companion to the SPDX headers in source
-# files. Resolves the licence of any path, including files that cannot
-# carry an inline SPDX header (images, JSON, lockfiles, LICENSE itself).
+# Per-file licensing map for Annealage Pod (REUSE 3.3).
+# Machine-readable companion to the SPDX headers in source files. Resolves the
+# licence of any path, including files that cannot carry an inline header
+# (images, JSON, lockfiles, LICENSE itself). Licence texts live in LICENSES/.
+#
+# precedence = "closest": a file's own SPDX header wins; an annotation here
+# only fills in what the file does not declare itself. Third-party files carry
+# their own headers, so they keep their upstream licence.
+#
+# Later annotations take priority over earlier ones for the same path.
 
-# The whole repository is PolyForm Noncommercial 1.0.0.
-# precedence = "aggregate" means this applies to any file that does not
-# declare its own licensing information via header.
+# Everything not otherwise covered: host tooling, docs, tests, tools.
 [[annotations]]
-path = "**/*"
-precedence = "aggregate"
+path = "**"
+precedence = "closest"
 SPDX-FileCopyrightText = "2026 Andrew Leech"
-SPDX-License-Identifier = "PolyForm-Noncommercial-1.0.0"
+SPDX-License-Identifier = "AGPL-3.0-only"
 
-# Note: src/micropython is a git submodule (a separate repository) and
-# retains its own upstream MIT licence. REUSE does not descend into
-# submodules, so it is intentionally not annotated here.
+# Firmware: linked into one image with cyw43-driver, BTstack and the Espressif
+# radio libraries, so it carries the additional linking permission.
+[[annotations]]
+path = ["src/boards/**", "src/c_modules/**", "src/mpy/**"]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Andrew Leech"
+SPDX-License-Identifier = "AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception"
+
+# Vendored ARM-software/CMSIS-DAP, unmodified. The source files carry ARM's
+# Apache-2.0 headers; this covers the ones that cannot (the LICENSE file).
+[[annotations]]
+path = "src/c_modules/dapprobe/vendor/cmsis-dap/**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2013-2022 ARM Limited"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Port files derived in part from CMSIS-DAP: Apache-2.0, with ARM's copyright
+# on the derived portions and Andrew Leech's on the modifications.
+[[annotations]]
+path = ["src/c_modules/dapprobe/port/DAP_config.h", "src/c_modules/dapprobe/port/swo_glue.c"]
+precedence = "override"
+SPDX-FileCopyrightText = ["2013-2021 ARM Limited", "2026 Andrew Leech"]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "src/c_modules/dapprobe/port/swd_glue.c"
+precedence = "override"
+SPDX-FileCopyrightText = ["2013-2017 ARM Limited", "2026 Andrew Leech"]
+SPDX-License-Identifier = "Apache-2.0"
+
+# src/micropython is a git submodule (a separate repository) under its own
+# upstream licences. REUSE does not descend into submodules.

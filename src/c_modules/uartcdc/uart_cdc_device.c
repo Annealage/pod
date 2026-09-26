@@ -30,7 +30,7 @@
  * per-connection client_task on APP_CPU. UART driver calls are
  * thread-safe per IDF documentation.
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #include "uart_cdc_device.h"

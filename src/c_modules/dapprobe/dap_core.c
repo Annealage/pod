@@ -23,7 +23,7 @@
  * serial string is a fixed "0123456789AB" so the DAP_Info(SER_NUM)
  * tests are deterministic.
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #include "dap_core.h"

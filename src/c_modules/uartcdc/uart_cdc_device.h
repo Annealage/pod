@@ -9,7 +9,7 @@
  * SET_LINE_CODING is forwarded to uart_param_config() so baud/parity
  * changes from the host take effect on the physical UART.
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #ifndef MPY_POD_UART_CDC_DEVICE_H

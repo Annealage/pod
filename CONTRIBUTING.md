@@ -34,7 +34,7 @@ The hook calls `tools/verifygitlog.py --check-file` on each commit message.
 
 ## Contribution licensing
 
-Annealage Pod is offered under the PolyForm Noncommercial License 1.0.0. Andrew Leech also offers commercial licences to organisations whose use is not permitted under the PolyForm Noncommercial License. For that dual model to work, contributions need a clear licensing grant; otherwise contributed code could not be offered under a commercial licence without re-asking every contributor.
+Annealage Pod is offered under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`), with an additional linking permission on the firmware. Andrew Leech also offers commercial licences to organisations that can't meet the AGPL's source-sharing terms. For that dual model to work, contributions need a clear licensing grant; otherwise contributed code could not be offered under a commercial licence without re-asking every contributor.
 
 By submitting a contribution (a pull request, patch, or any change) to this project, you agree to the following.
 
@@ -50,13 +50,17 @@ Signed-off-by: Your Name <your.email@example.com>
 
 ### Licence grant
 
-You grant Andrew Leech a perpetual, worldwide, irrevocable, royalty-free, sublicensable, and transferable licence to use, reproduce, modify, distribute, and relicense your contribution, in whole or in part, under any terms, including the PolyForm Noncommercial License and any commercial licence Andrew Leech offers, now or in future.
+You grant Andrew Leech a perpetual, worldwide, irrevocable, royalty-free, sublicensable, and transferable licence to use, reproduce, modify, distribute, and relicense your contribution, in whole or in part, under any terms, including the AGPL and any commercial licence Andrew Leech offers, now or in future.
 
 You confirm you have the right to grant this licence (the contribution is your own work, or you are authorised to submit it under these terms). The grant is royalty-free: no payment is due to you for it.
 
 ### Outbound licence
 
-Your contribution is also made available to the public under the PolyForm Noncommercial License 1.0.0 (the repository's outbound licence). Your own rights to your contribution are not otherwise affected; you retain copyright in your work.
+Your contribution is also made available to the public under the repository's outbound licence: `AGPL-3.0-only`, with the firmware additional permission for contributions under `src/boards/`, `src/c_modules/` and `src/mpy/`. Your own rights to your contribution are not otherwise affected; you retain copyright in your work.
+
+### Third-party code
+
+Code copied or derived from another project keeps that project's licence. Changes to the vendored CMSIS-DAP sources under `src/c_modules/dapprobe/vendor/cmsis-dap/`, or to the port files derived from them, are contributed under Apache-2.0, and must keep the existing ARM copyright and licence notices. If you add code from another project, keep its notices, put an SPDX header on the file, add an annotation to `REUSE.toml` if the file can't carry one, and check `uvx reuse lint` passes. Don't add code whose upstream has no licence.
 
 ### Other terms
 

@@ -12,7 +12,7 @@
  *
  * Reference layout adapted from synthetic_device.c (CMSIS-DAP-v2).
  *
- * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-Annealage-firmware-exception
  */
 
 #include "hub_device.h"

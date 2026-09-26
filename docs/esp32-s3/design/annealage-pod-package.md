@@ -60,7 +60,7 @@ MicroPython core (`machine.Pin`, `machine.I2C`, `machine.WDT`,
 
 `_ina228.py` is a clean-room implementation written from the Texas
 Instruments INA228 datasheet (SBOS882, July 2021 revision). No vendor
-source vendored. The driver is covered by the repo-root PolyForm Noncommercial licence.
+source vendored. The driver is covered by the repository licence (see the README Licence section).
 
 Scope kept narrow: configure shunt calibration, read VBUS voltage and
 shunt CURRENT registers, optionally die temperature. Wider features
