@@ -14,10 +14,10 @@ pod dut reset lab1 --mode sysreset            # reset and run
 ```
 
 The image streams straight into pod RAM and is programmed over SWD; nothing is
-staged on the pod filesystem. The default `loader="native"` uses the validated
-nRF NVMC path; for a non-nRF Cortex-M with a CMSIS pack, use the generic
-CMSIS-FLM runner via `loader="flm"` (needs the target algo extracted and
-deployed). See [debug-stack.md](debug-stack.md).
+staged on the pod filesystem. Flashing always runs the target's CMSIS-FLM
+algorithm, resolved from its Device Family Pack and installed on the pod first
+if it has none (see `--target` to name a specific device, and
+[debug-stack.md](debug-stack.md) for the generic runner).
 
 ## Recover a hung DUT
 

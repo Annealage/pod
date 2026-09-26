@@ -85,9 +85,8 @@ pod dut reset lab1                  # reset and run (add --mode halt to catch th
 ```
 
 `flash` never stages the image on the Pod filesystem. The on-pod debug stack,
-the FLM flash backends (`loader="native"` default, or `loader="flm"`), and
-deployment of the `annealage_pod` package are in
-[debug-stack.md](debug-stack.md).
+the generic CMSIS-FLM flash backend, and deployment of the `annealage_pod`
+package are in [debug-stack.md](debug-stack.md).
 
 ## 7. First debug
 

@@ -69,7 +69,7 @@ planned, and per-rail power telemetry plus opto-relays arrive with the carrier b
 | Subsystem | Status | One-line |
 |---|---|---|
 | On-pod SWD debugger (DP/AP/MEM-AP, Cortex-M) | `[validated]` | Drives SWD locally; no external probe |
-| Flash a DUT over Wi-Fi | `[validated]` | nRF52 native-NVM + generic CMSIS-FLM loader |
+| Flash a DUT over Wi-Fi | `[validated]` | generic CMSIS-FLM flash algorithm runner |
 | GDB through the pod | `[validated]` | Real `arm-none-eabi-gdb` over Wi-Fi |
 | Logic analyser | `[validated]` | PIO capture, streamed to host, decoded to VCD |
 | DUT peripherals (I2C + SPI target, GPIO, ADC) | `[validated]` | Pod acts as I2C target or SPI target (stream + register-file), drives GPIO / reads ADC |
@@ -105,7 +105,7 @@ silicon.
 
 | DUT family | Status | Flash path | Validated operations | Known limits |
 |---|---|---|---|---|
-| nRF52840 | validated | native NVMC + generic CMSIS-FLM (both validated) | SWD debug (halt / resume / reset, FPB breakpoints, DWT watchpoints), GDB through the pod, register/memory peek-poke, flash + verify over Wi-Fi, USB/IP CDC forward | USB/IP forward validated for the CDC class only; bulk / MSC unproven |
+| nRF52840 | validated | generic CMSIS-FLM (validated) | SWD debug (halt / resume / reset, FPB breakpoints, DWT watchpoints), GDB through the pod, register/memory peek-poke, flash + verify over Wi-Fi, USB/IP CDC forward | USB/IP forward validated for the CDC class only; bulk / MSC unproven |
 | STM32 | pending | generic CMSIS-FLM | none yet (no STM32 DUT wired) | FLM generality on real STM32 silicon is unproven; needs per-target algo extraction plus validation on that silicon |
 | RP2350 as DUT | pending | RP-native bootrom (not built); CMSIS-FLM in principle | none yet (no RP DUT wired) | needs SWD multidrop (dormant + TARGETSEL) bring-up; an interrupted SWD flash can wedge the RP2350's QSPI/XIP state so only a power cycle recovers (observed on the pod's own RP2350; `docs/pod/dev-notes.md`) |
 
@@ -127,10 +127,10 @@ reachable over GDB). Validated against an nRF52840 (DPIDR
 
 ### Flashing a DUT over Wi-Fi `[validated]`
 A DUT image is streamed straight into pod RAM over TCP and programmed chunk-by-chunk
-over SWD, with verify; it never touches a pod filesystem. Two flash paths: a native
-nRF52 NVMC path (the validated one), and a generic CMSIS-FLM runner that executes a
-standard CMSIS pack flash algorithm in the target's own SRAM (so any chip with a CMSIS
-pack is reachable; validated end-to-end on nRF52840).
+over SWD, with verify; it never touches a pod filesystem. Flashing runs a generic
+CMSIS-FLM runner that executes a standard CMSIS pack flash algorithm in the target's
+own SRAM, so any chip with a CMSIS pack is reachable (validated end-to-end on
+nRF52840). It is the only flash path; there is no per-family fallback.
 
 ### GDB through the pod `[validated]`
 A host-side translator presents a standard GDB remote-serial endpoint and bridges to a
@@ -222,8 +222,8 @@ named so that a tool and its CLI invocation are derivable from each other (`dut_
   writes when `value` is given), `dut_mem` (reads inline or to `out_path`, writes when `data`
   is given), `dut_gdb`. The register tools additionally require a halted core.
 - **`dut_` flash and link:** `dut_flash`, `dut_erase`, `dut_flm` (report or install the CMSIS
-  flash algorithm `loader="flm"` uses, including fetching one from the vendor index on
-  demand), `dut_reset`, and `dut_link` with
+  flash algorithm `dut_flash`/`dut_erase` use, including fetching one from the vendor index
+  on demand), `dut_reset`, and `dut_link` with
   `action=status|up|down|reprobe`. `status` is a pure read and starts nothing;
   `up` brings the pod USB host + usbip server up and attaches, and is the only action that
   can activate the pod USB host, which has been observed to disturb the pod's Wi-Fi;
