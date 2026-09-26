@@ -7,8 +7,7 @@ This applies to the Annealage Pod firmware sources under src/boards/, src/c_modu
 If you modify this Program, or any covered work, by linking or combining it with any of the following libraries (or a modified version of that library), containing parts covered by the terms of that library's own licence, the licensors of this Program grant you additional permission to convey the resulting work:
 
 - the cyw43-driver Wi-Fi/Bluetooth driver, under the Raspberry Pi licence distributed with it as LICENSE.RP;
-- the BTstack Bluetooth stack from BlueKitchen GmbH, under the licence distributed with it;
-- the binary Wi-Fi, Bluetooth, PHY and other precompiled libraries distributed by Espressif Systems as part of ESP-IDF.
+- the BTstack Bluetooth stack from BlueKitchen GmbH, under the licence distributed with it.
 
 Corresponding Source for a non-source form of such a combination shall include the source code for the parts of those libraries used, to the extent their licences make that source available, as well as that of the covered work.
 

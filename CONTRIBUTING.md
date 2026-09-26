@@ -14,7 +14,7 @@ Optional body wrapped at 75 characters per line.
 Signed-off-by: Your Name <you@example.com>
 ```
 
-Scope is a short path prefix (`usbhost`, `usbip`, `annealage_pod/boot`, `docs/esp32-s3/runbook`, etc.). Subjects are at most 72 characters and end with a full stop.
+Scope is a short path prefix (`usbhost`, `usbip`, `annealage_pod/debug`, `docs/pod`, etc.). Subjects are at most 72 characters and end with a full stop.
 
 A `pre-commit` hook enforces this. After cloning:
 
@@ -58,9 +58,7 @@ Your contribution is also available to everyone under `AGPL-3.0-only`, plus the 
 
 ### Third-party code
 
-Code taken from another project keeps that project's licence. Changes to the CMSIS-DAP sources in `src/c_modules/dapprobe/vendor/cmsis-dap/`, or the port files derived from them, are contributed under Apache-2.0 and must keep ARM's notices.
-
-If you bring in code from elsewhere, keep its notices, give the file an SPDX header (or a `REUSE.toml` annotation if it can't carry one) and check `uvx reuse lint` passes. Don't add code from an upstream that has no licence.
+Code taken from another project keeps that project's licence. If you bring in code from elsewhere, keep its notices, give the file an SPDX header (or a `REUSE.toml` annotation if it can't carry one) and check `uvx reuse lint` passes. Don't add code from an upstream that has no licence.
 
 ### Other terms
 

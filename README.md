@@ -118,9 +118,9 @@ A purpose-built Annealage Pod carrier board is in development: it wires the DUT 
 
 Annealage Pod is licensed [AGPL-3.0-only](LICENSE). Use it for anything, commercial included; if you distribute it or host a modified version for others, share your source under the same terms. If that doesn't work for you, eg. you want to ship a modified Pod inside a closed product, there's a [commercial licence](COMMERCIAL.md).
 
-The firmware (`src/boards/`, `src/c_modules/`, `src/mpy/`) has an [extra linking permission](LICENSES/LicenseRef-Annealage-firmware-exception.txt), as the built image includes cyw43-driver, BTstack and Espressif's radio libraries which aren't AGPL-compatible.
+The firmware (`src/boards/`, `src/c_modules/`, `src/mpy/`) has an [extra linking permission](LICENSES/LicenseRef-Annealage-firmware-exception.txt), as the built image includes cyw43-driver and BTstack which aren't AGPL-compatible.
 
-Third-party code keeps its own licence: the CMSIS-DAP sources and files derived from them are Apache-2.0, the Waveshare RP2350B board header is BSD-3-Clause, and `src/micropython` has its own. [`REUSE.toml`](REUSE.toml) and the SPDX headers are the per-file record.
+Third-party code keeps its own licence: the Waveshare RP2350B board header is BSD-3-Clause, and `src/micropython` has its own. [`REUSE.toml`](REUSE.toml) and the SPDX headers are the per-file record.
 
 Hardware designs are CERN-OHL-S-2.0.
 

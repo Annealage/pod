@@ -14,9 +14,8 @@ To get one, email **andrew@alelec.net** with your company, what you're planning 
 
 A commercial licence only covers code I hold the copyright on. Third-party code keeps its own licence either way, and you'll need to meet its terms and keep its notices:
 
-- the ARM CMSIS-DAP sources in `src/c_modules/dapprobe/vendor/cmsis-dap/`, and the port files derived from them, are Apache-2.0
 - the Waveshare RP2350B board header, `src/boards/ANNEALAGE_POD_RP2350B/waveshare_rp2350b_plus_w.h`, is BSD-3-Clause
-- the `src/micropython` submodule and what it pulls in (MicroPython, TinyUSB, lwIP, the Pico SDK, cyw43-driver, BTstack, ESP-IDF etc.) all have their own licences. Some restrict use, eg. cyw43-driver is only licensed for Raspberry Pi silicon.
+- the `src/micropython` submodule and what it pulls in (MicroPython, TinyUSB, lwIP, the Pico SDK, cyw43-driver, BTstack etc.) all have their own licences. Some restrict use, eg. cyw43-driver is only licensed for Raspberry Pi silicon.
 
 [`REUSE.toml`](REUSE.toml) and the SPDX headers record the licence of every file.
 
