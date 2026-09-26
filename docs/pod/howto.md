@@ -109,18 +109,19 @@ commit pinned in `pyproject.toml`):
 
 ```bash
 cd src/host
-uv tool install --editable ".[zeroconf,mcp]" --force   # console scripts: pod, pod-mcp
+uv tool install --editable . --force   # console scripts: pod, pod-mcp
 ```
 
 Install it **editable**. A plain (non-editable) install copies the package into
 site-packages, so the `pod` on your PATH keeps running that copy while the
 checkout moves on: new CLI options are rejected and new modules appear missing,
-with nothing to indicate the code being run is stale. Keep the `mcp` extra rather
-than installing `mcp` separately - it carries an `mcp<2` cap, and 2.x drops the
-decorator API the MCP server is built on, so an uncapped resolve leaves `pod-mcp`
-failing at startup with `AttributeError: 'Server' object has no attribute
-'list_tools'`. `pip install -e ./src/host[mcp,zeroconf]` works the same way if you
-prefer pip.
+with nothing to indicate the code being run is stale.
+`pip install -e ./src/host` works the same way if you prefer pip.
+
+`pyproject.toml` caps `mcp` below 2.0; do not install `mcp` over the top of it.
+2.x drops the decorator API the MCP server is built on, so an uncapped resolve
+leaves `pod-mcp` failing at startup with `AttributeError: 'Server' object has no
+attribute 'list_tools'`.
 
 **USB/IP (Linux host, for the USB/IP recipe):** the standard `usbip` client and
 the `vhci_hcd` kernel module, and passwordless `sudo` for `usbip` so `pod attach`

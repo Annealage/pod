@@ -34,21 +34,13 @@ from pod.client import Pod, PodExecError, DEFAULT_SWD_CLKDIV
 from pod.target import PodUnreachable
 from pod import enroll
 
-# Optional mcp import
-try:
-    import mcp.server.stdio
-    import mcp.server
-    from mcp.server import Server
-    from mcp.types import Tool, TextContent
-    _MCP_AVAILABLE = True
-except ImportError:
-    _MCP_AVAILABLE = False
-    Server = None
-    Tool = None
-    TextContent = None
+import mcp.server.stdio
+import mcp.server
+from mcp.server import Server
+from mcp.types import Tool, TextContent
 
 
-# ── tool handler functions (pure logic, testable without mcp) ─────────────
+# ── tool handler functions (pure logic, no mcp types in their signatures) ──
 
 
 def handle_discover_pods(timeout: float = 5.0) -> list:
@@ -561,13 +553,7 @@ def handle_tail_uart(label: str, port: int = None, duration: float = 30.0) -> di
 
 
 def build_server():
-    """Construct and return the MCP Server instance.
-
-    Only call this if _MCP_AVAILABLE is True.
-    """
-    if not _MCP_AVAILABLE:
-        raise RuntimeError("mcp package is not installed.")
-
+    """Construct and return the MCP Server instance."""
     server = Server(
         "annealage-pod",
         instructions=(
@@ -1652,10 +1638,6 @@ def build_server():
 
 
 def main():
-    if not _MCP_AVAILABLE:
-        print("mcp package is not installed. Install with: pip install mcp", file=sys.stderr)
-        sys.exit(1)
-
     import asyncio
 
     server = build_server()

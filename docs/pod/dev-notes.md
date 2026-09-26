@@ -286,15 +286,16 @@ Install with:
 
 ```bash
 cd src/host
-uv tool install --editable ".[zeroconf,mcp]" --force
+uv tool install --editable . --force
 ```
 
-Keep the `mcp` extra rather than passing `mcp` yourself. The extra carries an
-`mcp<2` cap; 2.x drops the decorator API `build_server` uses, so an uncapped
-resolve leaves `pod-mcp` dying at startup with `AttributeError: 'Server' object
-has no attribute 'list_tools'`. Passing dependencies as `--with` arguments keeps
-the resolution out of version control entirely, which is how an unrelated
-`--force` reinstall silently picked up the broken version.
+Do not install `mcp` over the top of that. `pyproject.toml` requires `mcp<2`;
+2.x drops the decorator API `build_server` uses, so an uncapped resolve leaves
+`pod-mcp` dying at startup with `AttributeError: 'Server' object has no
+attribute 'list_tools'`. `zeroconf` and `mcp` are ordinary requirements, not
+extras: passing them as `--with` arguments instead keeps the resolution out of
+version control entirely, which is how an unrelated `--force` reinstall silently
+picked up the broken version.
 
 Editable resolves against one checkout, so `pod` run from a git worktree still
 executes the main checkout's code. That is a separate trap and the reinstall does

@@ -15,7 +15,7 @@ the GDB debug-command server (port 3335). The on-pod side is
 ```bash
 cd src/host
 pip install -e .            # console scripts: `pod`, `pod-mcp`
-pip install -e .[dev]       # + zeroconf, mcp, pytest
+pip install -e .[dev]       # + pytest, to run the suite
 ```
 
 Requirements:
@@ -26,9 +26,10 @@ Requirements:
   and the `mpremote` import (used by the persistent `pod repl` session). This
   build has no `resume` subcommand; `connect socket://HOST:PORT exec ...` does
   not soft-reset by default, which is what the client relies on.
-- `zeroconf` (optional) for mDNS discovery; without it, discovery shells out to
-  `avahi-browse`.
-- `mcp` (optional) for the MCP server.
+- `zeroconf` for mDNS discovery, and `mcp` for the `pod-mcp` server. Both are
+  ordinary requirements: the two console scripts this package installs are built
+  on them. `mcp` is capped below 2.0, which drops the decorator API
+  `build_server` uses.
 - The pod must have `annealage_pod.debug` resident at `/lib` for the DUT
   flash/reset/read verbs (deploy steps in `../../docs/pod/debug-stack.md`).
 

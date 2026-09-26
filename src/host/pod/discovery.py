@@ -291,7 +291,9 @@ def _discover_zeroconf(timeout: float = 5.0) -> list:
 def discover_pods(timeout: float = 5.0) -> list:
     """Discover pods on the local network via mDNS.
 
-    Uses zeroconf if available, otherwise falls back to avahi-browse.
+    zeroconf is a hard requirement of this package and is the normal path. The
+    avahi-browse shell-out below is a fallback for a broken or partial install,
+    not an alternative configuration to plan for.
     Returns a list of PodInfo instances.
     Does NOT modify the registry; the caller decides what to do with results.
     """
