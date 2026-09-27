@@ -23,6 +23,8 @@ import time
 import rp2
 from machine import Pin
 
+from . import pio_arbiter
+
 SYS_HZ = 150_000_000
 
 # Trigger conditions on a single pin.
@@ -86,16 +88,18 @@ class LogicAnalyser:
     # Cap the capture buffer so a request cannot exhaust pod RAM.
     MAX_WORDS = 20000   # 80 KB
 
-    def __init__(self, base_pin, width=1, sm_id=0):
+    def __init__(self, base_pin, width=1, sm_id=0, name="la"):
         if not (1 <= width <= 32):
             raise ValueError("width must be 1..32")
         self.base_pin = base_pin
         self.width = width
         self.sm_id = sm_id
+        self._name = name
         self.sm = None
         self.dma = None
         self.buf = None
         self._prog = None      # the loaded capture program, for per-program teardown
+        pio_arbiter.claim(self._name, sm_id // 4, sm_id % 4)
 
     def _teardown(self):
         if self.dma is not None:
@@ -125,6 +129,7 @@ class LogicAnalyser:
     def release(self):
         self._teardown()
         self.buf = None
+        pio_arbiter.release(self._name)
 
     def capture(self, rate, depth, trigger=None):
         """Capture `depth` samples at ~`rate` Hz; return a result dict.
