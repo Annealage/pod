@@ -1113,6 +1113,7 @@ def build_server():
                 description="Browse the local network for Annealage Pods via mDNS.",
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "timeout": {
                             "type": "number",
@@ -1132,6 +1133,7 @@ def build_server():
                     "Overwrites an existing label."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Label to register under."},
                         "match": {"type": "string", "description": "Disambiguate the mDNS match (hostname/instance); default uses the label."},
@@ -1150,6 +1152,7 @@ def build_server():
                     "`label`)."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."}
                     },
@@ -1166,6 +1169,7 @@ def build_server():
                     "more than one."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "code": {"type": "string", "description": "MicroPython code to run on the pod."},
@@ -1182,6 +1186,7 @@ def build_server():
                     "`mount` argument instead."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "directory": {"type": "string", "description": "Local directory path."},
@@ -1210,6 +1215,7 @@ def build_server():
                     "session_send / session_read / session_close."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "log_path": {
@@ -1276,6 +1282,7 @@ def build_server():
                     "target, log_path, running, mounted}."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "device": {
@@ -1346,6 +1353,7 @@ def build_server():
                     "wait=0 to fire-and-forget and poll with session_read."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "session": {
                             "type": "string",
@@ -1388,6 +1396,7 @@ def build_server():
                     "the log file). The complete record is always in log_path."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "session": {
                             "type": "string",
@@ -1411,6 +1420,7 @@ def build_server():
                     "session, label, device}."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "session": {
                             "type": "string",
@@ -1449,6 +1459,7 @@ def build_server():
                     "slot, not a pod bug)."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "code": {"type": "string", "description": "MicroPython code to run ON THE DUT."},
@@ -1474,6 +1485,7 @@ def build_server():
                     "expected{} block."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "adopt": {"type": "boolean", "description": "Snapshot live ids into the declared expected block.", "default": False},
@@ -1496,6 +1508,7 @@ def build_server():
                     "stole_from]}."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "keep_attached": {
@@ -1521,6 +1534,7 @@ def build_server():
                     "Returns {ok, halted:false}."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                     },
@@ -1541,6 +1555,7 @@ def build_server():
                     "{ok, regsel, value}."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "reg": {
@@ -1572,6 +1587,7 @@ def build_server():
                     "SWD only; needs the DUT wired for SWD."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "addr": {"type": "integer", "description": "Source/destination address."},
@@ -1606,6 +1622,7 @@ def build_server():
                 ),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "listen_port": {
@@ -1633,6 +1650,7 @@ def build_server():
                 ),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "image": {
@@ -1681,6 +1699,7 @@ def build_server():
                 ),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "keep_attached": {
@@ -1717,6 +1736,7 @@ def build_server():
                     "detach, naming them, unless force=true bumps it."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "mode": {
@@ -1759,6 +1779,7 @@ def build_server():
                 ),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "device": {
@@ -1817,6 +1838,7 @@ def build_server():
                     "so run that first."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "action": {
@@ -1845,6 +1867,7 @@ def build_server():
                 description="Read (omit value) or drive a pod GPIO; returns the resulting level.",
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "pin": {"type": "integer", "description": "GPIO number."},
@@ -1860,6 +1883,7 @@ def build_server():
                 description="Sample a pod ADC channel; returns raw u16 and a 3.3V-ref voltage.",
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "pin": {"type": "integer", "description": "ADC-capable GPIO number."},
@@ -1880,6 +1904,7 @@ def build_server():
                 ),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "base_pin": {"type": "integer", "description": "Lowest GPIO sampled."},
@@ -1916,6 +1941,7 @@ def build_server():
                     "persist until released."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "bus": {"type": "string", "enum": ["i2c", "spi"], "description": "Which personality (required for action up/status)."},
@@ -1952,6 +1978,7 @@ def build_server():
                     "ignored for bus=\"i2c\"."),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "bus": {"type": "string", "enum": ["i2c", "spi"], "description": "Which target's register file."},
@@ -1974,6 +2001,7 @@ def build_server():
                 ),
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "label": {"type": "string", "description": "Pod label."},
                         "port": {"type": "integer",

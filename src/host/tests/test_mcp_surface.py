@@ -645,6 +645,29 @@ class TestSchemaDeclarations:
         assert '"minimum": 1, "maximum": 8192' in schema      # size
         assert '"minimum": 1, "maximum": 4096' in schema      # table_size
 
+    @pytest.mark.parametrize("tool", _tool_list_names())
+    def test_every_schema_rejects_unknown_properties(self, tool):
+        # A misspelled optional argument (e.g. i2cbus for i2c_bus) is
+        # otherwise silently dropped rather than reported, so an agent would
+        # get the default value with no indication its argument was ignored.
+        schema = self._schema(tool)
+        assert '"additionalProperties": False' in schema
+
+    def test_unknown_property_is_rejected_before_the_handler_runs(self):
+        import asyncio
+        import mcp.types as t
+        srv = m.build_server()
+        handler = srv.request_handlers[t.CallToolRequest]
+        req = t.CallToolRequest(
+            method="tools/call",
+            params=t.CallToolRequestParams(
+                name="bench_device",
+                arguments={"label": "lab", "bus": "i2c", "action": "up",
+                           "i2cbus": 7}))
+        result = asyncio.run(handler(req)).root
+        assert result.isError
+        assert "i2cbus" in result.content[0].text
+
 
 # ── dut_exec takes the cheapest route to the DUT ───────────────────────────
 
