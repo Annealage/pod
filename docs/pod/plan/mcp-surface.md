@@ -15,10 +15,12 @@ algorithm - the MCP surface previously had no way to trigger a vendor-pack
 download or point at an explicit pack, unlike the CLI's `pod flm`, which
 already could. Same contract, same test file, count updated throughout.
 
-Phase 3, the doc sweep, was done for phase 1 and needs a second pass over what
-phase 2 changed. The pre-cutover names below are retained deliberately: this
-document is the mapping from the old surface to the new one, and it stops being
-readable if they are edited out.
+Phase 3, the doc sweep, is done: `src/host/README.md` and `docs/website-features.md`
+cover both the phase-1 rename and the phase-2 session rework (session ids,
+`dut_open`'s absorbed link/recover/mount, `dut_exec` reusing an open session).
+The pre-cutover names below are retained deliberately: this document is the
+mapping from the old surface to the new one, and it stops being readable if
+they are edited out.
 
 A reorganisation of the pod's MCP tool surface. Today it is 40 flat tools whose names encode no grouping, whose DUT-versus-pod distinction is inconsistent, and whose most capable path (a persistent connection into the DUT) is reachable only by composing three tools nobody would guess at. The target is a smaller surface split into three clearly-named namespaces by *subject*, with the persistent DUT session as the default way to work and the one-shot as an explicit, named fallback.
 
