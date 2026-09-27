@@ -160,23 +160,55 @@ live together:
   per-byte load. The LA capture loop already `sleep_ms(1)`s so it does not starve
   Wi-Fi; that stays.
 
-## Phase E: hardware validation gate
+## Phase E: hardware validation gate - done, hardware-validated
 
 Run both at once on the rig and cross-check, using the SWD-puppet bench (pod drives
 its own SWD to make the nRF52840 SPIM the controller, per the SPI target validation
-setup):
+setup). Harness: `prototypes/spi_puppet.py` (the SWD-puppet) and
+`prototypes/spi_la_crosscheck.py` (`run_all()` for the byte-pattern gate,
+`teardown_order_check()` for the ordering gate).
 
 - SPI target on sm0 as the peripheral, LA on sm1 tapping GP16-19, puppet clocks a
-  known byte pattern.
-- Assert the LA-recovered MOSI/MISO bytes match the pattern the puppet sent and the
-  bytes the SPI target reports, at a few modes and clock rates within the validated
-  125 kHz to 8 MHz band.
-- Assert bring-up/teardown ordering is leak-free: SPI-up then LA-up then LA-down
-  then SPI-down, and the reverse, each leaving `PIO0 CTRL=0x0` and no claimed SM in
-  the arbiter.
+  known byte pattern. Validated at mode 0-3, 125 kHz/1 MHz/4 MHz/8 MHz (`run_all()`):
+  the LA-recovered MOSI and MISO bytes matched the pattern the puppet sent, the
+  bytes the SPI target itself reported, and the puppet's own MISO readback, at
+  every mode/rate.
+- Bring-up/teardown ordering (`teardown_order_check()`): SPI-up, LA-up, LA-down,
+  SPI-down, and the reverse (LA-up, SPI-up, SPI-down, LA-down), both leave
+  `PIO0 CTRL=0x0` and no claimed SM in the arbiter.
 
-Record the measured result at the gate and re-cut anything left, per the
-dynamic-workflow rule in `overview.md`.
+The gate caught one real bug rather than just confirming the design: `LogicAnalyser`
+never actually called `pio_arbiter.claim`/`release` (Phase A's plan said it should;
+the implementation only wired it into `SpiTarget`). A capture ran unregistered, so a
+second, unrelated claim on PIO0 sm1 while the LA was mid-capture would have
+succeeded instead of raising `PioConflict`. Fixed: `LogicAnalyser.__init__` takes a
+`name` (default `"la"`, mirroring `SpiTarget`) and claims `(sm_id // 4, sm_id % 4)`;
+`release()` releases it. `teardown_order_check()`'s arbiter-empty assertion is what
+surfaced the gap and now guards the fix on every re-run.
+
+Two rig-specific things worth recording so a re-run does not re-derive them from
+scratch:
+
+- Trigger the LA on the first SCK edge (GP18), not CS-fall (GP17). Asserting CS and
+  starting SPIM are separate SWD register writes, each a real round trip; that gap
+  alone consumed an entire short high-rate capture window before any bit ever
+  appeared, reading back as a constant "stuck" value the whole way through -
+  nothing was actually broken, the window was just aimed at the wrong interval.
+  Triggering on SCK's own first edge removes the gap from the window entirely.
+- Decode the trigger's own consumed edge, not just the edges after it: the wait
+  instructions consume the first transition as their precondition, so the LA's
+  first captured sample already reflects the post-edge level with nothing before
+  it to diff against. Seeding the decoder's `prev_sck` at the idle level (CPOL)
+  rather than `None` recovers that bit; omitting the seed silently drops bit 0 of
+  byte 0 and cascades a one-bit shift through the rest of the stream.
+- The pod's heap fragments under sustained use to the point that single
+  contiguous allocations in the 4-10 KB range can fail even with hundreds of KB
+  nominally free (`gc.mem_free()`), well before the `LogicAnalyser.MAX_WORDS`/
+  `SpiTarget` 8 KB caps are reached. `spi_la_crosscheck.py`'s `decode_words`
+  streams the packed capture words directly rather than materialising an
+  intermediate per-bit or per-sample list (the earlier list-based version
+  reliably hit this on a several-thousand-sample capture); its `DEPTH` (1500
+  samples) is sized to fit comfortably under it too.
 
 ## Out of scope
 
