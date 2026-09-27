@@ -358,9 +358,6 @@ The guide is complete for the VERIFIED interfaces. These items block writing the
 full guide and need a hardware decision plus a firmware change before the
 SUGGESTED sections can be promoted to VERIFIED:
 
-- **DUT nRST pin.** Done in code (needs a hardware test). `_rp2_pinmap.NRST` is
-  GP13, so it can't collide with SWDIO. Still unexercised: validate `pod dut reset --mode nrst` on
-  GP13 once `plan/phase-5` wires it up.
 - **DUT UART pins.** Assign UART1 (suggested GP4/GP5) or a PIO UART.
 - **DUT SPI pins.** Assign SPI0 (suggested GP16-GP19) or a PIO SPI.
 - **USB-host physical setup.** Specify the connector/cable, VBUS source for a

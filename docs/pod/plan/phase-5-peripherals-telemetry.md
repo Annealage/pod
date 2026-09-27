@@ -344,11 +344,10 @@ forward + REPL held together, confirming Wi-Fi RX does not wedge).
   from power-on. `netboot.main()` now parks the line via `nrst.park()` before
   anything else touches the DUT. "Unhandled" was not neutral here - it asserted
   reset - so the park is part of the deliverable, not a tidy-up.
-- The "unified `annealage_pod.dut.reset(mode=...)`" this task names is the
-  ESP32-S3 carrier API and is NOT the RP2350 entry point. Its `swd` path calls
-  the `dapprobe` C module, which the RP2350 firmware does not build, so it
-  reports the gap and returns False there. That module now lives at
-  `annealage_pod.esp32.dut` behind the ESP32-S3 quarantine, and the unified
+- The "unified `annealage_pod.dut.reset(mode=...)`" this task names was the
+  ESP32-S3 carrier API and is NOT the RP2350 entry point; that carrier code (and
+  `annealage_pod.dut` with it) has since been removed from the tree entirely
+  (retrievable at tag `v1.6.0-native-flash-default` if ever needed). The unified
   reset surface on the RP2350 is `ops.reset(mode="sysreset"|"halt"|"nrst")`,
   which the host `pod dut reset --mode` and the `dut_reset` MCP tool drive.
 
