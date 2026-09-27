@@ -1,13 +1,17 @@
 # Annealage Pod: supervisor and cleanup-hook lifecycle.
 #
 # Per spec.md §5.4 the annealage_pod lifecycle is hybrid: services start at
-# boot and run forever; on REPL TCP disconnect a cleanup hook fires.
-# Default behaviour: DUT power off, level translators tristated, and
-# in-flight queues drained. Test scripts can replace the hook.
+# boot and run forever; boot orchestration can wire a REPL-disconnect handler
+# to call run_cleanup(). Whether that fires, and what it does, is a per-target
+# choice: the pod is a bench multiple agents share in turn, and a hook that
+# powers off DUT rails on every disconnect (a lone-user assumption) would
+# power-cycle whichever agent is mid-session the moment any other agent's
+# call disconnects. _default_cleanup captures that lone-user behaviour
+# (DUT power off, relays open) but is not registered by default; a target
+# that wants it opts in with register_cleanup(_default_cleanup).
 #
-# The supervisor maintains a list of cleanup callables. The default
-# hook is registered at import time. Boot orchestration (boot.py)
-# wires the REPL disconnect handler to call run_cleanup().
+# The supervisor maintains a list of cleanup callables, empty until something
+# registers one.
 
 
 from . import power, relays
@@ -70,6 +74,6 @@ def _default_cleanup():
         print("annealage_pod.supervisor: relays.all_off() raised {!r}".format(exc))
 
 
-# Register the default hook at import time. User code can swap it
-# out via clear_hooks() + register_cleanup(custom).
-register_cleanup(_default_cleanup)
+# Not registered by default (see the module header): a target opts in with
+# register_cleanup(_default_cleanup) if a lone-user power-off-on-disconnect
+# is the behaviour it wants.

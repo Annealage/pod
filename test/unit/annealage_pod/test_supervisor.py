@@ -1,11 +1,18 @@
 # Unit tests for annealage_pod.supervisor cleanup hooks.
 
+import importlib
+
 from annealage_pod import supervisor
 
 
-def test_default_hook_present_on_import():
-    # supervisor registers a default hook at import time.
-    assert len(supervisor.list_hooks()) >= 1
+def test_nothing_registered_on_import():
+    # The pod is a bench multiple agents share in turn; a hook that runs
+    # unconditionally on every REPL disconnect (_default_cleanup's lone-user
+    # power-off) would power-cycle whichever agent is mid-session the moment
+    # any other agent's call disconnects. Nothing auto-registers: a target
+    # opts in explicitly with register_cleanup(_default_cleanup).
+    importlib.reload(supervisor)
+    assert supervisor.list_hooks() == []
 
 
 def test_register_unregister_clear():
