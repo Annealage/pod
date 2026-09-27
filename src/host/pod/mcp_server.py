@@ -4,14 +4,14 @@ Exposes pod control as MCP tools so an agent can drive the hardware
 iteration loop: discover -> dut_flash -> dut_reset -> observe (dut_exec,
 dut_open) -> repeat.
 
-27 tools across three namespaces:
+28 tools across three namespaces:
   pod_    the pod as a managed device: pod_discover, pod_register, pod_info,
           pod_exec, pod_mount, pod_open
   dut_    the device under test, reached by any route: dut_open,
           session_send, session_read, session_close, dut_exec (its REPL);
           dut_identify, dut_halt, dut_resume, dut_reg, dut_mem, dut_gdb (its
-          SWD debug port); dut_flash, dut_erase, dut_reset (its flash);
-          dut_link (its USB/IP link)
+          SWD debug port); dut_flash, dut_erase, dut_reset, dut_flm (its
+          flash); dut_link (its USB/IP link)
   bench_  the pod's instruments pointed at the DUT: bench_gpio, bench_adc,
           bench_la, bench_device, bench_device_regs, bench_uart
 
