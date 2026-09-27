@@ -1006,12 +1006,14 @@ def handle_bench_device(label: str, bus: str = None, action: str = "up",
                      "sda": sda, "name": iname}
             if size is not None:
                 kwargs["size"] = size
-            result = _i2c_device_up(label, **kwargs)
+            result = dict(_i2c_device_up(label, **kwargs))
+            if "bus" in result:
+                result["i2c_bus"] = result.pop("bus")
             _OWNED_PERIPHERALS.setdefault(label, set()).add(iname)
             return result
         listed = _pod_for(label).peripheral_list()
         names = listed.get("instances") or []
-        return {"label": label, "bus": "i2c", "name": iname,
+        return {"label": label, "name": iname,
                 "present": iname in names,
                 "note": "no transfer counters for I2C; presence is read "
                         "from peripheral_list's instance name list"}

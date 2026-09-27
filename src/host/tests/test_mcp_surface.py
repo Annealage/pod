@@ -268,6 +268,31 @@ class TestMcpBenchDeviceRouting:
         fake_pod.i2c_target.assert_called_once()
         assert result["ok"] is True
 
+    def test_i2c_up_renames_hardware_bus_id_out_of_the_bus_key(self, monkeypatch):
+        # bus="i2c" at the call boundary selects the i2c personality; the pod's
+        # own i2c_target() echoes the hardware bus number back under the same
+        # "bus" key, so the response must rename it to i2c_bus before it
+        # reaches the caller, or the one key means two different things
+        # depending on which side of the call you are reading it from.
+        fake_pod = MagicMock()
+        fake_pod.i2c_target.return_value = {"ok": True, "bus": 1}
+        self._patch(monkeypatch, fake_pod)
+        result = m.handle_bench_device("lab", bus="i2c", action="up", i2c_bus=1)
+        assert result["i2c_bus"] == 1
+        assert "bus" not in result
+
+    def test_i2c_status_does_not_echo_the_bus_selector(self, monkeypatch):
+        # action="status" used to answer with "bus": "i2c" (the personality
+        # string), reusing the same key the "up" response uses for the
+        # hardware bus id (an int) - drop it, since `name` already identifies
+        # which instance was inspected.
+        fake_pod = MagicMock()
+        fake_pod.peripheral_list.return_value = {
+            "ok": True, "instances": ["i2c_target"]}
+        self._patch(monkeypatch, fake_pod)
+        result = m.handle_bench_device("lab", bus="i2c", action="status")
+        assert "bus" not in result
+
     def test_i2c_status_reads_peripheral_list(self, monkeypatch):
         # peripherals.instances() answers {"ok": ..., "instances": [name, ...]},
         # a list of names rather than a mapping keyed by name.
