@@ -1966,6 +1966,33 @@ def build_server():
                         "table_size": {"type": "integer", "description": "spi up, personality=regfile: register table size per direction.", "default": 256, "minimum": 1, "maximum": 4096},
                     },
                     "required": ["label"],
+                    "allOf": [
+                        {
+                            "if": {"properties": {"action": {"const": "down"}},
+                                   "required": ["action"]},
+                            "else": {"required": ["bus"]},
+                        },
+                        {
+                            "if": {"properties": {"bus": {"const": "i2c"}},
+                                   "required": ["bus"]},
+                            "then": {"not": {"anyOf": [
+                                {"required": ["mode"]}, {"required": ["bits"]},
+                                {"required": ["miso"]}, {"required": ["mosi"]},
+                                {"required": ["sck"]}, {"required": ["cs"]},
+                                {"required": ["personality"]},
+                                {"required": ["table_size"]},
+                            ]}},
+                        },
+                        {
+                            "if": {"properties": {"bus": {"const": "spi"}},
+                                   "required": ["bus"]},
+                            "then": {"not": {"anyOf": [
+                                {"required": ["addr"]}, {"required": ["regs"]},
+                                {"required": ["i2c_bus"]}, {"required": ["scl"]},
+                                {"required": ["sda"]},
+                            ]}},
+                        },
+                    ],
                 },
             ),
             Tool(

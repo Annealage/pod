@@ -693,6 +693,48 @@ class TestSchemaDeclarations:
         assert result.isError
         assert "i2cbus" in result.content[0].text
 
+    def test_bus_is_required_unless_action_is_down(self, monkeypatch):
+        import asyncio
+        import mcp.types as t
+        monkeypatch.setattr(m, "get_pod", lambda label: {"addr4": "10.0.0.1"})
+        monkeypatch.setattr(m.Pod, "from_entry",
+                            classmethod(lambda cls, e: MagicMock()))
+        srv = m.build_server()
+        handler = srv.request_handlers[t.CallToolRequest]
+
+        def call(arguments):
+            req = t.CallToolRequest(
+                method="tools/call",
+                params=t.CallToolRequestParams(name="bench_device",
+                                               arguments=arguments))
+            return asyncio.run(handler(req)).root
+
+        missing_bus = call({"label": "lab"})
+        assert missing_bus.isError
+        assert "bus" in missing_bus.content[0].text
+
+        down_without_bus = call({"label": "lab", "action": "down"})
+        assert not down_without_bus.isError
+
+    def test_i2c_and_spi_fields_cannot_be_mixed(self):
+        # bus selects which device family "up"/"status" configure; passing
+        # the other family's fields alongside it (e.g. spi's mode with
+        # bus="i2c") would otherwise be silently ignored rather than
+        # reported, so an agent could believe it configured something it did
+        # not.
+        import asyncio
+        import mcp.types as t
+        srv = m.build_server()
+        handler = srv.request_handlers[t.CallToolRequest]
+        req = t.CallToolRequest(
+            method="tools/call",
+            params=t.CallToolRequestParams(
+                name="bench_device",
+                arguments={"label": "lab", "bus": "i2c", "mode": 1}))
+        result = asyncio.run(handler(req)).root
+        assert result.isError
+        assert "mode" in result.content[0].text
+
 
 # ── dut_exec takes the cheapest route to the DUT ───────────────────────────
 
