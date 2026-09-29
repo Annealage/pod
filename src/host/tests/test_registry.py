@@ -85,6 +85,30 @@ class TestGetSetRemove:
         assert "pod-a" in registry["pods"]
         assert "pod-b" in registry["pods"]
 
+    def test_same_fingerprint_under_new_label_replaces_old(self):
+        dut = {"label": "lab-nrf", "target_family": "nRF52840_xxAA"}
+        set_pod("pod-b", {"addr4": "2.2.2.2", "fingerprint": "8e49", "dut": dut,
+                          "notes": "bench 2"})
+        replaced = set_pod("annealage-pod-8b97a",
+                           {"addr4": "2.2.2.3", "fingerprint": "8e49"})
+        assert replaced == ["pod-b"]
+        assert get_pod("pod-b") is None
+        entry = get_pod("annealage-pod-8b97a")
+        assert entry["addr4"] == "2.2.2.3"
+        assert entry["dut"] == dut and entry["notes"] == "bench 2"
+
+    def test_new_registration_fields_win_over_replaced(self):
+        set_pod("old", {"fingerprint": "aa", "dut": {"label": "x"}})
+        set_pod("new", {"fingerprint": "aa", "dut": {"label": "y"}})
+        assert get_pod("new")["dut"] == {"label": "y"}
+
+    def test_distinct_or_missing_fingerprints_coexist(self):
+        set_pod("a", {"fingerprint": "aa"})
+        set_pod("b", {"fingerprint": "bb"})
+        set_pod("c", {"fingerprint": None})
+        assert set_pod("d", {}) == []
+        assert set(load_registry()["pods"]) == {"a", "b", "c", "d"}
+
 
 class TestReconcile:
     def _make_pod_info(self, address="192.168.0.121"):

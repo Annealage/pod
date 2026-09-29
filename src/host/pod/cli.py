@@ -354,7 +354,8 @@ def cmd_register(args):
         entry.update(extra)
         # Read the fingerprint so an IPv4/mDNS connect is trusted from session
         # one. Best-effort; registration still succeeds if briefly unreachable.
-        from pod.enroll import probe_fingerprint, read_pinmap, carry_over
+        from pod.enroll import (probe_fingerprint, read_pinmap, carry_over,
+                                check_same_board)
         if not args.no_probe:
             fp = probe_fingerprint(entry)
             if fp:
@@ -364,14 +365,21 @@ def cmd_register(args):
                 entry["pins"] = pins
         # A --force re-register refreshes the handles but keeps the existing
         # DUT block / notes / fingerprint / pins (see carry_over).
+        try:
+            check_same_board(label, existing, entry)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 1
         carry_over(existing, entry)
-        set_pod(label, entry)
+        entry = {**entry, "replaced": set_pod(label, entry)}
 
     disp = entry.get("hostname") or entry.get("addr4") or \
         (entry["addr6"][0] if entry["addr6"] else "?")
     fp = entry.get("fingerprint")
     fp_note = f" (fingerprint {fp[:8]}..)" if fp else " (fingerprint not read)"
     print(f"Registered '{label}' -> {disp}:{entry['repl_port']}{fp_note}.")
+    for old in entry.get("replaced") or ():
+        print(f"Removed '{old}': same pod (fingerprint match), now '{label}'.")
     return 0
 
 

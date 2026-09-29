@@ -17,8 +17,12 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def match_discovered(pods, label, match=None):
+def match_discovered(pods, label, match=None, registered=False):
     """Pick the single discovered pod matching `match` (or label) by name.
+
+    With no name match, a lone advertising pod is taken only when the label is
+    new: an already-registered label names a particular board, and whichever
+    pod happens to be advertising alone need not be it.
 
     Returns the PodInfo, or None if there is no unambiguous match.
     """
@@ -31,9 +35,25 @@ def match_discovered(pods, label, match=None):
             cands.append(p)
     if len(cands) == 1:
         return cands[0]
-    if not cands and len(pods) == 1 and not match:
+    if not cands and len(pods) == 1 and not match and not registered:
         return pods[0]
     return None
+
+
+def check_same_board(label, existing, entry):
+    """Refuse to repoint a registered label at a different physical pod.
+
+    Raises ValueError when both the stored and the freshly probed fingerprint
+    are known and differ. Moving a label to new hardware is an unregister
+    followed by a register, never a side effect of refreshing handles.
+    """
+    old = (existing or {}).get("fingerprint")
+    new = entry.get("fingerprint")
+    if old and new and old != new:
+        raise ValueError(
+            "Label '%s' is registered to pod %s but the handles reach pod %s; "
+            "unregister it first to move it to other hardware."
+            % (label, old, new))
 
 
 def entry_from_podinfo(info):
@@ -109,14 +129,15 @@ def register_discovered(label, match=None, timeout=5.0, probe=True, force=False,
     """Browse mDNS, match a pod, and register its handles under `label`.
 
     Raises ValueError if the label exists and force is False, or LookupError if
-    no single pod matches. Returns the stored entry.
+    no single pod matches. Returns the stored entry; `replaced` lists labels the
+    same board was registered under, which set_pod folded into this one.
     """
     existing = get_pod(label)
     if existing is not None and not force:
         raise ValueError(
             "Label '%s' already registered. Use force to overwrite." % label)
     pods = discover_pods(timeout=timeout)
-    info = match_discovered(pods, label, match)
+    info = match_discovered(pods, label, match, registered=existing is not None)
     if info is None:
         raise LookupError(
             "No single pod matching '%s' found via mDNS." % (match or label))
@@ -130,6 +151,7 @@ def register_discovered(label, match=None, timeout=5.0, probe=True, force=False,
         pins = read_pinmap(entry)
         if pins:
             entry["pins"] = pins
+    check_same_board(label, existing, entry)
     carry_over(existing, entry)
-    set_pod(label, entry)
-    return entry
+    replaced = set_pod(label, entry)
+    return {**entry, "replaced": replaced}

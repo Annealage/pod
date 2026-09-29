@@ -311,6 +311,45 @@ class TestCarryOver:
         assert entry == {"addr4": "1.2.3.4"}
 
 
+class TestReRegisterGuards:
+    """A re-register refreshes one board's handles; it never swaps boards."""
+
+    @staticmethod
+    def _pod(host):
+        from types import SimpleNamespace
+        return SimpleNamespace(hostname=host + ".local", name=host + "._x._tcp")
+
+    def test_lone_pod_taken_for_a_new_label(self):
+        from pod.enroll import match_discovered
+        only = self._pod("annealage-pod")
+        assert match_discovered([only], "bench-pod") is only
+
+    def test_lone_pod_not_taken_for_a_registered_label(self):
+        # The named pod is rebooting; the one still advertising is another board.
+        from pod.enroll import match_discovered
+        other = self._pod("annealage-pod")
+        assert match_discovered([other], "annealage-pod-8b97a",
+                                registered=True) is None
+
+    def test_registered_label_still_matches_by_name(self):
+        from pod.enroll import match_discovered
+        want = self._pod("annealage-pod-8b97a")
+        assert match_discovered([self._pod("annealage-pod"), want],
+                                "annealage-pod-8b97a", registered=True) is want
+
+    def test_different_fingerprint_refused(self):
+        from pod.enroll import check_same_board
+        with pytest.raises(ValueError, match="unregister"):
+            check_same_board("pod-b", {"fingerprint": "8e49"},
+                             {"fingerprint": "d83a"})
+
+    def test_same_or_unknown_fingerprint_allowed(self):
+        from pod.enroll import check_same_board
+        check_same_board("pod-b", {"fingerprint": "8e49"}, {"fingerprint": "8e49"})
+        check_same_board("pod-b", {"fingerprint": "8e49"}, {})  # probe failed
+        check_same_board("pod-b", None, {"fingerprint": "8e49"})
+
+
 class TestInstallUdev:
     def test_rule_scopes_to_vhci_and_ignores_mm(self):
         text = cli._udev_rule_text([])

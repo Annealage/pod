@@ -125,12 +125,35 @@ def get_pod(label: str) -> Optional[dict]:
     return registry["pods"].get(label)
 
 
-def set_pod(label: str, entry: dict) -> None:
-    """Insert or replace a pod entry under label."""
+# Fields only a person or a probe sets; a relabel keeps them when the new
+# registration does not set its own.
+_RELABEL_KEEP = ("dut", "notes", "links", "pins")
+
+
+def set_pod(label: str, entry: dict) -> list:
+    """Insert or replace a pod entry under label.
+
+    A fingerprint identifies one physical pod, so any other label holding the
+    same fingerprint is the same board registered twice: it is removed, and its
+    user/probe-managed fields fill any the new entry leaves unset. Returns the
+    labels removed that way.
+    """
     registry = load_registry()
+    pods = registry["pods"]
+    replaced = []
+    fp = entry.get("fingerprint")
+    if fp:
+        for other in [k for k, v in pods.items()
+                      if k != label and v.get("fingerprint") == fp]:
+            old = pods.pop(other)
+            for field in _RELABEL_KEEP:
+                if not entry.get(field) and old.get(field):
+                    entry[field] = old[field]
+            replaced.append(other)
     entry.setdefault("address", _preferred_address(entry))
-    registry["pods"][label] = entry
+    pods[label] = entry
     save_registry(registry)
+    return replaced
 
 
 def update_pod(label: str, **fields) -> Optional[dict]:
