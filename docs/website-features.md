@@ -106,6 +106,7 @@ silicon.
 | DUT family | Status | Flash path | Validated operations | Known limits |
 |---|---|---|---|---|
 | nRF52840 | validated | generic CMSIS-FLM (validated) | SWD debug (halt / resume / reset, FPB breakpoints, DWT watchpoints), GDB through the pod, register/memory peek-poke, flash + verify over Wi-Fi, USB/IP CDC forward | USB/IP forward validated for the CDC class only; bulk / MSC unproven |
+| i.MX RT1052 (Seeed Arch Mix) | validated (flash) | generic CMSIS-FLM, NXP pack's QuadSPI algorithm (validated) | SWD identify, sector erase + program + read-back CRC verify of external QSPI flash over Wi-Fi, bulk memory read, reset back into the DUT's own firmware | mass erase, ELF flash, and GDB not yet exercised; the board's flash is not the pack default, so its DUT block declares `flash_algorithm` |
 | STM32 | pending | generic CMSIS-FLM | none yet (no STM32 DUT wired) | FLM generality on real STM32 silicon is unproven; needs per-target algo extraction plus validation on that silicon |
 | RP2350 as DUT | pending | RP-native bootrom (not built); CMSIS-FLM in principle | none yet (no RP DUT wired) | needs SWD multidrop (dormant + TARGETSEL) bring-up; an interrupted SWD flash can wedge the RP2350's QSPI/XIP state so only a power cycle recovers (observed on the pod's own RP2350; `docs/pod/dev-notes.md`) |
 

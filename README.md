@@ -56,7 +56,7 @@ Status tags: **validated** = exercised on real hardware (an nRF52840 DUT) with a
 | DUT UART-over-TCP bridge | landing | On-device and mDNS-advertised; listener validated, DUT byte-path pending a loopback |
 | INA228 power telemetry, opto-relays, power switching | carrier | Arrives with the carrier board |
 
-DUT support: the on-pod debugger speaks SWD to ARM Cortex-M targets. Any Cortex-M with a CMSIS pack is reachable in principle through the generic FLM runner; a family is only listed as validated once it has been exercised on that silicon. **nRF52840** is validated end-to-end. **STM32** and **RP2350-as-DUT** are wired-up-pending. Non-Cortex-M parts (ESP32-class) are out of scope for SWD, but still reachable over USB/IP, GPIO/ADC, and the DUT-facing peripherals.
+DUT support: the on-pod debugger speaks SWD to ARM Cortex-M targets. Any Cortex-M with a CMSIS pack is reachable in principle through the generic FLM runner; a family is only listed as validated once it has been exercised on that silicon. **nRF52840** is validated end-to-end. **i.MX RT1052** (Cortex-M7, external QSPI flash, on a Seeed Arch Mix) is validated for flash + verify through the NXP pack. **STM32** and **RP2350-as-DUT** are wired-up-pending. Non-Cortex-M parts (ESP32-class) are out of scope for SWD, but still reachable over USB/IP, GPIO/ADC, and the DUT-facing peripherals.
 
 ## For agents: the MCP surface
 
