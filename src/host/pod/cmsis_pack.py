@@ -42,7 +42,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pod import flm as _flm
 
@@ -90,14 +90,24 @@ class DeviceInfo:
         return "<DeviceInfo %s (%d algorithms)>" % (self.name,
                                                     len(self.algorithms))
 
-    def flash_algorithm(self, addr=None):
-        """Pick the algorithm to use, optionally the one covering addr.
+    def flash_algorithm(self, addr=None, name=None):
+        """Pick the algorithm to use: by name, else the one covering addr.
 
-        Prefers an algorithm whose region contains addr; otherwise the one the
-        pack marks default; otherwise the only/first one.
+        name is an algorithm's .FLM file stem (see algorithm_name), matched
+        case-insensitively; it is how a board picks between algorithms that
+        cover the same address for different external flash parts. Without a
+        name, prefers an algorithm whose region contains addr; otherwise the
+        one the pack marks default; otherwise the only/first one.
         """
         if not self.algorithms:
             raise PackError("device %s declares no flash algorithm" % self.name)
+        if name is not None:
+            for a in self.algorithms:
+                if algorithm_name(a).lower() == name.lower():
+                    return a
+            raise PackError("device %s has no flash algorithm %r; it has: %s"
+                            % (self.name, name, ", ".join(
+                                algorithm_name(a) for a in self.algorithms)))
         if addr is not None:
             covering = [a for a in self.algorithms
                         if a["start"] <= addr < a["start"] + a["size"]]
@@ -124,6 +134,11 @@ class DeviceInfo:
     def flash_regions(self):
         """Declared flash regions as [(start, size), ...]."""
         return [(m["start"], m["size"]) for m in self.memories if _is_rom(m)]
+
+
+def algorithm_name(algorithm):
+    """An algorithm's name: its .FLM file stem, e.g. MIMXRT105x_QuadSPI_4KB_SEC."""
+    return PurePosixPath(algorithm["file"]).stem
 
 
 def _prefer_default(algorithms):
@@ -409,7 +424,8 @@ def download_pack(vendor, name, version=None, cache=None,
 
 def algo_for_device(device, pack=None, cache=None, addr=None,
                     stack_size=None, page_buffer=None, ram=None,
-                    allow_download=False, vendor=None, pack_name=None):
+                    allow_download=False, vendor=None, pack_name=None,
+                    algorithm=None):
     """Resolve a flash algorithm for a device and return the pod's algo dict.
 
     Args:
@@ -420,6 +436,8 @@ def algo_for_device(device, pack=None, cache=None, addr=None,
             carries no RAM description.
         cache: override the pack cache directory.
         addr: prefer the algorithm covering this flash address.
+        algorithm: the algorithm to use, by name (see algorithm_name); takes
+            precedence over addr and the pack's default.
         stack_size, page_buffer: algorithm RAM layout overrides.
         ram: (start, size) overriding what the pack declares.
         allow_download: permit fetching the pack from the vendor index.
@@ -427,7 +445,9 @@ def algo_for_device(device, pack=None, cache=None, addr=None,
             allow_download when nothing local matches.
 
     Returns:
-        The algo dict for annealage_pod.debug.ops.set_flm_algo().
+        The algo dict for annealage_pod.debug.ops.set_flm_algo(). Its
+        "algorithm" key names the algorithm chosen, so the pod can report
+        which one it holds.
     """
     kwargs = {}
     if stack_size is not None:
@@ -441,7 +461,9 @@ def algo_for_device(device, pack=None, cache=None, addr=None,
             raise PackError(
                 "a bare .FLM carries no RAM description; pass ram=(start, size)")
         image = _flm.parse_flm(Path(pack).read_bytes())
-        return image.build_algo(ram[0], ram[1], name=device, **kwargs)
+        algo = image.build_algo(ram[0], ram[1], name=device, **kwargs)
+        algo["algorithm"] = Path(pack).stem
+        return algo
 
     if pack:
         container, info = Pack(pack), None
@@ -457,9 +479,11 @@ def algo_for_device(device, pack=None, cache=None, addr=None,
             info = container.device(device)
 
     try:
-        algorithm = info.flash_algorithm(addr)
-        ram_start, ram_size = ram if ram else info.ram_region(algorithm)
-        image = _flm.parse_flm(container.read(algorithm["file"]))
-        return image.build_algo(ram_start, ram_size, name=device, **kwargs)
+        chosen = info.flash_algorithm(addr, name=algorithm)
+        ram_start, ram_size = ram if ram else info.ram_region(chosen)
+        image = _flm.parse_flm(container.read(chosen["file"]))
+        algo = image.build_algo(ram_start, ram_size, name=device, **kwargs)
+        algo["algorithm"] = algorithm_name(chosen)
+        return algo
     finally:
         container.close()

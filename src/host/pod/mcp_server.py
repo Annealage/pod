@@ -791,11 +791,12 @@ def handle_dut_erase(label: str, clkdiv: int = DEFAULT_SWD_CLKDIV,
 
 def handle_dut_flm(label: str, device: str = None, pack: str = None,
                    download: bool = False, vendor: str = None,
-                   pack_name: str = None, force: bool = False) -> dict:
+                   pack_name: str = None, force: bool = False,
+                   algorithm: str = None) -> dict:
     """Report or install the DUT's generic CMSIS flash algorithm.
 
     With no options beyond label, returns what the pod currently has
-    installed. Given any of device/pack/download/force, resolves the
+    installed. Given any of device/algorithm/pack/download/force, resolves the
     algorithm from the target's CMSIS pack and installs it. dut_flash/
     dut_erase install one automatically from the local pack cache only;
     this is for pointing at an explicit pack, fetching one that is not
@@ -804,9 +805,12 @@ def handle_dut_flm(label: str, device: str = None, pack: str = None,
     download=True permits fetching the pack from the vendor index when
     nothing local matches; vendor/pack_name select which pack, required with
     download when nothing local matches the device.
+
+    algorithm picks one of the device's algorithms by .FLM stem, overriding
+    the dut block's declared flash_algorithm.
     """
     pod = _pod_for(label)
-    if not any((device, pack, download, force)):
+    if not any((device, algorithm, pack, download, force)):
         return pod.flm_algo_info()
     kwargs = {}
     if pack:
@@ -817,6 +821,8 @@ def handle_dut_flm(label: str, device: str = None, pack: str = None,
             kwargs["vendor"] = vendor
         if pack_name:
             kwargs["pack_name"] = pack_name
+    if algorithm:
+        kwargs["algorithm"] = algorithm
     algo = pod.resolve_flm_algo(device=device, **kwargs)
     return pod.install_flm_algo(algo)
 
@@ -1768,7 +1774,8 @@ def build_server():
                     "Report or install the DUT's generic CMSIS flash algorithm, "
                     "used by dut_flash/dut_erase. With no options beyond "
                     "label, reports what the pod currently has installed. "
-                    "Given any of device/pack/download/force, resolves the "
+                    "Given any of device/algorithm/pack/download/force, "
+                    "resolves the "
                     "algorithm from the target's CMSIS pack and installs it. "
                     "dut_flash/dut_erase install one automatically from the "
                     "local pack cache only; this is the only way to point at "
@@ -1787,6 +1794,10 @@ def build_server():
                         "device": {
                             "type": "string",
                             "description": "CMSIS device name (e.g. \"nRF52840_xxAA\"), overriding the registry's declared target_family.",
+                        },
+                        "algorithm": {
+                            "type": "string",
+                            "description": "Flash algorithm by .FLM stem (e.g. \"MIMXRT105x_QuadSPI_4KB_SEC\"), for a board whose flash is not the pack default; overrides the registry's declared flash_algorithm.",
                         },
                         "pack": {
                             "type": "string",
@@ -2149,7 +2160,8 @@ def build_server():
                     arguments.get("device"), arguments.get("pack"),
                     arguments.get("download", False),
                     arguments.get("vendor"), arguments.get("pack_name"),
-                    arguments.get("force", False))
+                    arguments.get("force", False),
+                    algorithm=arguments.get("algorithm"))
             elif name == "dut_link":
                 result = await asyncio.to_thread(
                     handle_dut_link, arguments["label"],

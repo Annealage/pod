@@ -1424,6 +1424,53 @@ class TestFlmAlgoInstall:
 
         assert result == {"installed": True, "name": "nRF52840_xxAA"}
 
+    def _declared_pod(self, monkeypatch, pod_reports):
+        from pod import cmsis_pack
+        p = Pod.from_entry({"addr4": "10.0.0.1", "dut": {
+            "target_family": "MIMXRT1052xxxxB",
+            "flash_algorithm": "MIMXRT105x_QuadSPI_4KB_SEC"}})
+        monkeypatch.setattr(p, "exec", lambda code: repr(pod_reports) + "\n")
+        resolved = {}
+        monkeypatch.setattr(
+            cmsis_pack, "algo_for_device",
+            lambda device, **k: resolved.update(device=device, **k) or
+            {"name": device, "algorithm": k.get("algorithm"),
+             "flash_base": 0x60000000, "flash_size": 0x800000})
+        monkeypatch.setattr(p, "install_flm_algo",
+                            lambda algo: {"installed": True, **algo})
+        return p, resolved
+
+    def test_ensure_replaces_a_pod_algorithm_other_than_the_declared_one(
+            self, monkeypatch):
+        # The pod holds the pack default (HyperFlash) from an earlier session;
+        # running it against the board's QSPI part would fail or corrupt it.
+        p, resolved = self._declared_pod(monkeypatch, {
+            "installed": True, "name": "MIMXRT1052xxxxB",
+            "algorithm": "MIMXRT105x_HYPER_256KB_SEC"})
+
+        result = p.ensure_flm_algo()
+
+        assert resolved["algorithm"] == "MIMXRT105x_QuadSPI_4KB_SEC"
+        assert result["algorithm"] == "MIMXRT105x_QuadSPI_4KB_SEC"
+
+    def test_ensure_keeps_a_pod_algorithm_matching_the_declared_one(
+            self, monkeypatch):
+        installed = {"installed": True, "name": "MIMXRT1052xxxxB",
+                     "algorithm": "mimxrt105x_quadspi_4kb_sec"}
+        p, resolved = self._declared_pod(monkeypatch, installed)
+
+        assert p.ensure_flm_algo() == installed
+        assert not resolved
+
+    def test_declared_algorithm_does_not_follow_another_named_device(
+            self, monkeypatch):
+        p, resolved = self._declared_pod(monkeypatch, {"installed": False})
+
+        p.ensure_flm_algo(device="nRF52840_xxAA")
+
+        assert resolved["device"] == "nRF52840_xxAA"
+        assert resolved["algorithm"] is None
+
     def test_ensure_always_resolves_fresh_when_an_explicit_pack_is_named(
             self, monkeypatch):
         # An explicit pack has no comparable field in the installed summary

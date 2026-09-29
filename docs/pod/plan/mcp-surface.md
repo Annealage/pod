@@ -107,7 +107,7 @@ Mount is how files reach the DUT, and it is a `dut_open` argument rather than a 
 | --- | --- | --- |
 | `dut_flash` | `flash_dut` | rename only |
 | `dut_erase` | `erase_dut` | rename only. Kept separate from `dut_flash` because it is independently destructive and deserves its own name in a permission prompt |
-| `dut_flm` | (new, 2026-09-04) | report or install the DUT's CMSIS flash algorithm, mirroring the CLI's `pod flm`: no options beyond `label` reports what is installed, `device`/`pack`/`download`/`force` resolve and install one. `download` (+`vendor`/`pack_name`) is the only way this surface can fetch a pack from the vendor index - `dut_flash`/`dut_erase` only ever resolve from the local pack cache |
+| `dut_flm` | (new, 2026-09-04) | report or install the DUT's CMSIS flash algorithm, mirroring the CLI's `pod flm`: no options beyond `label` reports what is installed, `device`/`algorithm`/`pack`/`download`/`force` resolve and install one. `download` (+`vendor`/`pack_name`) is the only way this surface can fetch a pack from the vendor index - `dut_flash`/`dut_erase` only ever resolve from the local pack cache |
 | `dut_reset` | `reset_dut` | rename only |
 
 ### dut link (1)

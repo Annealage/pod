@@ -161,6 +161,7 @@ def flm_algo_info():
     return {
         "installed": True,
         "name": a.get("name"),
+        "algorithm": a.get("algorithm"),
         "blob_bytes": len(a["instructions"]),
         "load_address": a["load_address"],
         "flash_base": a["flash_base"],

@@ -126,6 +126,19 @@ def test_address_outside_every_region_falls_back_to_the_default():
     assert dev.flash_algorithm(0xF0000000)["file"] == "Flash/main.FLM"
 
 
+def test_named_algorithm_wins_over_default_and_address():
+    # A board whose external flash is not the pack default names its algorithm;
+    # both cover the same address, so neither addr nor default can pick it.
+    dev = cmsis_pack.parse_pdsc(_PDSC)["TESTDEV_xxAA"]
+    assert dev.flash_algorithm(0x0, name="UICR")["file"] == "Flash/uicr.FLM"
+
+
+def test_unknown_algorithm_name_lists_the_real_ones():
+    dev = cmsis_pack.parse_pdsc(_PDSC)["TESTDEV_xxAA"]
+    with pytest.raises(cmsis_pack.PackError, match="it has: uicr, main"):
+        dev.flash_algorithm(name="hyper")
+
+
 def test_algorithm_ram_bounds_win_over_the_device_ram():
     # The vendor sized RAMstart/RAMsize so the algorithm does not collide with
     # whatever else the part needs; that must beat the larger device region.

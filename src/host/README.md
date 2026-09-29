@@ -51,7 +51,7 @@ pod mount <label> <dir>               mount a host directory on the pod
 pod exec <label> "<code>"             run MicroPython on the pod, print stdout
 pod cp <label> <src> <dst>            copy a file (':path' = pod side)
 pod pins <label> [--cached]           show the pod's own DUT-facing pin assignments
-pod flm <label> [--force]             report or install the DUT's CMSIS flash algorithm
+pod flm <label> [--algorithm NAME] [--force]  report or install the DUT's CMSIS flash algorithm
 pod install-udev [--vid f055] [--print]  host setup: make ModemManager ignore forwarded DUTs (needs sudo)
 pod open <label> [--log FILE] [--mount DIR] [--exec CODE] [--cp SRC DST] [--soft-reset] [--no-reconnect]
                                       persistent session on the pod's socket REPL: stream stdout to

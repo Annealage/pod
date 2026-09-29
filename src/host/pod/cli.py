@@ -80,6 +80,11 @@ def _add_dut_flags(p):
                    metavar="ADDR", help="DUT flash base address (e.g. 0x0)")
     p.add_argument("--dut-flash-size", default=None, dest="dut_flash_size",
                    metavar="BYTES", help="DUT flash size in bytes")
+    p.add_argument("--dut-flash-algorithm", default=None,
+                   dest="dut_flash_algorithm", metavar="NAME",
+                   help="CMSIS flash algorithm (.FLM stem) when the board's "
+                        "flash is not the pack default, e.g. "
+                        "MIMXRT105x_QuadSPI_4KB_SEC")
     p.add_argument("--dut-usb", default=None, dest="dut_usb", metavar="VID:PID[/CONN]",
                    help="DUT USB id + where it connects, e.g. f055:9802/pod-host "
                         "(conn: pod-host | agent-direct)")
@@ -171,7 +176,7 @@ def _parse_wire(spec):
 def _print_dut_fields(declared, pad):
     """Print a declared DUT block's fields (identity, usb, repl, wiring)."""
     for k in ("label", "target_family", "board", "flash_base", "flash_size",
-              "notes"):
+              "flash_algorithm", "notes"):
         if declared.get(k) is not None:
             v = declared[k]
             v = hex(v) if isinstance(v, int) else v
@@ -214,6 +219,8 @@ def _dut_block_from_args(args):
     if getattr(args, "dut_flash_size", None) is not None:
         block["flash_size"] = int(args.dut_flash_size, 0) \
             if isinstance(args.dut_flash_size, str) else args.dut_flash_size
+    if getattr(args, "dut_flash_algorithm", None) is not None:
+        block["flash_algorithm"] = args.dut_flash_algorithm
     if getattr(args, "dut_notes", None) is not None:
         block["notes"] = args.dut_notes
     if getattr(args, "dut_usb", None):
@@ -502,15 +509,17 @@ def cmd_flm(args):
     """Report or install the DUT's generic CMSIS flash algorithm.
 
     With no options, prints what the pod currently has installed. Given any of
-    --device / --pack / --download / --force, resolves the algorithm from the
-    target's CMSIS pack and installs it, then prints the result. Flashing with
-    Flashing/erasing installs one automatically; this command is for pointing
-    at a specific pack, forcing a refresh, or checking what is loaded.
+    --device / --algorithm / --pack / --download / --force, resolves the
+    algorithm from the target's CMSIS pack and installs it, then prints the
+    result. Flashing/erasing installs one automatically; this command is for
+    pointing at a specific pack or algorithm, forcing a refresh, or checking
+    what is loaded.
     """
     entry = _require_pod(args.label)
     pod = Pod.from_entry(entry)
 
-    installing = any((args.device, args.pack, args.download, args.force))
+    installing = any((args.device, args.algorithm, args.pack, args.download,
+                      args.force))
     if not installing:
         print(pod.flm_algo_info())
         return 0
@@ -524,6 +533,8 @@ def cmd_flm(args):
             kwargs["vendor"] = args.vendor
         if args.pack_name:
             kwargs["pack_name"] = args.pack_name
+    if args.algorithm:
+        kwargs["algorithm"] = args.algorithm
     algo = pod.resolve_flm_algo(device=args.device, **kwargs)
     print(pod.install_flm_algo(algo))
     return 0
@@ -1258,6 +1269,9 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     p.add_argument("label")
     p.add_argument("--device", default=None,
                    help="CMSIS device name (default: the DUT's declared target_family)")
+    p.add_argument("--algorithm", default=None,
+                   help="Flash algorithm by .FLM stem (default: the DUT's "
+                        "declared flash_algorithm, else the pack default)")
     p.add_argument("--pack", default=None,
                    help="Explicit .pack or .FLM path instead of the pack cache")
     p.add_argument("--download", action="store_true",

@@ -319,9 +319,10 @@ class Pod:
 
         Also captures DUT flash geometry (flash_base + flash_size from the
         declared dut block) so the ELF flash path can derive flash_ranges
-        without hardcoding target addresses, and the declared target_family,
+        without hardcoding target addresses, the declared target_family,
         which is the CMSIS device name the generic FLM path resolves a pack
-        with.
+        with, and the declared flash_algorithm, which picks one of that
+        device's algorithms when the board's flash is not the pack default.
         """
         pod = cls(
             address=entry.get("address"),
@@ -343,6 +344,7 @@ class Pod:
         else:
             pod._elf_flash_ranges = None
         pod._cmsis_device = dut.get("target_family")
+        pod._flash_algorithm = dut.get("flash_algorithm")
         # The registry keeps whatever mDNS advertised. control_port is absent on
         # a pod whose firmware predates the holder listener, and that absence is
         # what tells the gate it has no record to consult.
@@ -700,13 +702,16 @@ class Pod:
 
     def resolve_flm_algo(self, device: Optional[str] = None, addr=None,
                          pack=None, allow_download: bool = False,
-                         **kwargs) -> dict:
+                         algorithm: Optional[str] = None, **kwargs) -> dict:
         """Build the algo dict for this DUT from its CMSIS pack.
 
         device defaults to the registry dut block's declared target_family,
-        which is the CMSIS device name (e.g. "nRF52840_xxAA"). addr picks the
-        algorithm covering that flash address when a device has several.
-        Downloading a pack is opt-in; see pod.cmsis_pack.
+        which is the CMSIS device name (e.g. "nRF52840_xxAA"). algorithm names
+        one of the device's algorithms (its .FLM stem) and defaults to the dut
+        block's declared flash_algorithm, which only applies while resolving
+        the declared device; otherwise addr picks the algorithm covering that
+        flash address when a device has several. Downloading a pack is opt-in;
+        see pod.cmsis_pack.
 
         The registry's declared flash geometry (dut.flash_base/flash_size), when
         present, overrides the pack's declared *size* for the algorithm that
@@ -722,6 +727,8 @@ class Pod:
         """
         from pod import cmsis_pack
 
+        if algorithm is None:
+            algorithm = self._declared_algorithm(device, pack)
         device = device or getattr(self, "_cmsis_device", None)
         if not device:
             raise ValueError(
@@ -729,13 +736,26 @@ class Pod:
                 "registry (pod dut identify --dut-family <name>) or pass device=")
         algo = cmsis_pack.algo_for_device(
             device, addr=addr, pack=pack, allow_download=allow_download,
-            **kwargs)
+            algorithm=algorithm, **kwargs)
         flash_ranges = getattr(self, "_elf_flash_ranges", None)
         if flash_ranges:
             fb, fb_end = flash_ranges[0]
             if algo["flash_base"] == fb:
                 algo["flash_size"] = fb_end - fb
         return algo
+
+    def _declared_algorithm(self, device, pack):
+        """The dut block's flash_algorithm, when resolving the declared device.
+
+        A caller naming another device or an explicit pack is asking for
+        something the declaration does not describe, so it does not apply.
+        """
+        if pack is not None:
+            return None
+        declared = getattr(self, "_cmsis_device", None)
+        if device is not None and device != declared:
+            return None
+        return getattr(self, "_flash_algorithm", None)
 
     def ensure_flm_algo(self, addr=None, force: bool = False, **kwargs) -> dict:
         """Make sure the pod has a CMSIS flash algorithm installed.
@@ -753,19 +773,28 @@ class Pod:
         flash_dut would otherwise get the previous device's algorithm run
         against the new target with no error). An explicit pack has no
         comparable field in the installed summary to check, so naming one
-        always resolves fresh. force=True reinstalls unconditionally: use it
-        to select a different flash region on the *same* device (e.g. a
-        different addr), which a device-name comparison cannot detect.
+        always resolves fresh. A wanted algorithm (named, or the dut block's
+        flash_algorithm) must match the installed one's name too, whether it
+        is cached here or reported by the pod, so a pod holding the pack's
+        default algorithm is not used for a board declared with another.
+        force=True reinstalls unconditionally: use it to select a different
+        flash region on the *same* device (e.g. a different addr), which a
+        device-name comparison cannot detect.
         """
         device = kwargs.get("device")
         pack = kwargs.get("pack")
+        algorithm = kwargs.get("algorithm") or \
+            self._declared_algorithm(device, pack)
         named = device is not None or pack is not None
 
         def _matches(info):
             if pack is not None:
                 return False
-            if device is not None:
-                return info.get("name") == device
+            if device is not None and info.get("name") != device:
+                return False
+            if algorithm is not None and \
+                    (info.get("algorithm") or "").lower() != algorithm.lower():
+                return False
             return True
 
         installed = getattr(self, "_flm_installed", None)
@@ -773,7 +802,7 @@ class Pod:
             return installed
         if not force and not named:
             info = self.flm_algo_info()
-            if info.get("installed"):
+            if info.get("installed") and _matches(info):
                 self._flm_installed = info
                 return info
         info = self.install_flm_algo(self.resolve_flm_algo(addr=addr, **kwargs))

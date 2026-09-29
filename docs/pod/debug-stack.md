@@ -220,6 +220,7 @@ whose symbols give the entry points, and whose `DevDscr` holds the
 ```
 pod flm <label>                          # what the pod has installed
 pod flm <label> --device nRF52840_xxAA   # resolve from the pack cache + install
+pod flm <label> --algorithm MIMXRT105x_QuadSPI_4KB_SEC   # pick one by .FLM stem
 pod flm <label> --pack /path/to/x.pack   # or from an explicit pack
 pod dut flash <label> fw.bin              # installs automatically if needed
 ```
@@ -227,6 +228,16 @@ pod dut flash <label> fw.bin              # installs automatically if needed
 The device name defaults to the DUT's declared `target_family` in the registry.
 Packs are cached in `$ANNEALAGE_POD_PACK_CACHE` (default
 `~/.cache/annealage-pod/cmsis-packs`).
+
+Without a name the pack's default algorithm is used, or the one covering an
+address when a flash targets a sub-region like the nRF UICR. That default suits
+the vendor's evaluation board, which isn't always the board on the bench: the
+i.MX RT1052 pack defaults to HyperFlash, while the Seeed Arch Mix carries QSPI
+NOR. Declare the right one once with `pod dut identify <label> --adopt
+--dut-flash-algorithm MIMXRT105x_QuadSPI_4KB_SEC` and flash/erase use it. The
+pod reports the installed algorithm's name, so one left over from an earlier
+session is replaced rather than run against the wrong flash. An unknown name is
+an error listing the device's algorithms.
 
 `page_size` is the *program* granularity (`FlashDevice.szPage`); erase
 granularity comes from the `sectors` map, a list of `(offset_from_flash_base,

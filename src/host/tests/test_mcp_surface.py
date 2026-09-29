@@ -1353,6 +1353,13 @@ class TestForceArgReachesTheHandler:
         self._call("dut_flm", {"label": "lab", "force": True})
         assert fake.call_args[0][-1] is True
 
+    def test_dut_flm_algorithm_reaches_the_handler(self, monkeypatch):
+        fake = MagicMock(return_value={"installed": True})
+        monkeypatch.setattr(m, "handle_dut_flm", fake)
+        self._call("dut_flm", {"label": "lab",
+                               "algorithm": "MIMXRT105x_QuadSPI_4KB_SEC"})
+        assert fake.call_args.kwargs["algorithm"] == "MIMXRT105x_QuadSPI_4KB_SEC"
+
     def test_bench_device_force_true(self, monkeypatch):
         fake = MagicMock(return_value={"ok": True})
         monkeypatch.setattr(m, "handle_bench_device", fake)
