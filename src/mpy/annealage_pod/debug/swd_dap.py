@@ -13,6 +13,8 @@
 # All multi-byte values are little-endian on the wire (SWD) and host-order ints
 # here. Errors raise TransferError with the failing ACK so callers can recover.
 
+import time
+
 from . import swd_pio
 from .swd_pio import SWD_OK, SWD_WAIT, SWD_FAULT
 
@@ -238,6 +240,25 @@ class MEMAP:
             self.dp.write_ap(AP_CSW, csw, self.apsel)
             self._csw = csw
 
+    def reconnect(self, timeout_ms=500):
+        # Re-establish the link after a system reset. Some parts (the i.MX
+        # RT105x) reset their SW-DP and MEM-AP along with the core: the port
+        # stops answering (ack=7) until the line is re-synced, and CSW comes
+        # back at its reset value, which the cached one would skip rewriting.
+        # Retries until a DHCSR read succeeds; a part whose debug port survives
+        # the reset passes on the first attempt.
+        t0 = time.ticks_ms()
+        while True:
+            try:
+                self.dp.connect()
+                self._csw = None
+                self.read32(DHCSR)
+                return
+            except TransferError:
+                if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
+                    raise
+                time.sleep_ms(2)
+
     def idr(self):
         return self.dp.read_ap(AP_IDR, self.apsel)
 
@@ -279,24 +300,12 @@ class MEMAP:
         return out
 
     def write_block32(self, addr, words):
-        count = len(words)
-        self._set_csw(CSW_WORD_INC)
-        i = 0
-        while i < count:
-            self.dp.write_ap(AP_TAR, addr, self.apsel)
-            room = (TAR_INC_BOUNDARY - (addr & (TAR_INC_BOUNDARY - 1))) >> 2
-            n = count - i
-            if n > room:
-                n = room
-            for j in range(n):
-                self.dp.write_ap(AP_DRW, words[i + j], self.apsel)
-            addr += n * 4
-            i += n
-
-    def write_block32_fast(self, addr, words):
-        # Same as write_block32 but uses the transport's inlined DRW streamer for
-        # the hot path (CSW/TAR/SELECT are set here; SELECT stays in AP bank 0,
-        # where CSW/TAR/DRW live, so the streamer's DRW writes are consistent).
+        # Auto-increment TAR within each 1 KB region, re-armed at the boundary,
+        # with the DRW writes run by the transport's inlined streamer rather
+        # than one write_ap call per word: over a per-word Python call path a
+        # 15 KB flash algorithm takes tens of seconds to upload. CSW/TAR/SELECT
+        # are set here; SELECT stays in AP bank 0, where CSW/TAR/DRW live, so
+        # the streamer's DRW writes land consistently.
         count = len(words)
         self._set_csw(CSW_WORD_INC)
         i = 0
@@ -354,6 +363,14 @@ class CortexM:
         raise TransferError("core did not halt (DHCSR=0x%08x)" % self.read_dhcsr())
 
     def resume(self):
+        # C_MASKINTS may only change while the core is halted, and not in the
+        # write that clears C_HALT (ARMv7-M DHCSR: UNPREDICTABLE). A Cortex-M7
+        # keeps it set through a one-write resume, leaving the target running
+        # its firmware with every interrupt masked. DHCSR survives a system
+        # reset, so that outlasts sysreset() too. Drop it with C_HALT held,
+        # then release the core.
+        if self.read_dhcsr() & C_MASKINTS:
+            self.ap.write32(DHCSR, DBGKEY | C_DEBUGEN | C_HALT)
         self.ap.write32(DHCSR, DBGKEY | C_DEBUGEN)
 
     def step(self, maskints=True, timeout=50):
@@ -380,6 +397,7 @@ class CortexM:
         self.ap.write32(DEMCR, DEMCR_TRCENA | DEMCR_VC_CORERESET)
         self.ap.write32(DHCSR, DBGKEY | C_DEBUGEN | C_HALT)
         self.ap.write32(AIRCR, AIRCR_VECTKEY | AIRCR_SYSRESETREQ)
+        self.ap.reconnect()
         for _ in range(timeout):
             dhcsr = self.read_dhcsr()
             if dhcsr & S_HALT:
@@ -390,6 +408,7 @@ class CortexM:
 
     def sysreset(self):
         self.ap.write32(AIRCR, AIRCR_VECTKEY | AIRCR_SYSRESETREQ)
+        self.ap.reconnect()
 
     def cpuid(self):
         return self.ap.read32(CPUID)
