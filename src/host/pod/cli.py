@@ -289,7 +289,8 @@ def cmd_list(args):
     rows = []
     for label, entry in sorted(pods.items()):
         dut = entry.get("dut")
-        dut_s = (dut.get("target_family") or dut.get("label") or "dut") if dut else "-"
+        dut_s = (dut.get("board") or dut.get("target_family") or
+                 dut.get("label") or "dut") if dut else "-"
         host = entry.get("hostname") or entry.get("address", "?")
         repl_port = entry.get("repl_port", "?")
         fp = entry.get("fingerprint")

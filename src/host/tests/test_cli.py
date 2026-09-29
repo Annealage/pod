@@ -43,7 +43,8 @@ class TestListFormat:
             "hostname": "has-dut.local", "addr4": "192.168.0.10", "addr6": [],
             "repl_port": 8266, "fingerprint": "abcd1234ef",
             "mp_version": "1.29.0.preview",
-            "dut": {"target_family": "nRF52840_xxAA", "label": "lab-nrf"},
+            "dut": {"target_family": "nRF52840_xxAA", "board": "PCA10059",
+                    "label": "lab-nrf"},
         })
         set_pod("no-dut", {
             "hostname": "no-dut.local", "addr4": None, "addr6": [],
@@ -59,8 +60,21 @@ class TestListFormat:
         assert lines[0].split()[0] == "DUT"
         # Data rows: first whitespace-delimited field is the DUT column.
         data = {line.split()[0]: line for line in lines[1:]}
-        assert "nRF52840_xxAA" in data
+        assert "PCA10059" in data
+        assert "nRF52840_xxAA" not in data  # board name preferred over chip family
         assert "-" in data  # no-dut row's leading column
+
+    def test_dut_column_falls_back_to_chip_family_without_board(self, monkeypatch, capsys):
+        from pod.registry import set_pod
+        set_pod("no-board", {
+            "hostname": "no-board.local", "addr4": "192.168.0.11", "addr6": [],
+            "repl_port": 8266, "fingerprint": "1234abcdef",
+            "dut": {"target_family": "nRF52840_xxAA"},
+        })
+        monkeypatch.setattr(sys, "argv", ["pod", "list"])
+        main()
+        out, _ = capsys.readouterr()
+        assert "nRF52840_xxAA" in out
 
     def test_table_columns_are_aligned(self, monkeypatch, capsys):
         self._seed()
