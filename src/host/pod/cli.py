@@ -20,6 +20,7 @@ Registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)
 """
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 
@@ -279,24 +280,32 @@ def _caps(entry):
 def cmd_list(args):
     registry = load_registry()
     pods = registry.get("pods", {})
+    if getattr(args, "json", False):
+        print(json.dumps(pods, indent=2))
+        return 0
     if not pods:
         return 0
-    max_label = max((len(k) for k in pods), default=5)
-    max_label = max(max_label, 5)
+    headers = ("DUT", "LABEL", "HOST", "CAPS", "FINGERPRINT", "MP VERSION")
+    rows = []
     for label, entry in sorted(pods.items()):
+        dut = entry.get("dut")
+        dut_s = (dut.get("target_family") or dut.get("label") or "dut") if dut else "-"
         host = entry.get("hostname") or entry.get("address", "?")
         repl_port = entry.get("repl_port", "?")
         fp = entry.get("fingerprint")
-        fp_s = f"fp={fp[:6]}.." if fp else "fp=-"
-        mp = entry.get("mp_version", "")
-        dut = entry.get("dut")
-        dut_s = ""
-        if dut:
-            fam = dut.get("target_family") or dut.get("label") or "dut"
-            dut_s = f"  dut={fam}"
-        desc = f"mp={mp}" if mp else ""
-        print(f"  {label:<{max_label}}  {host}:{repl_port}  {_caps(entry)}  "
-              f"{fp_s}  {desc}{dut_s}")
+        fp_s = fp[:6] if fp else "-"
+        mp = entry.get("mp_version") or "-"
+        rows.append((dut_s, label, f"{host}:{repl_port}", _caps(entry), fp_s, mp))
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+
+    def fmt_row(cols):
+        # Every column left-padded to its width except the last, which is
+        # left bare so rows don't carry trailing whitespace.
+        return "  ".join(c.ljust(w) for c, w in zip(cols[:-1], widths[:-1])) + "  " + cols[-1]
+
+    print(fmt_row(headers))
+    for row in rows:
+        print(fmt_row(row))
     return 0
 
 
@@ -1190,7 +1199,9 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    help="Browse duration in seconds (default: 5)")
 
     # list
-    sub.add_parser("list", help="Show registered pods")
+    p = sub.add_parser("list", help="Show registered pods")
+    p.add_argument("--json", action="store_true",
+                   help="Structured JSON output instead of the aligned table")
 
     # register
     p = sub.add_parser(

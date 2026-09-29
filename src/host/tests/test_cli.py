@@ -1,5 +1,6 @@
 """Tests for pod.cli - invoke main() with synthetic argv and POD_CONFIG_DIR=tmp."""
 
+import json
 import sys
 from types import SimpleNamespace
 import pytest
@@ -27,6 +28,62 @@ class TestListEmpty:
         main()
         out, _ = capsys.readouterr()
         assert out == ""
+
+    def test_list_empty_registry_json_emits_empty_object(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["pod", "list", "--json"])
+        main()
+        out, _ = capsys.readouterr()
+        assert out.strip() == "{}"
+
+
+class TestListFormat:
+    def _seed(self):
+        from pod.registry import set_pod
+        set_pod("has-dut", {
+            "hostname": "has-dut.local", "addr4": "192.168.0.10", "addr6": [],
+            "repl_port": 8266, "fingerprint": "abcd1234ef",
+            "mp_version": "1.29.0.preview",
+            "dut": {"target_family": "nRF52840_xxAA", "label": "lab-nrf"},
+        })
+        set_pod("no-dut", {
+            "hostname": "no-dut.local", "addr4": None, "addr6": [],
+            "repl_port": 8266, "fingerprint": None, "mp_version": "",
+        })
+
+    def test_table_leads_with_dut_column(self, monkeypatch, capsys):
+        self._seed()
+        monkeypatch.setattr(sys, "argv", ["pod", "list"])
+        main()
+        out, _ = capsys.readouterr()
+        lines = out.splitlines()
+        assert lines[0].split()[0] == "DUT"
+        # Data rows: first whitespace-delimited field is the DUT column.
+        data = {line.split()[0]: line for line in lines[1:]}
+        assert "nRF52840_xxAA" in data
+        assert "-" in data  # no-dut row's leading column
+
+    def test_table_columns_are_aligned(self, monkeypatch, capsys):
+        self._seed()
+        monkeypatch.setattr(sys, "argv", ["pod", "list"])
+        main()
+        out, _ = capsys.readouterr()
+        lines = out.splitlines()
+        # Every LABEL column starts at the same offset across all rows.
+        offsets = {line.index("has-dut") if "has-dut" in line else
+                   line.index("no-dut") if "no-dut" in line else
+                   line.index("LABEL")
+                   for line in lines}
+        assert len(offsets) == 1
+
+    def test_json_flag_emits_full_registry_entries(self, monkeypatch, capsys):
+        self._seed()
+        monkeypatch.setattr(sys, "argv", ["pod", "list", "--json"])
+        main()
+        out, _ = capsys.readouterr()
+        parsed = json.loads(out)
+        assert set(parsed) == {"has-dut", "no-dut"}
+        assert parsed["has-dut"]["dut"]["target_family"] == "nRF52840_xxAA"
+        assert parsed["has-dut"]["fingerprint"] == "abcd1234ef"
 
 
 class TestRegisterAndInfo:
