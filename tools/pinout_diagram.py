@@ -119,6 +119,10 @@ def pod_overlay():
     ov[m["i2c_target"]["scl"]] = ("I2C SCL", "V")
     ov[m["dut_uart"]["tx"]] = ("UART TX", "S")
     ov[m["dut_uart"]["rx"]] = ("UART RX", "S")
+    ov[m["spi_target"]["miso"]] = ("SPI MISO", "V")
+    ov[m["spi_target"]["cs"]] = ("SPI CS", "V")
+    ov[m["spi_target"]["sck"]] = ("SPI SCK", "V")
+    ov[m["spi_target"]["mosi"]] = ("SPI MOSI", "V")
     # Fixed pod facts not in pinmap() (hardware-setup.md):
     ov[0] = ("REPL TX", "V")     # backup UART0 REPL console (frozen)
     ov[1] = ("REPL RX", "V")

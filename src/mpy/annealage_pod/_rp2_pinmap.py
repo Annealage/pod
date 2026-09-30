@@ -31,12 +31,12 @@ DUT_UART_NUM = 1
 DUT_UART_TX = 4
 DUT_UART_RX = 5
 
-# DUT SPI target (PIO0, pod is the SPI peripheral). SUGGESTED-untested per
-# hardware-setup.md; confirm wiring before treating as VERIFIED. Reuses the
-# SPI0 block sketch: MISO GP16, CS GP17, SCK GP18, MOSI GP19. PIO imposes no
-# contiguity constraint (MOSI/MISO use in_base/out_base; SCK/CS are absolute
-# wait gpio). Overlaps the LA default block GP16-21, but SPI target and LA are
-# mutually exclusive on PIO0, so the overlap costs nothing.
+# DUT SPI target (PIO0, pod is the SPI peripheral). Hardware-validated
+# (plan/spi-la-concurrency.md). Pins follow the SPI0 block: MISO GP16,
+# CS GP17, SCK GP18, MOSI GP19. PIO imposes no contiguity constraint
+# (MOSI/MISO use in_base/out_base; SCK/CS are absolute wait gpio). Overlaps
+# the LA default block GP16-21; the two share PIO0 on separate state
+# machines and can run together.
 DUT_SPI_MISO = 16
 DUT_SPI_MOSI = 19
 DUT_SPI_SCK = 18

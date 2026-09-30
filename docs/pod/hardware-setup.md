@@ -127,17 +127,16 @@ overlaps the suggested SPI0 pins.
                       GND  - | 13             28 | -  GND
    [V] I2C SDA        GP10 - | 14             27 | -  GP21         LA
    [V] I2C SCL        GP11 - | 15             26 | -  GP20         LA
-                      GP12 - | 16             25 | -  GP19  SPI0 MOSI  [S] LA
+                      GP12 - | 16             25 | -  GP19  SPI0 MOSI  [V] LA
    [S] DUT nRST       GP13 - | 17             24 | -  GND
-                      GND  - | 18             23 | -  GP18  SPI0 SCK   [S] LA
-   [V] SWDIO          GP14 - | 19             22 | -  GP17  SPI0 CS    [S] LA
-   [V] SWCLK          GP15 - | 20             21 | -  GP16  SPI0 MISO  [S] LA
+                      GND  - | 18             23 | -  GP18  SPI0 SCK   [V] LA
+   [V] SWDIO          GP14 - | 19             22 | -  GP17  SPI0 CS    [V] LA
+   [V] SWCLK          GP15 - | 20             21 | -  GP16  SPI0 MISO  [V] LA
                                   +--------------+
 ```
 
-GP16-GP21 are the contiguous logic-analyser default capture block; the suggested
-SPI0 functions (MISO GP16, CS GP17, SCK GP18, MOSI GP19) sit inside it, so use SPI0
-or the default-block analyser one at a time, or move the analyser to GP2-GP9.
+GP16-GP21 are the contiguous logic-analyser default capture block; the
+SPI target pins (MISO GP16, CS GP17, SCK GP18, MOSI GP19) sit inside it, so the analyser can tap the SPI target's pins while it runs (they coexist on PIO0, see [plan/spi-la-concurrency.md](plan/spi-la-concurrency.md)).
 
 Header pin numbers are the standard Raspberry Pi Pico 40-pin layout (identical on
 the Pico 2 W); confirm against the official Pico 2 W pinout diagram. Power pins of
@@ -160,7 +159,7 @@ PIO2 = CYW43 Wi-Fi (reserved). Authoritative: `pio_arbiter.PIO_MAP`.
 | Logic-analyser taps | GP16-21 (default), GND | signals to observe | VERIFIED |
 | DUT reset (nRST) | *GP13 (suggested)*, GND | nRESET | SUGGESTED |
 | UART bridge | *GP4 TX, GP5 RX (suggested)*, GND | RX, TX (crossed), GND | SUGGESTED |
-| SPI functional | *GP18 SCK, GP19 MOSI, GP16 MISO, GP17 CS (suggested)*, GND | crossed, GND | SUGGESTED |
+| SPI target | GP18 SCK, GP19 MOSI, GP16 MISO, GP17 CS, GND | crossed, GND | VERIFIED |
 | USB host (USB/IP) | native USB connector | DUT native USB | SUGGESTED |
 | Backup pod console | GP0 TX, GP1 RX (to probe, not DUT) | n/a | VERIFIED |
 
@@ -286,12 +285,9 @@ adjacent pair on the left header.
 TX/RX cross over (pod TX to DUT RX). UART0 (GP0/GP1) is taken by the backup
 console, so the DUT bridge must use UART1 or a PIO UART.
 
-### 5i. DUT SPI - SUGGESTED (untested)
+### 5i. DUT SPI - the pod as SPI target (VERIFIED)
 
-No RP2350 SPI pins are assigned in firmware yet (`plan/phase-5`). **Suggested:
-SPI0 on GP18 = SCK, GP19 = MOSI, GP16 = MISO, GP17 = CSn (header pins 23, 25, 21,
-22)** - the canonical RP2 SPI0 block, contiguous on the right header, so it matches
-every Pico SPI tutorial.
+The pod is the SPI peripheral (PIO0), presented through `bench_device` with `bus="spi"`. Validated at SPI modes 0-3 and 125 kHz to 8 MHz against an nRF52840 SPIM controller, with the logic analyser tapping the same pins (`plan/spi-la-concurrency.md`). Pins: **GP18 = SCK, GP19 = MOSI, GP16 = MISO, GP17 = CSn (header pins 23, 25, 21, 22)**.
 
 | Pod | DUT |
 |---|---|
@@ -301,8 +297,7 @@ every Pico SPI tutorial.
 | GP17 (CSn) | CS |
 | GND | GND |
 
-Note: GP16-GP19 overlap the logic analyser's default capture block (GP16-21). Use
-SPI **or** the default-block analyser at once, or move the analyser to GP2-GP9.
+Note: GP16-GP19 overlap the logic analyser's default capture block (GP16-21). The analyser can tap these pins while the SPI target runs (separate state machines on PIO0).
 
 ### 5j. USB host - forward the DUT over USB/IP - SUGGESTED (untested)
 

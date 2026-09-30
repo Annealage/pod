@@ -279,7 +279,7 @@
 <rect x="678.0" y="456.0" width="66.0" height="18" rx="3" fill="#2f6fb0"/>
 <text x="711.0" y="469.0" font-family="DejaVu Sans, Arial" font-size="10" fill="#ffffff" text-anchor="middle">I2C1 SCL</text>
 <rect x="747.0" y="456.0" width="66.0" height="18" rx="3" fill="#e8b23a" stroke="#ffffff" stroke-width="2"/>
-<text x="780.0" y="469.0" font-family="DejaVu Sans, Arial" font-size="10" font-weight="700" fill="#111111" text-anchor="middle">LA3 [V]</text>
+<text x="780.0" y="469.0" font-family="DejaVu Sans, Arial" font-size="10" font-weight="700" fill="#111111" text-anchor="middle">SPI MOSI [V]</text>
 <circle cx="528.0" cy="489.0" r="8" fill="#cfd3d6"/>
 <text x="528.0" y="493.0" font-family="DejaVu Sans, Arial" font-size="9" font-weight="700" fill="#111" text-anchor="middle">24</text>
 <rect x="540.0" y="480.0" width="66.0" height="18" rx="3" fill="#3f9c35"/>
@@ -289,7 +289,7 @@
 <rect x="678.0" y="480.0" width="66.0" height="18" rx="3" fill="#2f6fb0"/>
 <text x="711.0" y="493.0" font-family="DejaVu Sans, Arial" font-size="10" fill="#ffffff" text-anchor="middle">I2C1 SDA</text>
 <rect x="747.0" y="480.0" width="66.0" height="18" rx="3" fill="#e8b23a" stroke="#ffffff" stroke-width="2"/>
-<text x="780.0" y="493.0" font-family="DejaVu Sans, Arial" font-size="10" font-weight="700" fill="#111111" text-anchor="middle">LA2 [V]</text>
+<text x="780.0" y="493.0" font-family="DejaVu Sans, Arial" font-size="10" font-weight="700" fill="#111111" text-anchor="middle">SPI SCK [V]</text>
 <circle cx="528.0" cy="513.0" r="8" fill="#cfd3d6"/>
 <text x="528.0" y="517.0" font-family="DejaVu Sans, Arial" font-size="9" font-weight="700" fill="#111" text-anchor="middle">23</text>
 <rect x="540.0" y="504.0" width="66.0" height="18" rx="3" fill="#4d4d4d"/>
@@ -305,7 +305,7 @@
 <rect x="747.0" y="528.0" width="66.0" height="18" rx="3" fill="#7d3ac1"/>
 <text x="780.0" y="541.0" font-family="DejaVu Sans, Arial" font-size="10" fill="#ffffff" text-anchor="middle">UART0 RX</text>
 <rect x="816.0" y="528.0" width="66.0" height="18" rx="3" fill="#e8b23a" stroke="#ffffff" stroke-width="2"/>
-<text x="849.0" y="541.0" font-family="DejaVu Sans, Arial" font-size="10" font-weight="700" fill="#111111" text-anchor="middle">LA1 [V]</text>
+<text x="849.0" y="541.0" font-family="DejaVu Sans, Arial" font-size="10" font-weight="700" fill="#111111" text-anchor="middle">SPI CS [V]</text>
 <circle cx="528.0" cy="561.0" r="8" fill="#cfd3d6"/>
 <text x="528.0" y="565.0" font-family="DejaVu Sans, Arial" font-size="9" font-weight="700" fill="#111" text-anchor="middle">21</text>
 <rect x="540.0" y="552.0" width="66.0" height="18" rx="3" fill="#3f9c35"/>
@@ -317,7 +317,7 @@
 <rect x="747.0" y="552.0" width="66.0" height="18" rx="3" fill="#7d3ac1"/>
 <text x="780.0" y="565.0" font-family="DejaVu Sans, Arial" font-size="10" fill="#ffffff" text-anchor="middle">UART0 TX</text>
 <rect x="816.0" y="552.0" width="66.0" height="18" rx="3" fill="#e8b23a" stroke="#ffffff" stroke-width="2"/>
-<text x="849.0" y="565.0" font-family="DejaVu Sans, Arial" font-size="10" font-weight="700" fill="#111111" text-anchor="middle">LA0 [V]</text>
+<text x="849.0" y="565.0" font-family="DejaVu Sans, Arial" font-size="10" font-weight="700" fill="#111111" text-anchor="middle">SPI MISO [V]</text>
 <text x="942" y="88" font-family="DejaVu Sans, Arial" font-size="12" font-weight="700" fill="#fff">Legend</text>
 <rect x="942" y="96" width="26" height="14" rx="3" fill="#e8b23a"/>
 <text x="976" y="108" font-family="DejaVu Sans, Arial" font-size="11" fill="#dfe3e6">Annealage Pod assignment</text>
