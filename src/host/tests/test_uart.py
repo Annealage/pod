@@ -211,8 +211,9 @@ class TestMcpHandlerTailUart:
         uart_stream_calls = []
 
         class FakePod:
-            def uart_stream(self, port=2000, duration=30.0):
+            def uart_stream(self, port=2000, duration=30.0, on_output=None):
                 uart_stream_calls.append({"port": port, "duration": duration})
+                on_output(b"boot ok\n")
                 return {"ok": True, "bytes_received": 42}
 
         with patch.object(mcp_server.Pod, "from_entry",
@@ -220,6 +221,7 @@ class TestMcpHandlerTailUart:
             result = mcp_server.handle_bench_uart("test-pod")
             assert result["ok"] is True
             assert result["bytes_received"] == 42
+            assert result["text"] == "boot ok\n"
             assert uart_stream_calls[0]["port"] == 2000
 
     def test_handle_bench_uart_uses_registry_port(self, monkeypatch):
@@ -229,7 +231,7 @@ class TestMcpHandlerTailUart:
         uart_stream_calls = []
 
         class FakePod:
-            def uart_stream(self, port=2000, duration=30.0):
+            def uart_stream(self, port=2000, duration=30.0, on_output=None):
                 uart_stream_calls.append({"port": port, "duration": duration})
                 return {"ok": True, "bytes_received": 0}
 
@@ -245,7 +247,7 @@ class TestMcpHandlerTailUart:
         uart_stream_calls = []
 
         class FakePod:
-            def uart_stream(self, port=2000, duration=30.0):
+            def uart_stream(self, port=2000, duration=30.0, on_output=None):
                 uart_stream_calls.append({"port": port, "duration": duration})
                 return {"ok": True, "bytes_received": 0}
 
@@ -261,7 +263,7 @@ class TestMcpHandlerTailUart:
         uart_stream_calls = []
 
         class FakePod:
-            def uart_stream(self, port=2000, duration=30.0):
+            def uart_stream(self, port=2000, duration=30.0, on_output=None):
                 uart_stream_calls.append({"port": port, "duration": duration})
                 return {"ok": True, "bytes_received": 0}
 
@@ -277,7 +279,7 @@ class TestMcpHandlerTailUart:
         uart_stream_calls = []
 
         class FakePod:
-            def uart_stream(self, port=2000, duration=30.0):
+            def uart_stream(self, port=2000, duration=30.0, on_output=None):
                 uart_stream_calls.append({"port": port, "duration": duration})
                 return {"ok": True, "bytes_received": 0}
 

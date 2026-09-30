@@ -24,6 +24,7 @@ import time
 import subprocess as _subprocess
 from typing import Callable, List, Optional
 
+from pod import uart as _uart
 from pod.backend import DebugBackend, check_write_protect
 from pod.routes import is_local_bench
 from pod.target import TargetResolver
@@ -366,6 +367,21 @@ class Pod(DebugBackend):
         # what tells the gate it has no record to consult.
         pod._entry = entry
         return pod
+
+    @classmethod
+    def detached(cls) -> "Pod":
+        """A Pod with no pod behind it, for operations on a host serial device."""
+        return cls(address=None)
+
+    def direct_exec(self, tty: str, code: str) -> dict:
+        """Run MicroPython on a DUT whose serial device is on this host.
+
+        Same result shape as dut_exec. No link is built, so there is nothing to
+        reattach and no settle delay.
+        """
+        res = self._dut_exec_on(tty, code, settle=False)
+        res.pop("transport_error", None)
+        return dict(res, tty=tty, reattached=False)
 
     @property
     def resolver(self) -> TargetResolver:
@@ -2042,8 +2058,6 @@ class Pod(DebugBackend):
         as logic_analyse / flash_dut). Raw bytes, no framing. Returns
         {ok, bytes_received}.
         """
-        import select as _select
-
         sock = None
         for _ in range(150):
             try:
@@ -2057,44 +2071,8 @@ class Pod(DebugBackend):
                 "pod UART port %d refused connection - bridge may not be running"
                 % port)
         sock.settimeout(0.1)
-
-        out_file = None
-        if out_path is not None:
-            out_file = open(out_path, "wb")  # noqa: SIM115 - lifetime spans loop
-
-        bytes_received = 0
-        t0 = time.monotonic()
-        try:
-            while True:
-                try:
-                    chunk = sock.recv(4096)
-                    if chunk == b"":
-                        break  # peer closed
-                except socket.timeout:
-                    chunk = b""
-                if chunk:
-                    bytes_received += len(chunk)
-                    if on_output is not None:
-                        on_output(chunk)
-                    elif out_file is not None:
-                        out_file.write(chunk)
-                    else:
-                        sys.stdout.buffer.write(chunk)
-                        sys.stdout.buffer.flush()
-                if interactive:
-                    r, _, _ = _select.select([sys.stdin.buffer], [], [], 0)
-                    if r:
-                        data = sys.stdin.buffer.read1(4096)
-                        if data:
-                            sock.sendall(data)
-                if duration is not None and (time.monotonic() - t0) >= duration:
-                    break
-        finally:
-            sock.close()
-            if out_file is not None:
-                out_file.close()
-
-        return {"ok": True, "bytes_received": bytes_received}
+        return _uart.pump(sock, duration=duration, on_output=on_output,
+                          interactive=interactive, out_path=out_path)
 
     def telemetry(self) -> None:
         """Read INA228 power telemetry from the pod carrier.

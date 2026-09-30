@@ -32,7 +32,9 @@ from pod.registry import (get_pod, update_pod, reconcile_dut,
                           dut_protect_ranges)
 from pod.client import (Pod, PodExecError, PodConflictError, LocalBenchError,
                         DEFAULT_SWD_CLKDIV)
+from pod import locks, uart
 from pod.backend import debug_backend
+from pod.routes import dut_direct_tty, instruments_pod, is_local_bench, route
 from pod.target import PodUnreachable
 from pod import enroll
 
@@ -82,6 +84,31 @@ def _entry_for(label: str) -> dict:
 def _pod_for(label: str) -> Pod:
     """Resolve a registry label to a Pod client, or raise KeyError."""
     return Pod.from_entry(_entry_for(label))
+
+
+def _direct_tty(label: str):
+    """The host serial device of a DUT plugged into this host, if declared."""
+    return dut_direct_tty(get_pod(label) or {})
+
+
+def _host_pod_for(label: str) -> Pod:
+    """A Pod for operations on a host serial device: the entry's own pod, or a
+    detached one when the entry is a local bench."""
+    entry = get_pod(label)
+    if entry is not None and is_local_bench(entry):
+        return Pod.detached()
+    return _pod_for(label)
+
+
+def _instr_for(label: str) -> Pod:
+    """The pod that provides instruments (gpio, adc, LA, I2C/SPI) for a label."""
+    entry = _entry_for(label)
+    provider = instruments_pod(entry, label)
+    if provider is None:
+        raise LocalBenchError(
+            "'%s' has no instruments route; register a pod with `pod route "
+            "%s instruments pod --pod <label>`" % (label, label))
+    return _pod_for(provider)
 
 
 def _debug_for(label: str):
@@ -284,7 +311,7 @@ def _open_session(label: str, log_path: str = None, device: str = None,
     if cp:
         pre_cp = [tuple(cp)] if cp and not isinstance(cp[0], (list, tuple)) \
             else [tuple(p) for p in cp]
-    pod = _pod_for(label)
+    pod = _host_pod_for(label)
     log_path = log_path or _default_repl_log(label, device)
     s = pod.open_session(log_path=log_path, device=device, mount=mount,
                          pre_exec=pre_exec, pre_cp=pre_cp, soft_reset=soft_reset,
@@ -332,7 +359,7 @@ def handle_dut_open(label: str, device: str = None, log_path: str = None,
     _open_session for the setup chain and the already-open behaviour.
     """
     result = {}
-    device = _device_or_none(device)
+    device = _device_or_none(device) or _direct_tty(label)
     if device is None:
         # Bringing the link up runs code on the pod, which needs the pod's single
         # REPL slot; reusing a link this host already holds does not. So only
@@ -363,7 +390,7 @@ def handle_dut_open(label: str, device: str = None, log_path: str = None,
         if held is not None and held["session"].running:
             result["recover"] = _recover_over_session(sid)
         else:
-            result["recover"] = _pod_for(label).recover_dut_repl(device)
+            result["recover"] = _host_pod_for(label).recover_dut_repl(device)
     result.update(_open_session(
         label, log_path=log_path, device=device, mount=mount, exec=exec,
         cp=cp, soft_reset=soft_reset, unsafe_links=unsafe_links,
@@ -597,6 +624,10 @@ def handle_dut_exec(label: str, code: str, wait: float = 1.0) -> dict:
         stdout = "\n".join(body).strip()
         return dict(out, via="session", session=sid, device=rec["device"],
                     returncode=returncode, stdout=stdout, stderr=stderr)
+    tty = _direct_tty(label)
+    if tty:
+        with locks.hold("tty-" + tty, Pod.detached().caller):
+            return dict(Pod.detached().direct_exec(tty, code), via="direct")
     return dict(_pod_for(label).dut_exec(code), via="attach")
 
 
@@ -901,14 +932,14 @@ def _i2c_device_up(label: str, addr: int = 0x42, regs=None, bus: int = 1,
                       scl: int = 11, sda: int = 10, size: int = 256,
                       name: str = "i2c_target") -> dict:
     """Bring up a persistent hardware I2C target (register file) on the pod."""
-    return _pod_for(label).i2c_target(addr=addr, regs=regs, bus=bus, scl=scl,
+    return _instr_for(label).i2c_target(addr=addr, regs=regs, bus=bus, scl=scl,
                                       sda=sda, size=size, name=name)
 
 
 def _i2c_device_regs(label: str, off: int = 0, length=None, write=None,
                            name: str = "i2c_target") -> dict:
     """Read or write the pod I2C target's register file from the host."""
-    return _pod_for(label).i2c_target_regs(off=off, length=length, write=write,
+    return _instr_for(label).i2c_target_regs(off=off, length=length, write=write,
                                            name=name)
 
 
@@ -917,7 +948,7 @@ def _spi_device_up(label: str, mode: int = 0, bits: int = 8, miso: int = 16,
                       size: int = 1024, personality: str = "stream",
                       table_size: int = 256, name: str = "spi_target") -> dict:
     """Bring up a persistent PIO SPI target on the pod."""
-    return _pod_for(label).spi_target(mode=mode, bits=bits, miso=miso, mosi=mosi,
+    return _instr_for(label).spi_target(mode=mode, bits=bits, miso=miso, mosi=mosi,
                                       sck=sck, cs=cs, size=size,
                                       personality=personality,
                                       table_size=table_size, name=name)
@@ -925,19 +956,19 @@ def _spi_device_up(label: str, mode: int = 0, bits: int = 8, miso: int = 16,
 
 def _spi_device_status(label: str, name: str = "spi_target") -> dict:
     """Read the pod SPI target's status: byte count, transfer count, captured ring."""
-    return _pod_for(label).spi_target_status(name=name)
+    return _instr_for(label).spi_target_status(name=name)
 
 
 def _spi_device_regs(label: str, off: int = 0, length=None, write=None,
                            table: str = "read", name: str = "spi_target") -> dict:
     """Read or write the pod SPI target's regfile backing table from the host."""
-    return _pod_for(label).spi_target_regs(off=off, length=length, write=write,
+    return _instr_for(label).spi_target_regs(off=off, length=length, write=write,
                                            table=table, name=name)
 
 
 def _device_release(label: str, name: str = "*") -> dict:
     """Release one named pod peripheral instance, or all with '*'."""
-    return _pod_for(label).peripheral_release(name=name)
+    return _instr_for(label).peripheral_release(name=name)
 
 
 # Instance names THIS process brought up via bench_device(action="up"), by
@@ -965,7 +996,7 @@ def _release_peripherals(label: str, name=None, force: bool = False) -> dict:
     if name not in (None, "*"):
         return _device_release(label, name=name)
     owned = _OWNED_PERIPHERALS.get(label, set())
-    pod = _pod_for(label)
+    pod = _instr_for(label)
     if force:
         listed = pod.peripheral_list().get("instances") or []
         foreign = [n for n in listed if n not in owned]
@@ -1027,7 +1058,7 @@ def handle_bench_device(label: str, bus: str = None, action: str = "up",
                 result["i2c_bus"] = result.pop("bus")
             _OWNED_PERIPHERALS.setdefault(label, set()).add(iname)
             return result
-        listed = _pod_for(label).peripheral_list()
+        listed = _instr_for(label).peripheral_list()
         names = listed.get("instances") or []
         return {"label": label, "name": iname,
                 "present": iname in names,
@@ -1067,12 +1098,12 @@ def handle_bench_device_regs(label: str, bus: str, off: int = 0, length=None,
 def handle_bench_gpio(label: str, pin: int, value=None, mode: str = "out",
                 pull=None) -> dict:
     """Read (value=None) or drive a pod GPIO."""
-    return _pod_for(label).gpio(pin, value=value, mode=mode, pull=pull)
+    return _instr_for(label).gpio(pin, value=value, mode=mode, pull=pull)
 
 
 def handle_bench_adc(label: str, pin: int) -> dict:
     """Sample a pod ADC channel (raw u16 + 3.3V-ref volts)."""
-    return _pod_for(label).adc(pin)
+    return _instr_for(label).adc(pin)
 
 
 def handle_bench_la(label: str, base_pin: int, width: int = 1,
@@ -1081,21 +1112,32 @@ def handle_bench_la(label: str, base_pin: int, width: int = 1,
                          names=None) -> dict:
     """Capture DUT pins with the pod logic analyser and write a VCD file."""
     trig = tuple(trigger) if trigger else None
-    return _pod_for(label).logic_analyse(
+    return _instr_for(label).logic_analyse(
         base_pin=base_pin, width=width, rate=rate, depth=depth, trigger=trig,
         out_path=out_path, sm_id=sm_id, names=names)
 
 
 def handle_bench_uart(label: str, port: int = None, duration: float = 30.0) -> dict:
-    """Stream DUT UART output (tail) over the pod's TCP UART bridge.
+    """Capture DUT UART output for `duration` seconds.
 
     Bounded by duration (default 30s) so an agent cannot hold an open infinite
-    stream. Read-only: the TX direction is CLI-only. Connects to the pod's
-    always-bound UART listener on the advertised uart_port, or port if given.
+    stream. Read-only: the TX direction is CLI-only. Over a pod, connects to its
+    always-bound UART listener on the advertised uart_port, or port if given; on
+    a `tty` uart route, reads the host serial device. Returns
+    {ok, bytes_received, text}.
     """
     entry = _entry_for(label)
-    effective_port = port or (entry.get("uart_port") or 2000)
-    return Pod.from_entry(entry).uart_stream(port=effective_port, duration=duration)
+    r = route(entry, "uart")
+    chunks = []
+    if r["via"] == "tty":
+        result = uart.stream_tty(r["tty"], baud=r.get("baud", 115200),
+                                 duration=duration, on_output=chunks.append)
+    else:
+        effective_port = port or (entry.get("uart_port") or 2000)
+        result = Pod.from_entry(entry).uart_stream(
+            port=effective_port, duration=duration, on_output=chunks.append)
+    # Captured rather than written out: this process's stdout is the MCP stream.
+    return dict(result, text=b"".join(chunks).decode("utf-8", errors="replace"))
 
 
 # ── MCP server construction ───────────────────────────────────────────────
@@ -2044,10 +2086,12 @@ def build_server():
             Tool(
                 name="bench_uart",
                 description=(
-                    "Stream DUT UART output (tail) over the pod's TCP UART bridge. "
-                    "Connects to the pod's always-bound UART listener and returns "
-                    "bytes received within the duration window. Read-only: the TX "
-                    "direction is available from the CLI only."
+                    "Capture DUT UART output for a duration. Over a pod this "
+                    "connects to the pod's always-bound UART listener; a bench "
+                    "with a `tty` uart route reads its host serial device. "
+                    "Returns the bytes received as text within the duration "
+                    "window. Read-only: the TX direction is available from the "
+                    "CLI only."
                 ),
                 inputSchema={
                     "type": "object",

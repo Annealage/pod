@@ -34,7 +34,9 @@ from pod.registry import (
     dut_protect_ranges,
 )
 from pod.client import Pod, PodExecError, PodConflictError, LocalBenchError
+from pod import uart
 from pod.backend import debug_backend
+from pod.routes import instruments_pod, route
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -47,6 +49,17 @@ def _require_pod(label: str):
         print(f"Label '{label}' not found.", file=sys.stderr)
         sys.exit(1)
     return entry
+
+
+def _instruments_pod(label: str):
+    """The Pod providing instruments for a label (its own, or a borrowed one)."""
+    provider = instruments_pod(_require_pod(label), label)
+    if provider is None:
+        print(f"'{label}' has no instruments route; register a pod with "
+              f"`pod route {label} instruments pod --pod <label>`.",
+              file=sys.stderr)
+        sys.exit(1)
+    return Pod.from_entry(_require_pod(provider))
 
 
 def _now():
@@ -1033,8 +1046,7 @@ def cmd_dut_link(args):
 
 
 def cmd_bench_gpio(args):
-    entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = _instruments_pod(args.label)
     value = None if args.value is None else int(args.value, 0)
     result = pod.gpio(args.pin, value=value, pull=args.pull)
     print(result)
@@ -1042,8 +1054,7 @@ def cmd_bench_gpio(args):
 
 
 def cmd_bench_adc(args):
-    entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = _instruments_pod(args.label)
     result = pod.adc(args.pin)
     print(result)
     return 0 if result.get("ok") else 1
@@ -1059,8 +1070,7 @@ def _parse_pins(spec):
 
 
 def cmd_bench_la(args):
-    entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = _instruments_pod(args.label)
     base, width = _parse_pins(args.pins)
     trigger = None
     if args.trigger:
@@ -1083,8 +1093,7 @@ def cmd_bench_device(args):
     status on --bus spi reads the byte/transfer counters; I2C has none, so
     status there reports whether the named instance is up.
     """
-    entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = _instruments_pod(args.label)
 
     if args.size is not None and not (1 <= args.size <= 8192):
         print("pod bench device: --size must be between 1 and 8192",
@@ -1143,8 +1152,7 @@ def cmd_bench_device_regs(args):
     --off/--length read; --write writes at --off first. --table selects the
     SPI regfile personality's backing table (read/write; ignored for I2C).
     """
-    entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = _instruments_pod(args.label)
     write = [int(x, 0) for x in args.write] if args.write else None
     if args.bus == "i2c":
         result = pod.i2c_target_regs(off=args.off, length=args.length,
@@ -1159,9 +1167,15 @@ def cmd_bench_device_regs(args):
 
 def cmd_bench_uart(args):
     entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    r = route(entry, "uart")
     port = args.port or entry.get("uart_port") or 2000
     try:
+        if r["via"] == "tty":
+            uart.stream_tty(r["tty"], baud=r.get("baud", 115200),
+                            duration=args.duration,
+                            interactive=args.interactive, out_path=args.out)
+            return 0
+        pod = Pod.from_entry(entry)
         pod.uart_stream(port=port, duration=args.duration,
                         interactive=args.interactive,
                         out_path=args.out)

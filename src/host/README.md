@@ -107,7 +107,10 @@ pod bench device <label> [up|status|down] --bus i2c|spi
 pod bench device-regs <label> --bus i2c|spi [--off 0] [--length N] [--write 0xAB ...] [--table read|write]
                                       read/write that device's register file
 pod bench uart <label> [--port PORT] [--duration S] [--tx] [--out FILE]
-                                      stream the DUT's UART over TCP
+                                      stream the DUT's UART (TCP bridge, or the uart tty route)
+pod local add <label> --family DEV (--pyocd UID | --from-mpy-dev NAME) [--uart-tty P] [--usb-tty P] ...
+pod route <label> debug|uart|usb|instruments <via> [--uid U] [--tty P] [--pod L]
+pod pack list | fetch VENDOR NAME | path DEVICE
 ```
 
 The registry lives at `~/.config/pod/pods.json` (override with `POD_CONFIG_DIR`).
@@ -125,6 +128,25 @@ pod exec lab1 "import machine; print(machine.freq())"
 
 `flash` streams the image straight into pod RAM and programs the DUT over SWD;
 nothing is written to the pod filesystem. `--addr` accepts decimal or `0x` hex.
+
+## Local benches (no pod)
+
+A dev board with a built-in programmer (an ST-LINK on a Nucleo, a CMSIS-DAP probe) can be driven through the same `dut` verbs without a pod. pyOCD is installed with the package and drives the probe from this host; targets and flash algorithms come from the CMSIS pack cache (`pod pack`), never pyOCD's own.
+
+```bash
+pod pack fetch Keil STM32H5xx_DFP                 # once; cached under ~/.cache/annealage-pod/cmsis-packs
+pod local add nucleo-h5 --family STM32H563ZITx --from-mpy-dev nucleo-h5 \
+    --flash-base 0x08000000 --flash-size 0x200000  # probe uid + ttys taken from the mpy-dev registry
+pod dut identify nucleo-h5
+pod dut flash nucleo-h5 firmware.elf
+pod dut reset nucleo-h5
+pod bench uart nucleo-h5 --duration 5              # the probe's virtual COM port
+pod route nucleo-h5 instruments pod --pod lab1     # borrow lab1's gpio / adc / logic analyser
+```
+
+Each channel of a registry entry has a route: `debug` (`pod` or `pyocd`), `uart` (`pod` or `tty`), `usb` (`pod` or `agent-direct`) and `instruments` (`pod`, optionally another pod's label, or `none`). A channel with no route uses the pod, so registered pods need no change; a pod can also route just its UART to a host tty (`pod route lab1 uart tty --tty /dev/serial/by-id/...`). `pod exec`, `pod mount` and the other pod-side verbs refuse an entry with no pod.
+
+Limits: a `flash_algorithm` that isn't the pack's default for the flash address can't be selected in pyOCD, so `flash`/`erase` refuse it and that board stays on a pod. Probes that reset the target when a session closes (ST-LINK) only hold a `halt` for the life of the process, so a halt holds across MCP calls but not across separate CLI invocations. Host-attached probes and ttys are guarded by a host-local lock that names the holder; `force` bypasses it.
 
 ## DUT-facing peripherals
 

@@ -9,7 +9,7 @@ Channels and their routes:
 
 ``debug``        ``pod`` (on-pod SWD stack) or ``pyocd`` (host-attached probe)
 ``uart``         ``pod`` (TCP bridge) or ``tty`` (a host serial device)
-``usb``          ``pod`` (usbip forward) or ``agent-direct`` (DUT USB on the host)
+``usb``          ``pod`` or ``pod-host`` (usbip forward) or ``agent-direct`` (DUT USB on the host)
 ``instruments``  ``pod`` (this entry's pod, or a named other pod) or ``none``
 """
 
@@ -20,7 +20,7 @@ CHANNELS = ("debug", "uart", "usb", "instruments")
 _ROUTES = {
     "debug": ("pod", "pyocd"),
     "uart": ("pod", "tty"),
-    "usb": ("pod", "agent-direct"),
+    "usb": ("pod", "pod-host", "agent-direct"),
     "instruments": ("pod", "none"),
 }
 
@@ -77,3 +77,11 @@ def instruments_pod(entry: dict, label: str) -> Optional[str]:
     if r.get("pod"):
         return r["pod"]
     return label if has_pod_handles(entry) else None
+
+
+def dut_direct_tty(entry: dict) -> Optional[str]:
+    """The host serial device of a DUT whose USB is plugged into the host."""
+    usb = (entry.get("dut") or {}).get("usb") or {}
+    if route(entry, "usb")["via"] == "agent-direct":
+        return usb.get("tty")
+    return None

@@ -122,3 +122,53 @@ class TestMpyDevSeeding:
             {"devices": {"lone": {"vid": "f055", "serial_number": "L"}}, "links": []}))
         with pytest.raises(RouteError):
             local.from_mpy_dev("lone")
+
+
+class TestUartPump:
+    def test_socket_stream_ends_when_the_peer_closes(self):
+        import socket
+        from pod import uart
+        a, b = socket.socketpair()
+        a.sendall(b"hello")
+        a.close()
+        b.settimeout(0.1)
+        chunks = []
+        result = uart.pump(b, on_output=chunks.append)
+        assert b"".join(chunks) == b"hello"
+        assert result == {"ok": True, "bytes_received": 5}
+
+    def test_idle_serial_read_is_not_end_of_stream(self):
+        from pod import uart
+
+        class Port:
+            def __init__(self):
+                self.reads = [b"a", b"", b"b"]
+
+            def read(self, n):
+                return self.reads.pop(0) if self.reads else b""
+
+            def close(self):
+                pass
+
+        chunks = []
+        ticks = iter(range(100))
+        import time
+        real = time.monotonic
+        time.monotonic = lambda: next(ticks) * 0.1
+        try:
+            result = uart.pump(uart._SerialConn(Port()), duration=1.0,
+                               on_output=chunks.append, eof_on_empty=False)
+        finally:
+            time.monotonic = real
+        assert b"".join(chunks) == b"ab"
+        assert result["bytes_received"] == 2
+
+
+class TestDirectUsb:
+    def test_direct_tty_only_for_agent_direct_usb(self):
+        from pod.routes import dut_direct_tty
+        direct = {"dut": {"usb": {"conn": "agent-direct", "tty": "/dev/x"}}}
+        forwarded = {"dut": {"usb": {"conn": "pod-host", "tty": "/dev/x"}}}
+        assert dut_direct_tty(direct) == "/dev/x"
+        assert dut_direct_tty(forwarded) is None
+        assert dut_direct_tty({}) is None
