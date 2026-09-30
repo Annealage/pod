@@ -129,7 +129,7 @@ def pod_overlay():
     # channels 0..5 (base_pin=16, width=6). The base/width are configurable, so
     # these are the default channel indices, not a fixed assignment.
     for ch, gp in enumerate((16, 17, 18, 19, 20, 21)):
-        ov.setdefault(gp, ("LA%d" % ch, "S"))
+        ov.setdefault(gp, ("LA%d" % ch, "V"))
     return ov
 
 

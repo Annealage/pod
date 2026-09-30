@@ -286,7 +286,7 @@ memory-out `3334`, logic-analyser-out `3336`.
   `machine-usbhost`, `network-mdns`, and a no-Werror TinyUSB host. There is **no ESP-IDF**
   on this target; the page's "ESP-IDF 5.5" is ESP32-S3-only.
 - **Debug stack:** pure MicroPython (`annealage_pod.debug`) - PIO SWD, ADIv5 DP/AP/MEM-AP,
-  Cortex-M, FPB, an nRF52 NVM flash path plus a generic CMSIS-FLM runner, and a binary
+  Cortex-M, FPB, a generic CMSIS-FLM flash runner, and a binary
   DAP RPC server with a host-side GDB RSP translator.
 - **USB/IP:** an in-tree C module (`usbip`) implemented as an lwIP-RAW callback state
   machine with static buffer pools (no libc malloc on the network path), forwarding raw
@@ -324,7 +324,7 @@ do not present these as finished):
 | DUT connection | Pod side (suggested) | Status |
 |---|---|---|
 | DUT reset (nRST) | GP13 | assigned in code, not yet hardware-tested |
-| DUT UART bridge | GP4 TX, GP5 RX (UART1) | suggested; bridge not implemented |
+| DUT UART bridge | GP4 TX, GP5 RX (UART1) | suggested; TCP listener validated, DUT byte-path pending a loopback |
 | USB host (USB/IP) | native USB connector | cabling / VBUS / current limit unspecified |
 
 PIO block map (do not violate): PIO0 = free block (logic analyser OR SPI target), PIO1 =
