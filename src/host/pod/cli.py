@@ -429,6 +429,9 @@ def _format_pinmap(pins):
 
 def cmd_info(args):
     entry = _require_pod(args.label)
+    if getattr(args, "json", False):
+        print(json.dumps(entry, indent=2))
+        return 0
     print(f"Label:      {args.label}")
     print(f"Hostname:   {entry.get('hostname') or '(none)'}")
     for i, a in enumerate(entry.get("addr6") or []):
@@ -1252,6 +1255,8 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
     # info
     p = sub.add_parser("info", help="Show full details for a registered pod")
     p.add_argument("label")
+    p.add_argument("--json", action="store_true",
+                   help="Structured JSON output instead of the formatted fields")
 
     # exec (pod-side)
     p = sub.add_parser("exec", help="Execute MicroPython code on the POD itself")

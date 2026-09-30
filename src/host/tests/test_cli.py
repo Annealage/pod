@@ -156,6 +156,16 @@ class TestRegisterAndInfo:
         out, _ = capsys.readouterr()
         assert "proto-v1" in out
 
+    def test_info_json_flag_emits_full_registry_entry(self, monkeypatch, capsys):
+        self._register(monkeypatch)
+        capsys.readouterr()
+        monkeypatch.setattr(sys, "argv", ["pod", "info", "test-pod", "--json"])
+        main()
+        out, _ = capsys.readouterr()
+        parsed = json.loads(out)
+        assert parsed["addr4"] == "192.168.0.121"
+        assert parsed["carrier_id"] == "proto-v1"
+
     def test_info_missing_label_exits_nonzero(self, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["pod", "info", "no-such-pod"])
         with pytest.raises(SystemExit) as exc_info:
