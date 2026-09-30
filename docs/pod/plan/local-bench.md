@@ -1,6 +1,6 @@
 # Local bench: pod tooling for dev boards with a built-in probe
 
-Status: proposed, not started.
+Status: phases 1 and 2 built and hardware-validated on a NUCLEO-H563ZI; phase 3 in progress.
 
 ## Goal
 
@@ -48,7 +48,7 @@ The `dut_*` operations move behind a `DebugBackend` interface:
 
 pyOCD is a default dependency of the host package, so a new user with only a dev board gets a working bench from a plain install, with no pod and no extras.
 
-Results carry the backend name. The two flash paths differ (our FLM runner vs pyOCD's loader), so failures must be attributable.
+Results carry the backend name (`backend`, plus `pack` for pyOCD) on flash, erase and reset. The two flash paths differ (our FLM runner vs pyOCD's loader), so failures must be attributable.
 
 Unavailable operations (e.g. `bench_la` with no instruments route) return a "this bench has no X" error, not a missing tool.
 
@@ -58,9 +58,13 @@ Both backends resolve targets and flash algorithms from the same local pack cach
 
 - Resolution is unchanged and stays offline by default: explicit `.pack`/`.FLM` path, then the local cache, then a vendor download only with `allow_download=True`, into that same cache.
 - `PyocdBackend` asks `cmsis_pack.find_device(dut.target_family)` for the pack path and opens the session with pyOCD's `pack=<path>` option and `target_override=<family>`, so pyOCD loads the device (memory map, algorithms) from exactly the file the pod backend would use. pyOCD's built-in targets are not used when a pack device matches, so a family name means the same part on both backends.
-- `dut.flash_algorithm`, when set, is selected by name through `DeviceInfo.flash_algorithm(name=...)` and applied to the pyOCD flash region that covers `flash_base`, rather than left to pyOCD's default pick. Unset, both backends take the pack's default algorithm.
-- A new `pod pack` command (list / fetch / path, phase 2) becomes the single user-facing way to manage the cache; no pyOCD pack commands appear in docs or tool output.
+- `dut.flash_algorithm`, when set, cannot be selected in pyOCD: it loads only a pack's default algorithm per flash range and has no by-name choice. `PyocdBackend` therefore compares the declared name with the pack default at `flash_base` and refuses to flash or erase when they differ, rather than flash with a different algorithm than declared. Boards whose flash needs a non-default algorithm (e.g. the Arch Mix QSPI part) stay on a pod.
+- `pod pack` (list / fetch / path) becomes the single user-facing way to manage the cache; no pyOCD pack commands appear in docs or tool output.
 - Results record the pack file and algorithm name used, alongside the backend name.
+
+## Halt and session lifetime
+
+pyOCD sessions are per operation, but an ST-LINK resets the target when a session closes, which undoes a halt. A core halted by `dut_halt` or `dut_reset mode=halt` therefore keeps its session, and the probe lock, until it is resumed, reset, flashed or erased. That lasts for the process, so it holds across MCP calls but a one-shot `pod dut halt` cannot leave a core halted on such a probe.
 
 ## Contention
 
@@ -69,8 +73,8 @@ A route that bypasses the pod bypasses the pod's holder record. Every host-local
 ## Registration
 
 - Pods: unchanged. `pod register` / `register_pod` discovers via mDNS and writes the entry.
-- Route overrides: `pod bench set <label> uart --tty <by-id>` (and `debug --pyocd <uid>`, `instruments --pod <label>`).
-- Local benches: `pod bench add <label> --pyocd <uid> [--uart-tty ..] [--usb-tty ..] --family ..`, or `--from-mpy-dev <name>` to take the probe serial and ttys from the `mpy-dev` registry (it already links `nucleo-h5` to `nucleo-h5-linked`).
+- Route overrides: `pod route <label> uart tty --tty <by-id>` (and `debug pyocd --uid <uid>`, `instruments pod --pod <label>`).
+- Local benches: `pod local add <label> --family .. --pyocd <uid> [--uart-tty ..] [--usb-tty ..]`, or `--from-mpy-dev <name>` to take the probe serial and ttys from the `mpy-dev` registry (it already links `nucleo-h5` to `nucleo-h5-linked`).
 
 ## Phases and gates
 
