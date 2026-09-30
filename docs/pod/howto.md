@@ -96,6 +96,21 @@ toggles when the forwarder relays a `SET_CONFIGURATION`) is deferred until a
 non-REPL DUT actually exhibits it, since it needs a firmware reflash and cannot
 be validated against a reproduction today.
 
+## Drive a dev board with no pod
+
+A board with a built-in programmer (an ST-LINK on a Nucleo, a CMSIS-DAP probe) uses the same `dut` verbs with pyOCD on this host instead of a pod:
+
+```bash
+pod pack fetch Keil STM32H5xx_DFP
+pod local add nucleo-h5 --family STM32H563ZITx --from-mpy-dev nucleo-h5 \
+    --flash-base 0x08000000 --flash-size 0x200000
+pod dut flash nucleo-h5 firmware.elf
+pod bench uart nucleo-h5 --duration 5
+pod route nucleo-h5 instruments pod --pod lab1   # optional: borrow a pod's GPIO / ADC / logic analyser
+```
+
+Pod-side verbs (`pod exec`, `pod mount`) refuse such an entry. Routes, limits and locking are in [src/host/README.md](../../src/host/README.md#local-benches-no-pod); the design is in [plan/local-bench.md](plan/local-bench.md).
+
 ## Prerequisites
 
 **Host toolchain (to build pod firmware and debug DUTs):**

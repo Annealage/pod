@@ -192,6 +192,10 @@ GP0/GP1 survives the native-USB switch to host mode.
 
 ---
 
+### Local benches (no pod) `[validated]`
+
+Dev boards with a built-in programmer (validated on a NUCLEO-H563ZI with its ST-LINK) can be driven through the same `dut_*` / `pod dut` verbs without a pod. pyOCD (a default dependency) drives the probe from the host, using targets and flash algorithms from the shared CMSIS pack cache (`pod pack`). Each channel (debug, uart, usb, instruments) has a route, so a bench can stream its UART from a host tty, run `dut_exec` over its own USB serial port, and borrow a registered pod's GPIO / ADC / logic analyser. Limits: flash algorithms are the pack default only (boards needing a named algorithm stay on a pod), and an ST-LINK halt holds only for the life of the process. Capturing a bench's bus with a borrowed pod's logic analyser is not yet hardware-validated.
+
 ## MCP surface
 
 Transport is **stdio** via the `pod-mcp` console script that ships with the host tooling;

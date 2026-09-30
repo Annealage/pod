@@ -36,6 +36,7 @@ Wi-Fi), [hardware-setup.md](hardware-setup.md) (DUT wiring + pinout), and
 | Flash, debug, GDB, or set data watchpoints on a DUT | [debug-stack.md](debug-stack.md) |
 | Capture signals with the logic analyser | [logic-analyser.md](logic-analyser.md) |
 | Use the Pod as an I2C target, or drive GPIO / read ADC | [peripherals.md](peripherals.md) |
+| Drive a dev board with a built-in programmer (Nucleo, CMSIS-DAP) with no pod | [howto.md](howto.md#drive-a-dev-board-with-no-pod) |
 | See the capability list and what is shipping vs landing | [website-features.md](../website-features.md) |
 
 Notes on the debug row: [debug-stack.md](debug-stack.md) covers flashing (both the
