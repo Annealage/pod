@@ -55,6 +55,7 @@ requires-python = ">=3.10"
 dependencies = [
   "ampremote @ git+https://github.com/andrewleech/micropython@54a3b1ea5e8259eef7c7cc9c017ce06ecb0ac499#subdirectory=tools/mpremote",
   "pyelftools",
+  "pyocd",
   "zeroconf",
   "mcp<2",
 ]

@@ -33,7 +33,8 @@ from pod.registry import (
     reconcile_dut,
     dut_protect_ranges,
 )
-from pod.client import Pod, PodExecError, PodConflictError
+from pod.client import Pod, PodExecError, PodConflictError, LocalBenchError
+from pod.backend import debug_backend
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -745,7 +746,7 @@ def cmd_dut_exec(args):
 
 def cmd_dut_flash(args):
     entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = debug_backend(entry)
     addr = int(args.addr, 0) if isinstance(args.addr, str) else args.addr
     try:
         result = pod.flash_dut(args.image, target=args.target, addr=addr,
@@ -762,7 +763,7 @@ def cmd_dut_flash(args):
 def cmd_dut_erase(args):
     """Erase the entire DUT flash via the on-pod debug stack."""
     entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = debug_backend(entry)
     try:
         result = pod.erase_dut(keep_attached=args.keep_attached, force=args.force)
     except PodConflictError as exc:
@@ -774,7 +775,7 @@ def cmd_dut_erase(args):
 
 def cmd_dut_reset(args):
     entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = debug_backend(entry)
     try:
         result = pod.reset_dut(mode=args.mode, keep_attached=args.keep_attached,
                                force=args.force)
@@ -790,7 +791,7 @@ def cmd_dut_reg(args):
 
     Prints the current value when `value` is omitted; writes it when given.
     """
-    pod = Pod.from_entry(_require_pod(args.label))
+    pod = debug_backend(_require_pod(args.label))
     try:
         if args.value is None:
             result = pod.read_reg(args.reg)
@@ -815,7 +816,7 @@ def cmd_dut_mem(args):
     straight from pod RAM to the host file at --out with no size cap.
     """
     entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = debug_backend(entry)
     addr = int(args.addr, 0)
 
     if args.data is not None and args.out is not None:
@@ -852,7 +853,7 @@ def cmd_dut_mem(args):
 
 def cmd_dut_halt(args):
     """Halt the DUT core over SWD (hold it; no auto-resume)."""
-    pod = Pod.from_entry(_require_pod(args.label))
+    pod = debug_backend(_require_pod(args.label))
     try:
         result = pod.halt_dut(keep_attached=args.keep_attached, force=args.force)
     except PodConflictError as exc:
@@ -864,7 +865,7 @@ def cmd_dut_halt(args):
 
 def cmd_dut_resume(args):
     """Resume the DUT core over SWD."""
-    pod = Pod.from_entry(_require_pod(args.label))
+    pod = debug_backend(_require_pod(args.label))
     result = pod.resume_dut()
     print(result)
     return 0 if result.get("ok") else 1
@@ -872,7 +873,7 @@ def cmd_dut_resume(args):
 
 def cmd_dut_gdb(args):
     entry = _require_pod(args.label)
-    pod = Pod.from_entry(entry)
+    pod = debug_backend(entry)
     gdb_port = args.gdb_port or entry.get("gdb_port") or 3335
 
     def _announce(host, port):
@@ -918,7 +919,7 @@ def cmd_dut_identify(args):
     # IDs into the declared expected{} block.
     live = None
     if not args.no_probe:
-        pod = Pod.from_entry(entry)
+        pod = debug_backend(entry)
         try:
             live = pod.discover_dut()
         except Exception as exc:  # noqa: BLE001 - surfaced in the verdict
@@ -1172,7 +1173,76 @@ def cmd_bench_uart(args):
 # ── main ─────────────────────────────────────────────────────────────────
 
 
+
+def cmd_local_add(args):
+    from pod import local
+    fields = {}
+    if args.from_mpy_dev:
+        fields = local.from_mpy_dev(args.from_mpy_dev)
+    uid = args.pyocd or fields.get("uid")
+    if not uid:
+        print("--pyocd UID or --from-mpy-dev is required.", file=sys.stderr)
+        return 1
+    entry = local.bench_entry(
+        uid, args.family,
+        flash_base=int(args.flash_base, 0) if args.flash_base else None,
+        flash_size=int(args.flash_size, 0) if args.flash_size else None,
+        flash_algorithm=args.flash_algorithm,
+        uart_tty=args.uart_tty or fields.get("uart_tty"), baud=args.baud,
+        usb_tty=args.usb_tty or fields.get("usb_tty"),
+        instruments_pod=args.instruments_pod)
+    set_pod(args.label, entry)
+    print(json.dumps({args.label: entry}, indent=2))
+    return 0
+
+
+def cmd_route(args):
+    from pod import local
+    entry = _require_pod(args.label)
+    fields = {}
+    if args.tty:
+        fields["tty"] = args.tty
+    if args.baud:
+        fields["baud"] = args.baud
+    if args.uid:
+        fields["uid"] = args.uid
+    if args.pod:
+        fields["pod"] = args.pod
+    updated = local.set_route(entry, args.channel, args.via, **fields)
+    update_pod(args.label, **{args.channel: updated[args.channel]})
+    print(json.dumps({args.label: {args.channel: updated[args.channel]}}, indent=2))
+    return 0
+
+
+def cmd_pack(args):
+    from pod import cmsis_pack
+    if args.pack_command == "list":
+        print(f"cache: {cmsis_pack.cache_dir()}")
+        for path in cmsis_pack.local_packs():
+            print(path.name)
+        return 0
+    if args.pack_command == "fetch":
+        print(cmsis_pack.download_pack(args.vendor, args.name,
+                                       version=args.version))
+        return 0
+    try:
+        pack, _info = cmsis_pack.find_device(args.device)
+    except cmsis_pack.PackError as exc:
+        print(f"pod: {exc}", file=sys.stderr)
+        return 1
+    print(pack.path)
+    pack.close()
+    return 0
+
 def main():
+    try:
+        return _main()
+    except LocalBenchError as exc:
+        print(f"pod: {exc}", file=sys.stderr)
+        return 1
+
+
+def _main():
     parser = argparse.ArgumentParser(
         prog="pod",
         description="Discover and control Annealage Pods over Wi-Fi.",
@@ -1249,6 +1319,45 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
                    help="Overwrite existing label")
 
     # unregister
+    p = sub.add_parser(
+        "local", help="Register a local bench (a DUT with a host-attached probe)")
+    local_sub = p.add_subparsers(dest="local_command", metavar="action")
+    p = local_sub.add_parser("add", help="Add a bench driven through pyOCD")
+    p.add_argument("label")
+    p.add_argument("--family", required=True,
+                   help="CMSIS device name, e.g. STM32H563ZITx")
+    p.add_argument("--pyocd", metavar="UID", help="probe unique id")
+    p.add_argument("--from-mpy-dev", metavar="NAME",
+                   help="take the probe uid and ttys from the mpy-dev registry")
+    p.add_argument("--flash-base")
+    p.add_argument("--flash-size")
+    p.add_argument("--flash-algorithm")
+    p.add_argument("--uart-tty", metavar="BY_ID")
+    p.add_argument("--baud", type=int)
+    p.add_argument("--usb-tty", metavar="BY_ID")
+    p.add_argument("--instruments-pod", metavar="LABEL",
+                   help="borrow another registered pod's instruments")
+
+    p = sub.add_parser("route", help="Set how one channel of an entry is reached")
+    p.add_argument("label")
+    p.add_argument("channel", choices=("debug", "uart", "usb", "instruments"))
+    p.add_argument("via", help="pod | pyocd | tty | agent-direct | none")
+    p.add_argument("--uid", help="probe unique id (debug via pyocd)")
+    p.add_argument("--tty", help="serial device (uart via tty)")
+    p.add_argument("--baud", type=int)
+    p.add_argument("--pod", help="registry label of the pod (instruments via pod)")
+
+    p = sub.add_parser("pack", help="Manage the local CMSIS pack cache")
+    pack_sub = p.add_subparsers(dest="pack_command", metavar="action",
+                                required=True)
+    pack_sub.add_parser("list", help="List cached packs")
+    p = pack_sub.add_parser("fetch", help="Download a pack into the cache")
+    p.add_argument("vendor", help="e.g. Keil")
+    p.add_argument("name", help="e.g. STM32H5xx_DFP")
+    p.add_argument("--version")
+    p = pack_sub.add_parser("path", help="Print the cached pack holding a device")
+    p.add_argument("device", help="CMSIS device name, e.g. STM32H563ZITx")
+
     p = sub.add_parser("unregister", help="Remove a pod from the registry")
     p.add_argument("label")
 
@@ -1661,6 +1770,9 @@ registry: $POD_CONFIG_DIR/pods.json (default: ~/.config/pod/pods.json)""",
         "install-udev": cmd_install_udev,
         "open": cmd_repl,
         "open-raw": cmd_repl_raw,
+        "local": cmd_local_add,
+        "route": cmd_route,
+        "pack": cmd_pack,
     }[args.command]
 
     return handler(args)

@@ -462,7 +462,7 @@ class TestCliSubcommandSetIsExact:
         assert choices == {
             "discover", "list", "register", "unregister", "info", "exec",
             "mount", "cp", "pins", "flm", "install-udev", "open", "open-raw",
-            "dut", "bench",
+            "dut", "bench", "local", "route", "pack",
         }
         # Verbs that address the DUT or the bench instruments are reachable only
         # under their group, never at the top level. `open` is absent from this

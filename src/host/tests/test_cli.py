@@ -318,7 +318,7 @@ class TestGdbCommand:
         self._register(monkeypatch, capsys)
         fake_pod = MagicMock()
         fake_pod.gdb_endpoint.return_value = ("127.0.0.1", 5005)
-        monkeypatch.setattr(cli, "Pod", SimpleNamespace(from_entry=lambda entry: fake_pod))
+        monkeypatch.setattr(cli, "debug_backend", lambda entry: fake_pod)
         monkeypatch.setattr(sys, "argv", ["pod", "dut", "gdb", "gdb-pod"])
         ret = main()
         assert ret in (0, None)
@@ -333,7 +333,7 @@ class TestGdbCommand:
         self._register(monkeypatch, capsys, label="gdb-pod3", gdb_port=4321)
         fake_pod = MagicMock()
         fake_pod.gdb_endpoint.return_value = ("127.0.0.1", 6006)
-        monkeypatch.setattr(cli, "Pod", SimpleNamespace(from_entry=lambda entry: fake_pod))
+        monkeypatch.setattr(cli, "debug_backend", lambda entry: fake_pod)
         monkeypatch.setattr(sys, "argv", ["pod", "dut", "gdb", "gdb-pod3"])
         main()
         kwargs = fake_pod.gdb_endpoint.call_args.kwargs
@@ -343,7 +343,7 @@ class TestGdbCommand:
         self._register(monkeypatch, capsys, label="gdb-pod4")
         fake_pod = MagicMock()
         fake_pod.gdb_endpoint.return_value = ("127.0.0.1", 7007)
-        monkeypatch.setattr(cli, "Pod", SimpleNamespace(from_entry=lambda entry: fake_pod))
+        monkeypatch.setattr(cli, "debug_backend", lambda entry: fake_pod)
         monkeypatch.setattr(sys, "argv", [
             "pod", "dut", "gdb", "gdb-pod4",
             "--listen-port", "9999",

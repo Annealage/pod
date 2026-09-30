@@ -30,7 +30,9 @@ import time
 from pod.discovery import discover_pods as _discover_pods
 from pod.registry import (get_pod, update_pod, reconcile_dut,
                           dut_protect_ranges)
-from pod.client import Pod, PodExecError, PodConflictError, DEFAULT_SWD_CLKDIV
+from pod.client import (Pod, PodExecError, PodConflictError, LocalBenchError,
+                        DEFAULT_SWD_CLKDIV)
+from pod.backend import debug_backend
 from pod.target import PodUnreachable
 from pod import enroll
 
@@ -80,6 +82,11 @@ def _entry_for(label: str) -> dict:
 def _pod_for(label: str) -> Pod:
     """Resolve a registry label to a Pod client, or raise KeyError."""
     return Pod.from_entry(_entry_for(label))
+
+
+def _debug_for(label: str):
+    """Resolve a registry label to its debug backend, or raise KeyError."""
+    return debug_backend(_entry_for(label))
 
 
 # ── pod: the managed device itself ─────────────────────────────────────────
@@ -604,7 +611,7 @@ def handle_dut_identify(label: str, adopt: bool = False) -> dict:
     the live ids into the declared expected{} block first.
     """
     entry = _entry_for(label)
-    pod = Pod.from_entry(entry)
+    pod = debug_backend(entry)
     try:
         live = pod.discover_dut()
     except Exception as exc:  # noqa: BLE001 - surfaced in the verdict
@@ -626,22 +633,22 @@ def handle_dut_halt(label: str, keep_attached: bool = False,
     detaches a live USB/IP session first unless keep_attached. Shares the
     usbip guard with flash/erase/reset, so it also refuses when another
     caller holds that session, naming them, unless force=True bumps it."""
-    return _pod_for(label).halt_dut(keep_attached=keep_attached, force=force)
+    return _debug_for(label).halt_dut(keep_attached=keep_attached, force=force)
 
 
 def handle_dut_resume(label: str) -> dict:
     """Resume the DUT core over SWD after a dut_halt / dut_reset mode='halt'."""
-    return _pod_for(label).resume_dut()
+    return _debug_for(label).resume_dut()
 
 
 def _read_reg(label: str, reg) -> dict:
     """Read one DUT core register over SWD (core must be halted first)."""
-    return _pod_for(label).read_reg(reg)
+    return _debug_for(label).read_reg(reg)
 
 
 def _write_reg(label: str, reg, value: int) -> dict:
     """Write one DUT core register over SWD (core must be halted first)."""
-    return _pod_for(label).write_reg(reg, value)
+    return _debug_for(label).write_reg(reg, value)
 
 
 def handle_dut_reg(label: str, reg, value: int = None) -> dict:
@@ -654,19 +661,19 @@ def handle_dut_reg(label: str, reg, value: int = None) -> dict:
 
 def _read_mem_inline(label: str, addr: int, length: int) -> dict:
     """Read DUT memory over SWD, returned inline as hex (<= 4096 bytes)."""
-    return _pod_for(label).read_mem(addr, length)
+    return _debug_for(label).read_mem(addr, length)
 
 
 def _write_mem(label: str, addr: int, data_hex: str) -> dict:
     """Write DUT memory over SWD; refuses the declared flash + code region."""
     entry = _entry_for(label)
-    return Pod.from_entry(entry).write_mem(
+    return debug_backend(entry).write_mem(
         addr, data_hex, protect=dut_protect_ranges(entry))
 
 
 def _read_mem_to_file(label: str, addr: int, length: int, out_path: str) -> str:
     """Read DUT memory to a host file via the pod (streamed, no pod FS)."""
-    pod = _pod_for(label)
+    pod = _debug_for(label)
     return pod.read_dut(addr, length, out_path)
 
 
@@ -715,7 +722,7 @@ def handle_dut_gdb(label: str, listen_port: int = 0) -> dict:
         return {"endpoint": sess["endpoint"], "gdb_port": sess["gdb_port"],
                 "label": label}
 
-    pod = Pod.from_entry(entry)
+    pod = debug_backend(entry)
     gdb_port = entry.get("gdb_port") or 3335
     ready = threading.Event()
     bound: dict = {}
@@ -766,10 +773,11 @@ def handle_dut_flash(label: str, image: str, target: str = None,
     that session, naming them, unless force=True bumps it - the result then
     carries stole_from.
     """
-    pod = _pod_for(label)
-    return pod.flash_dut(image, target=target, addr=addr,
-                         keep_attached=keep_attached, mass_erase=mass_erase,
-                         force=force)
+    backend = _debug_for(label)
+    return dict(backend.flash_dut(image, target=target, addr=addr,
+                                  keep_attached=keep_attached,
+                                  mass_erase=mass_erase, force=force),
+                backend=backend.backend_name)
 
 
 def handle_dut_erase(label: str, clkdiv: int = DEFAULT_SWD_CLKDIV,
@@ -785,8 +793,9 @@ def handle_dut_erase(label: str, clkdiv: int = DEFAULT_SWD_CLKDIV,
     another caller holds it, naming them, unless force=True bumps it.
     Returns {ok, ms, err[, stole_from]}.
     """
-    return _pod_for(label).erase_dut(clkdiv=clkdiv,
-                                     keep_attached=keep_attached, force=force)
+    backend = _debug_for(label)
+    return dict(backend.erase_dut(clkdiv=clkdiv, keep_attached=keep_attached,
+                                  force=force), backend=backend.backend_name)
 
 
 def handle_dut_flm(label: str, device: str = None, pack: str = None,
@@ -842,8 +851,9 @@ def handle_dut_reset(label: str, mode: str = "sysreset",
     it, naming them, unless force=True bumps it (the result then carries
     stole_from).
     """
-    pod = _pod_for(label)
-    return pod.reset_dut(mode=mode, keep_attached=keep_attached, force=force)
+    backend = _debug_for(label)
+    return dict(backend.reset_dut(mode=mode, keep_attached=keep_attached,
+                                  force=force), backend=backend.backend_name)
 
 
 # ── dut: USB/IP link ────────────────────────────────────────────────────────
@@ -2235,6 +2245,8 @@ def build_server():
             # refusal this client made from its own holder-record read.
             return _fail("conflict", str(exc), tool=name, resource=exc.resource,
                          held_by=exc.holder, caller=exc.caller, retryable=True)
+        except LocalBenchError as exc:
+            return _fail("no_pod", str(exc), tool=name, retryable=False)
         except PodUnreachable as exc:
             # No tier yielded an identity-confirmed target - unreachable, or a
             # DHCP-moved IPv4 whose fingerprint did not match. Distinct from a

@@ -24,6 +24,8 @@ import time
 import subprocess as _subprocess
 from typing import Callable, List, Optional
 
+from pod.backend import DebugBackend, check_write_protect
+from pod.routes import is_local_bench
 from pod.target import TargetResolver
 
 
@@ -239,6 +241,10 @@ class PodExecError(RuntimeError):
                (": " + last) if last else "", hint))
 
 
+class LocalBenchError(RuntimeError):
+    """A pod operation was asked of a bench that has no pod."""
+
+
 class PodConflictError(RuntimeError):
     """A displacing operation was refused because another caller holds the
     resource it would tear down. Raised host-side, before any pod round trip
@@ -258,8 +264,13 @@ class PodConflictError(RuntimeError):
             % (resource, who, caller or "unknown"))
 
 
-class Pod:
-    """Control client for a single Annealage Pod over ampremote socket transport."""
+class Pod(DebugBackend):
+    """Control client for a single Annealage Pod over ampremote socket transport.
+
+    Also the pod debug backend: the on-pod SWD stack behind the ``dut_*`` ops.
+    """
+
+    backend_name = "pod"
 
     def __init__(
         self,
@@ -323,7 +334,12 @@ class Pod:
         which is the CMSIS device name the generic FLM path resolves a pack
         with, and the declared flash_algorithm, which picks one of that
         device's algorithms when the board's flash is not the pack default.
+
+        Raises LocalBenchError for an entry with no pod handles.
         """
+        if is_local_bench(entry):
+            raise LocalBenchError(
+                "this entry is a local bench with no pod; the operation needs a pod")
         pod = cls(
             address=entry.get("address"),
             repl_port=entry.get("repl_port", 8266),
@@ -1454,12 +1470,9 @@ class Pod:
         nbytes = len(data_hex) // 2
         if nbytes > self._MAX_MEM:
             raise ValueError("data %d bytes exceeds %d" % (nbytes, self._MAX_MEM))
-        end = addr + nbytes
-        for lo, hi in (protect or []):
-            if addr < hi and end > lo:
-                return {"ok": False, "addr": addr,
-                        "err": "addr 0x%08x..0x%08x overlaps write-protected "
-                        "0x%08x..0x%08x" % (addr, end, int(lo), int(hi))}
+        refused = check_write_protect(addr, nbytes, protect)
+        if refused:
+            return refused
         prot_arg = ("None" if not protect
                     else repr([[int(lo), int(hi)] for lo, hi in protect]))
         return _last_dict(self.exec(
