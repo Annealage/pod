@@ -109,6 +109,9 @@ Cross-cutting plans (standalone docs in this dir, not a single numbered phase):
   2026-09-04), with the persistent DUT session as the default path and the
   one-shot named as such. A single pre-announcement cutover with no aliases;
   the CLI nests onto the same taxonomy in the same pass.
+- `local-bench.md` - per-channel routes in the registry (debug / uart / usb /
+  instruments) so the host tooling drives dev boards with a built-in probe via
+  pyOCD, and a bench can borrow a pod's instruments. Pod registration unchanged.
 - `carrier-hardware.md` - the desirable-features spec for a future custom carrier
   PCB (power switching + remote power-cycle recovery, INA228 telemetry, DUT-USB
   power control/measurement, level translation, connectors). Draft, gated on the
