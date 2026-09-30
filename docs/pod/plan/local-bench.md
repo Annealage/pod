@@ -1,6 +1,6 @@
 # Local bench: pod tooling for dev boards with a built-in probe
 
-Status: phases 1 and 2 built and hardware-validated on a NUCLEO-H563ZI; phase 3 in progress.
+Status: built. Validated on hardware: pyOCD identify/flash (bin and ELF)/erase/reset/halt/regs/mem/gdb and the host lock on a NUCLEO-H563ZI, `dut_exec` and UART tail over its host ttys, pod-a and pod-b identify/reset through the backend split, and pod-b's GPIO borrowed from the Nucleo entry. Not validated: capturing the Nucleo's SPI with pod-b's logic analyser (needs wiring between them), and moving pod-b's own UART to a host tty.
 
 ## Goal
 
@@ -48,7 +48,7 @@ The `dut_*` operations move behind a `DebugBackend` interface:
 
 pyOCD is a default dependency of the host package, so a new user with only a dev board gets a working bench from a plain install, with no pod and no extras.
 
-Results carry the backend name (`backend`, plus `pack` for pyOCD) on flash, erase and reset. The two flash paths differ (our FLM runner vs pyOCD's loader), so failures must be attributable.
+Results carry the backend name on flash, erase and reset (`backend`, plus `pack` from pyOCD). The two flash paths differ (our FLM runner vs pyOCD's loader), so failures must be attributable.
 
 Unavailable operations (e.g. `bench_la` with no instruments route) return a "this bench has no X" error, not a missing tool.
 
