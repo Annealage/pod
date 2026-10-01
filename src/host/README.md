@@ -12,26 +12,25 @@ the GDB debug-command server (port 3335). The on-pod side is
 
 ## Install
 
+From the repository root, install the CLI and MCP server into an isolated tool environment:
+
 ```bash
-cd src/host
-pip install -e .            # console scripts: `pod`, `pod-mcp`
-pip install -e .[dev]       # + pytest, to run the suite
+uv tool install .
 ```
 
-Requirements:
-- `ampremote` (Andrew's async `mpremote` fork - improved TCP + raw-REPL
-  support). It is NOT on PyPI; `pip install -e .` pulls it straight from GitHub
-  at the commit pinned in `pyproject.toml` (the source of truth for the exact
-  revision), installing both the `ampremote` console script (the REPL transport)
-  and the `mpremote` import (used by the persistent `pod open` session). This
-  build has no `resume` subcommand; `connect socket://HOST:PORT exec ...` does
-  not soft-reset by default, which is what the client relies on.
-- `zeroconf` for mDNS discovery and `mcp` for `pod-mcp`. `mcp` is pinned below
-  2.0 as 2.x dropped the decorator API `build_server` uses.
-- The pod must have `annealage_pod.debug` resident at `/lib` for the DUT
-  flash/reset/read verbs (deploy steps in `../../docs/pod/debug-stack.md`).
+This installs the `pod` and `pod-mcp` commands and their dependencies, including the `ampremote` fork pinned in the root `pyproject.toml`. The package source is included from `src/host`, so there is no need to change directory or initialise the firmware submodule. The install needs Python 3.10+, `uv`, network access and `git` for the GitHub dependency. It does not compile firmware.
 
-You can also run without installing: `cd src/host && python -m pod.cli ...`.
+Register the server with Claude Code:
+
+```bash
+claude mcp add pod -- pod-mcp
+```
+
+To use the checkout live while developing, use `uv tool install --editable .` from the repository root. For the host test dependencies, run `uv sync --extra dev` from the root, then `uv run pytest` (or `python -m pytest` from `src/host`).
+
+The `ampremote` fork (Andrew's async `mpremote` fork with improved TCP + raw-REPL support) is not on PyPI. It is installed from the GitHub revision pinned in the root `pyproject.toml`; it provides both the `ampremote` console script and the `mpremote` import used by persistent sessions. Its build has no `resume` subcommand; `connect socket://HOST:PORT exec ...` does not soft-reset by default, which is what the client relies on. `mcp` is pinned below 2.0 because 2.x dropped the decorator API used by `pod-mcp`.
+
+The pod must have `annealage_pod.debug` resident at `/lib` for the DUT flash/reset/read verbs (deploy steps in `../../docs/pod/debug-stack.md`).
 
 ## CLI
 

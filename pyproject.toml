@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "annealage-pod-host"
+version = "0.1.0"
+description = "Host-side tooling for the Annealage Pod hardware-in-the-loop test rig."
+readme = "src/host/README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+#
+# ampremote is Andrew's mpremote fork, installed from a pinned GitHub revision
+# because it provides the socket transport and both the `ampremote` CLI and
+# `mpremote` import used by this package. Do not install upstream mpremote beside
+# it: both claim the same import name. The source is the micropython repository's
+# tools/mpremote subdirectory, not a PyPI release.
+#
+# Pin a commit for reproducible installs. This commit is also the ampremote
+# branch tip and has the version-tag matching fix required when installing from
+# a non-version-tagged commit.
+#
+# MCP is capped below 2.0 because pod-mcp uses the decorator API removed in 2.x.
+dependencies = [
+  "ampremote @ git+https://github.com/andrewleech/micropython@54a3b1ea5e8259eef7c7cc9c017ce06ecb0ac499#subdirectory=tools/mpremote",
+  "pyelftools",
+  "pyocd",
+  "zeroconf",
+  "mcp<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+pod = "pod.cli:main"
+pod-mcp = "pod.mcp_server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src/host"}
+
+[tool.setuptools.packages.find]
+where = ["src/host"]
+include = ["pod*"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/host/tests"]
+pythonpath = ["src/host"]

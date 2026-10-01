@@ -117,26 +117,14 @@ Pod-side verbs (`pod exec`, `pod mount`) refuse such an entry. Routes, limits an
 `arm-none-eabi-gcc` (and `arm-none-eabi-gdb` for the GDB recipe), `cmake`, and
 `make` / `ninja`.
 
-**Host `pod` tooling (pre-launch, from source):** the repo is private pre-launch,
-so clone it and install from the checkout. Needs Python 3.10+, plus network + git
-because the `ampremote` dependency is a git-only fork (not on PyPI, pulled at the
-commit pinned in `pyproject.toml`):
+**Host `pod` tooling (from source):** install from the repository root with Python 3.10+, `uv`, network access and `git` (the pinned `ampremote` dependency is fetched from GitHub):
 
 ```bash
-cd src/host
-uv tool install --editable . --force   # console scripts: pod, pod-mcp
+uv tool install .
+claude mcp add pod -- pod-mcp
 ```
 
-Install it **editable**. A plain (non-editable) install copies the package into
-site-packages, so the `pod` on your PATH keeps running that copy while the
-checkout moves on: new CLI options are rejected and new modules appear missing,
-with nothing to indicate the code being run is stale.
-`pip install -e ./src/host` works the same way if you prefer pip.
-
-`pyproject.toml` caps `mcp` below 2.0; do not install `mcp` over the top of it.
-2.x drops the decorator API the MCP server is built on, so an uncapped resolve
-leaves `pod-mcp` failing at startup with `AttributeError: 'Server' object has no
-attribute 'list_tools'`.
+This installs the `pod` CLI and `pod-mcp` server in an isolated environment. It does not build firmware or initialise the MicroPython submodule. The root `pyproject.toml` pins `mcp<2`; do not override it, since MCP 2.x removed the decorator API used by `pod-mcp`.
 
 **USB/IP (Linux host, for the USB/IP recipe):** the standard `usbip` client and
 the `vhci_hcd` kernel module, and passwordless `sudo` for `usbip` so `pod dut link up`

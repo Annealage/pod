@@ -74,12 +74,12 @@ That is the "reach into hardware" made concrete: an agent flashes, halts, inspec
 
 ## Quickstart
 
-1. **Build and flash the pod firmware**: `make` builds `firmware.uf2`. On a fresh Pico with no probe, hold BOOTSEL while plugging in USB and drag `firmware.uf2` onto the mounted `RPI-RP2` drive. With a wired CMSIS-DAP probe, `make flash` programs it over SWD with both cores halted (safe to reflash a pod that is already running). Set Wi-Fi credentials in `config.py` (template `config.example.py`).
-2. **Wire the DUT** to the pod, at minimum SWD: pod `GP14` -> SWDIO, `GP15` -> SWCLK, and a common ground.
-3. **Install the host tooling**: `cd src/host && pip install -e .` (console scripts `pod` and `pod-mcp`; pulls the `ampremote` fork from git).
-4. **Find and register the pod**: `pod discover`, then `pod register <label>` (browses mDNS, stores the pod's handles and identity fingerprint).
-5. **Drive the DUT**: `pod dut flash <label> firmware.bin`, `pod dut reset <label>`, `pod dut gdb <label>` (prints a `target extended-remote host:port` for your gdb), `pod bench la <label> --pins 16-19 --out cap.vcd`, `pod dut open <label>`.
-6. **For an agent**: `claude mcp add pod -- pod-mcp`, then the tools above are available over Wi-Fi.
+1. **Install the host tooling** from the repository root with `uv tool install .`. This installs `pod` and `pod-mcp`, including the pinned `ampremote` dependency from GitHub; it does not build firmware.
+2. **Connect the MCP server** with `claude mcp add pod -- pod-mcp`. The server uses stdio and connects to registered Pods over Wi-Fi.
+3. **Build and flash firmware only if needed**: `make` builds `firmware.uf2` and automatically initialises the pinned MicroPython checkout plus the RP2 port's required submodules. It does not recursively fetch dependencies for other MicroPython ports. On a fresh Pico with no probe, hold BOOTSEL while plugging in USB and drag `firmware.uf2` onto the mounted `RPI-RP2` drive. With a wired CMSIS-DAP probe, `make flash` programs it over SWD with both cores halted. Set Wi-Fi credentials in `config.py` (template `config.example.py`).
+4. **Wire the DUT** to the pod, at minimum SWD: pod `GP14` -> SWDIO, `GP15` -> SWCLK, and a common ground.
+5. **Find and register the pod**: `pod discover`, then `pod register <label>` (browses mDNS, stores the pod's handles and identity fingerprint).
+6. **Drive the DUT**: `pod dut flash <label> firmware.bin`, `pod dut reset <label>`, `pod dut gdb <label>` (prints a `target extended-remote host:port` for your gdb), `pod bench la <label> --pins 16-19 --out cap.vcd`, `pod dut open <label>`.
 
 Ports: socket REPL `8266`, USB/IP `3240`, GDB/DAP RPC `3335`, flash-in `3333`, memory-out `3334`, logic-analyser-out `3336`.
 

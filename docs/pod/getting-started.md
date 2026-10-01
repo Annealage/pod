@@ -15,7 +15,7 @@ run a first flash and debug.
 Build with the top-level Makefile, then put the firmware on a Pico 2 W:
 
 ```bash
-make                # build firmware.uf2 + firmware.elf
+make                # auto-initialises the MicroPython checkout and RP2-only dependencies; builds firmware.uf2 + firmware.elf
 ```
 
 - **Fresh Pico, no probe:** hold BOOTSEL while plugging in USB, then drag
@@ -41,19 +41,21 @@ Copy `config.py` to the Pod (over the USB-CDC REPL or Wi-Fi) and reset. See the
 
 ## 3. Install the host tooling
 
-From source (the repo is private pre-launch; the `ampremote` dependency is a
-git-only fork, so this needs network and git):
+From the repository root, install the CLI and MCP server in an isolated tool environment:
 
 ```bash
-cd src/host
-uv tool install --editable . --force
+uv tool install .
 ```
 
-This installs the `pod` CLI and the `pod-mcp` server. Install it **editable**: a
-plain install copies the package into site-packages, so the `pod` on your PATH
-silently keeps running that snapshot as the checkout moves on.
-(`pip install -e ./src/host` is equivalent.) Usage, the `Pod` Python
-client, and the MCP tool list:
+This installs `pod` and `pod-mcp` with the pinned GitHub `ampremote` dependency. It does not build firmware or initialise the MicroPython submodule; Python 3.10+, `uv`, network access and `git` are needed.
+
+Register the MCP server with Claude Code:
+
+```bash
+claude mcp add pod -- pod-mcp
+```
+
+More host CLI, Python client and MCP details are in
 [../../src/host/README.md](../../src/host/README.md).
 
 ## 4. Discover and register the Pod
