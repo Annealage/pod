@@ -15,9 +15,10 @@
 #                           is flashed over USB in BOOTSEL mode.
 # Select one with BOARD=; ANNEALAGE_POD_RP2350 is the default.
 #
-# The MicroPython integration branch (tessera) is composed by mbm from the
-# feature branches listed in mbm.toml; the src/micropython submodule must be
-# checked out on tessera before building (see mbm.toml).
+# The MicroPython integration branch (tessera) is pinned as a git submodule.
+# Build targets initialise that top-level submodule without recursively fetching
+# every port's dependencies; the RP2 port's own `submodules` target fetches only
+# what this firmware build needs.
 #
 # Usage:
 #   make                       # build the default board (.uf2 + .elf)
@@ -68,8 +69,14 @@ PTCACHE ?= $(HOME)/.cache/picotool-sdk
 
 .DEFAULT_GOAL := firmware
 
+.PHONY: init-micropython
+init-micropython: ## Initialise the pinned MicroPython checkout only (no nested recursion)
+	@if [ ! -e $(MPY_DIR)/.git ]; then \
+		git submodule update --init -- $(MPY_DIR); \
+	fi
+
 .PHONY: firmware
-firmware: mpy-cross ## Build the pod firmware (.uf2 + .elf)
+firmware: mpy-cross submodules ## Build the pod firmware (.uf2 + .elf)
 	@# Configure with the picotool fetch flag if the build dir is not yet
 	@# configured. The rp2 port Makefile's auto-configure omits it, so a fresh
 	@# build (e.g. after `make clean`) dies at the pico-sdk picotool version gate
@@ -82,11 +89,11 @@ firmware: mpy-cross ## Build the pod firmware (.uf2 + .elf)
 	@echo "built: $(BUILD)/firmware.uf2"
 
 .PHONY: mpy-cross
-mpy-cross: ## Build the mpy-cross compiler (needed to freeze the manifest)
+mpy-cross: init-micropython ## Build the mpy-cross compiler (needed to freeze the manifest)
 	$(MAKE) -C $(MPY_DIR)/mpy-cross -j$(JOBS)
 
 .PHONY: submodules
-submodules: ## Initialise the MicroPython submodules this board needs
+submodules: init-micropython ## Initialise only the MicroPython submodules this board needs
 	$(MAKE) -C $(RP2_PORT) BOARD_DIR=$(BOARD_DIR) submodules
 
 .PHONY: flash
