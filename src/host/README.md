@@ -26,6 +26,8 @@ Register the server with Claude Code:
 claude mcp add pod -- pod-mcp
 ```
 
+`pod_register` is only for a network Pod discovered over mDNS. To add a board plugged directly into this host with a debugger such as MCU-Link, register it from the host CLI with `pod local add <label> --family <CMSIS-device> (--pyocd <probe-uid> | --from-mpy-dev <mpy-dev-name>)`. Add `--usb-tty /dev/serial/by-id/...` for its direct USB/CDC route; after that, MCP `dut_` tools can use the local bench label. This registration command is not currently exposed as an MCP tool.
+
 To use the checkout live while developing, use `uv tool install --editable .` from the repository root. For the host test dependencies, run `uv sync --extra dev` from the root, then `uv run pytest` (or `python -m pytest` from `src/host`).
 
 The `ampremote` fork (Andrew's async `mpremote` fork with improved TCP + raw-REPL support) is not on PyPI. It is installed from the GitHub revision pinned in the root `pyproject.toml`; it provides both the `ampremote` console script and the `mpremote` import used by persistent sessions. Its build has no `resume` subcommand; `connect socket://HOST:PORT exec ...` does not soft-reset by default, which is what the client relies on. `mcp` is pinned below 2.0 because 2.x dropped the decorator API used by `pod-mcp`.

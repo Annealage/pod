@@ -1186,11 +1186,14 @@ def build_server():
             Tool(
                 name="pod_register",
                 description=(
-                    "Discover a pod via mDNS and register it under a label, "
+                    "Discover and register a network Annealage Pod via mDNS, "
                     "storing its stable handles (hostname + IPv6 + IPv4) and "
-                    "reading its identity fingerprint. Use to enroll a "
-                    "freshly-flashed pod by name without a hand-copied address. "
-                    "Overwrites an existing label."),
+                    "reading its identity fingerprint. This is only for a "
+                    "network Pod, not a board connected directly to this host. "
+                    "For a local bench, use the host CLI `pod local add "
+                    "<label> --family <CMSIS-device> (--pyocd <probe-uid> | "
+                    "--from-mpy-dev <name>)`; local bench registration is not "
+                    "currently an MCP tool. Overwrites an existing label."),
                 inputSchema={
                     "type": "object",
                     "additionalProperties": False,

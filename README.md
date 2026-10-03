@@ -70,6 +70,9 @@ claude mcp add pod -- pod-mcp
 
 A CLI invocation is derivable from a tool name and back: MCP `dut_flash` is `pod dut flash`, MCP `bench_la` is `pod bench la`.
 
+A directly attached board with a host-connected debugger is a local bench, not a Pod: there is no MCP registration tool for it. Register it once from the host with `pod local add <label> --family <CMSIS-device> (--pyocd <probe-uid> | --from-mpy-dev <name>)`, then use the `dut_` tools against that label. `pod_register` only enrolls a network Pod found through mDNS.
+
+
 That is the "reach into hardware" made concrete: an agent flashes, halts, inspects, and re-flashes a real board without a human in the wire.
 
 ## Quickstart
